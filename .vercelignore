@@ -1,0 +1,19 @@
+# Vercel re-installs from package.json during build, never upload these.
+node_modules
+dist
+.vercel
+
+# Local-dev only — Vercel uses /api/*.js directly.
+server
+
+# Docs — bloat the deployment.
+*.md
+!README.md
+
+# Misc
+.DS_Store
+npm-debug.log*
+.env
+.env.*
+.git
+.gitignore

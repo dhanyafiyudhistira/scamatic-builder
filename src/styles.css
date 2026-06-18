@@ -1,0 +1,164 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body, html, #root { width: 100%; height: 100%; }
+body { font-family: Arial, sans-serif; background-color: #c0c0c0; }
+
+.shell { width: 100%; height: 100%; display: flex; flex-direction: column; }
+.top-header {
+  height: 60px; background-color: #1a4ab2; color: #fff; display: flex;
+  align-items: center; justify-content: space-between; border-bottom: 4px solid #4a86ff; position: relative;
+}
+.header-left-design {
+  width: 40px; height: 100%; background-color: #c0c0c0;
+  clip-path: polygon(0 0, 100% 0, 40% 100%, 0% 100%); position: absolute; left: 0;
+}
+.header-title { flex: 1; text-align: center; font-size: 1.5rem; font-weight: 800; letter-spacing: 1px; padding-left: 40px; }
+.header-info-box {
+  width: 160px; background-color: #0d3284; height: 100%; display: flex; flex-direction: column;
+  justify-content: center; padding: 0 10px; font-family: Consolas, monospace; font-size: .85rem; border-left: 2px solid #4a86ff;
+}
+.info-row { display: flex; justify-content: space-between; }
+.main-layout { display: flex; flex: 1; min-height: 0; }
+.content-area { flex: 1; padding: 12px; overflow: auto; }
+
+.sidebar-right {
+  width: 150px; background-color: #808080; display: flex; flex-direction: column;
+  padding: 5px; gap: 5px; border-left: 2px solid #404040;
+}
+.panel-label { background-color: #b0b0b0; color: #fff; text-align: center; padding: 10px 0; font-weight: bold; font-size: .9rem; border: 1px solid #fff; }
+.menu-btn {
+  width: 100%; height: 50px; background-color: #a0a0a0; border: 2px solid #eee; border-right-color: #444; border-bottom-color: #444;
+  color: #000; cursor: pointer; font-size: .8rem; font-weight: bold; text-transform: uppercase;
+}
+
+.scada-placeholder-wrap {
+  width: 100%;
+  height: 102vh;          /* 120 % of previous 85 vh */
+  min-height: 480px;      /* floor so it never collapses on small screens */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.scada-placeholder-wrap > div {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+}
+
+.scada-placeholder-wrap svg {
+  width: 100%;            /* was 90 % — fills the full width now */
+  height: 100%;
+  object-fit: contain;
+}
+
+.menu-btn.active { background-color: #d0d0d0; border: 2px inset #fff; color: #004c99; }
+.menu-btn.exit { margin-top: auto; background-color: #cc4444; color: #fff; border-color: #ff8888; }
+
+.card {
+  background: #d7d7d7; border: 2px solid #9a9a9a; box-shadow: inset 0 0 0 1px #f5f5f5;
+  padding: 14px; margin-bottom: 12px;
+}
+.card h3 { margin-bottom: 10px; }
+.grid-home { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.grid-home .full { grid-column: 1 / -1; }
+.lamp-group { display: flex; gap: 24px; }
+.status-lamp { display: flex; gap: 8px; align-items: center; }
+.lamp { width: 14px; height: 14px; border-radius: 50%; display: inline-block; border: 1px solid #333; }
+.lamp.on { background: #20d020; box-shadow: 0 0 8px #20d020; }
+.lamp.off { background: #8f2f2f; }
+.kpi-list { display: grid; gap: 8px; }
+.kpi-list div { display: grid; gap: 2px; }
+.topology { display: flex; gap: 8px; font-weight: bold; margin-bottom: 8px; }
+.operator { color: #20355f; font-weight: bold; }
+.scada-placeholder-wrap { margin-bottom: 0; }
+.placeholder-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; margin-bottom: 8px; }
+.placeholder-head span { color: #3c4f72; font-size: .9rem; }
+.scada-svg-placeholder {
+  width: 100%;
+  height: min(44vh, 420px);
+  display: block;
+  border: 1px solid #778aa7;
+  background: #1d2430;
+}
+
+.settings-grid { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.setting-row { display: grid; grid-template-columns: 1fr 120px; align-items: center; gap: 10px; margin: 8px 0; }
+.setting-row input, .setting-row select, .trend-tools select, .trend-tools button {
+  border: 1px solid #666; background: #efefef; padding: 6px;
+}
+
+/* ── Grey-metallic theme (design.md §3, §7) ──────────────────────────────
+   4-stop brushed-aluminium gradient + double-bevel inset. The 35/55 stops
+   create the thin shadow band that makes it read as metal rather than a
+   plain web gradient. */
+.card-metallic {
+  background: linear-gradient(180deg,
+    #dadcde 0%,
+    #b3b6ba 35%,
+    #8e9197 55%,
+    #aeb1b6 100%);
+  border: 2px solid #6f7278;
+  box-shadow:
+    inset 0  1px 0 #ecedef,
+    inset 0 -1px 0 #5d6066;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  color: #1f2937;
+}
+.card-metallic h3 {
+  color: #0f172a;
+  text-shadow: 0 1px 0 #ecedef;
+  letter-spacing: 0.4px;
+  margin-bottom: 10px;
+}
+.card-metallic .setting-row span {
+  color: #1f2937;
+  font-weight: 700;
+  font-size: .82rem;
+  text-shadow: 0 1px 0 #ecedef;
+  letter-spacing: 0.3px;
+}
+/* Inputs become "dark instrument" inset into the metal plate */
+.card-metallic .setting-row input,
+.card-metallic .setting-row select {
+  background: #0b0e13;
+  border: 1px solid #1f2533;
+  color: #d8d9da;
+  padding: 6px 8px;
+  font-family: monospace;
+  font-size: .82rem;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6);
+  outline: none;
+}
+.card-metallic .setting-row input::placeholder {
+  color: #4a5568;
+}
+.card-metallic .setting-row input:focus,
+.card-metallic .setting-row select:focus {
+  border-color: #06b6d4;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6), 0 0 0 1px #06b6d4;
+}
+
+.trend-card { display: grid; gap: 12px; }
+.trend-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.trend-tools { display: flex; gap: 6px; }
+.trend-grid { display: grid; gap: 10px; }
+.mini-chart { width: 100%; height: 140px; background: #1c2028; border: 1px solid #3b4557; }
+
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, .45); display: grid; place-items: center;
+}
+.modal {
+  width: min(420px, 92vw); background: #e0e0e0; border: 2px solid #888; padding: 16px;
+}
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.modal-actions button { padding: 8px 12px; border: 1px solid #666; }
+
+@keyframes scada-pulse {
+  from { opacity: 0.4; }
+  to   { opacity: 1; }
+}
+
+@media (max-width: 980px) {
+  .settings-grid, .grid-home { grid-template-columns: 1fr; }
+}

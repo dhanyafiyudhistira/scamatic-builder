@@ -20,7 +20,7 @@ function nowLabel() {
  *   history  — array of { timestamp, time, Level_mix, QI_102, Simulasi_OpeningV104 }
  *   loadHistory(minutes) — fetch historical rows from MongoDB
  */
-export function useTelemetryHistory(telemetry) {
+export function useTelemetryHistory(telemetry, projectId = import.meta.env.VITE_LEGACY_PROJECT_ID || '') {
   const [history, setHistory]   = useState([])
   const prevRef                 = useRef({})
   const pendingRef              = useRef([])   // unsaved entries awaiting push
@@ -62,22 +62,24 @@ export function useTelemetryHistory(telemetry) {
   useEffect(() => {
     timerRef.current = setInterval(() => {
       const entries = pendingRef.current.splice(0)
-      if (entries.length === 0) return
+      if (entries.length === 0 || !projectId) return
       fetch('/api/telemetry', {
         method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ entries })
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': readCookie('scada_csrf') },
+        body:    JSON.stringify({ projectId, entries })
       }).catch(() => {})   // fire-and-forget; backend unavailability must not break HMI
     }, PUSH_EVERY)
 
     return () => clearInterval(timerRef.current)
-  }, [])
+  }, [projectId])
 
   /* ── Load historical data from MongoDB ────────────────────────────── */
   const loadHistory = async (minutes = 60) => {
     try {
+      if (!projectId) return
       const tags = TREND_TAGS.join(',')
-      const res  = await fetch(`/api/telemetry?tags=${tags}&minutes=${minutes}&limit=400`)
+      const query = new URLSearchParams({ projectId, tags, minutes: String(minutes), limit: '400' })
+      const res  = await fetch(`/api/telemetry?${query}`)
       if (!res.ok) return
       const rows = await res.json()
       if (rows.length > 0) setHistory(rows)
@@ -85,4 +87,11 @@ export function useTelemetryHistory(telemetry) {
   }
 
   return { history, loadHistory }
+}
+
+function readCookie(name) {
+  const prefix = `${name}=`
+  const value = document.cookie.split(';').map(item => item.trim()).find(item => item.startsWith(prefix))
+  if (!value) return ''
+  try { return decodeURIComponent(value.slice(prefix.length)) } catch { return '' }
 }

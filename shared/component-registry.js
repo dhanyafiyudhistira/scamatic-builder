@@ -1,0 +1,190 @@
+export const COMPONENT_REGISTRY = Object.freeze({
+  'indicator-lamp': {
+    type: 'indicator-lamp',
+    label: 'Indicator Lamp',
+    allowedDataTypes: ['boolean', 'number', 'string', 'enum'],
+    defaultSize: { width: 120, height: 120 },
+    defaultProperties: {
+      label: 'STATUS',
+      shape: 'circle',
+      onColor: '#22c55e',
+      offColor: '#64748b',
+      alarmColor: '#ef4444',
+      glow: true,
+      rule: { operator: 'truthy' },
+    },
+  },
+  'value-span': {
+    type: 'value-span',
+    label: 'Value Span',
+    allowedDataTypes: ['number', 'string', 'enum', 'datetime'],
+    defaultSize: { width: 220, height: 86 },
+    defaultProperties: {
+      label: 'PROCESS VALUE',
+      prefix: '',
+      suffix: '',
+      decimals: 1,
+      scale: 1,
+      offset: 0,
+      fallback: '--',
+      textColor: '#d8f7fa',
+      backgroundColor: '#0a1117',
+      warningColor: '#f59e0b',
+      criticalColor: '#ef4444',
+      warningHigh: null,
+      criticalHigh: null,
+    },
+  },
+  'control-button': {
+    type: 'control-button',
+    label: 'Control Button',
+    allowedDataTypes: ['boolean', 'number', 'string', 'enum'],
+    defaultSize: { width: 180, height: 72 },
+    defaultProperties: {
+      label: 'COMMAND',
+      action: 'toggle-boolean',
+      payload: true,
+      confirmation: 'single',
+      requiredRole: 'OPERATOR',
+      buttonColor: '#f6b73c',
+      cooldownMs: 800,
+      timeoutMs: 5000,
+    },
+  },
+  'tuning-slider': {
+    type: 'tuning-slider',
+    label: 'Tuning Slider',
+    allowedDataTypes: ['number'],
+    defaultSize: { width: 320, height: 132 },
+    defaultProperties: {
+      label: 'SETPOINT',
+      min: 0,
+      max: 100,
+      step: 1,
+      decimals: 0,
+      simulationRampPerSecond: 0.1,
+      suffix: '%',
+      rpcMethod: '',
+      feedbackTagId: null,
+      confirmation: 'single',
+      requiredRole: 'OPERATOR',
+      ackTimeoutMs: 5000,
+      accentColor: '#20c4d9',
+    },
+  },
+  'operation-shifter': {
+    type: 'operation-shifter',
+    label: 'Operation Shifter',
+    allowedDataTypes: ['string', 'enum'],
+    defaultSize: { width: 220, height: 72 },
+    defaultProperties: {
+      label: 'OPERATION MODE',
+      rpcMethod: 'setOperationMode',
+      feedbackTagId: null,
+      confirmation: 'single',
+      requiredRole: 'OPERATOR',
+      ackTimeoutMs: 8000,
+      controlledComponentIds: [],
+      autoSequence: [],
+      manualColor: '#3b82f6',
+      autoColor: '#22c55e',
+      resetColor: '#ef4444',
+      darkButtonBackground: '#151719',
+      darkButtonText: '#f0f3f4',
+      darkButtonBorder: '#3d4246',
+      lightButtonBackground: '#e9ece9',
+      lightButtonText: '#172229',
+      lightButtonBorder: '#747f85',
+    },
+  },
+  'control-popup': {
+    type: 'control-popup',
+    label: 'Control Pop-up',
+    allowedDataTypes: [],
+    defaultSize: { width: 220, height: 72 },
+    defaultProperties: {
+      label: 'UNIT CONTROLS',
+      triggerLabel: 'OPEN CONTROLS',
+      columns: 2,
+      dialogWidth: 720,
+      closeOnBackdrop: true,
+    },
+  },
+  chart: {
+    type: 'chart',
+    label: 'Chart',
+    allowedDataTypes: ['number'],
+    defaultSize: { width: 180, height: 64 },
+    defaultProperties: {
+      label: 'TELEMETRY CHART',
+      historyLimit: 300,
+      windowMinutes: 60,
+      showLegend: true,
+    },
+  },
+  'text-label': {
+    type: 'text-label',
+    label: 'Text',
+    allowedDataTypes: [],
+    defaultSize: { width: 280, height: 72 },
+    defaultProperties: {
+      text: 'NEW TEXT',
+      textColor: '#dce8ef',
+      fontSize: 32,
+      fontWeight: 700,
+      fontStyle: 'normal',
+      fontFamily: 'sans-serif',
+      textAlign: 'left',
+      verticalAlign: 'middle',
+      transparentBackground: true,
+      backgroundColor: '#101418',
+    },
+  },
+  'design-image': {
+    type: 'design-image',
+    label: 'Custom Image',
+    library: false,
+    allowedDataTypes: [],
+    defaultSize: { width: 320, height: 240 },
+    defaultProperties: {
+      assetId: null,
+      fileName: 'Custom element',
+      objectFit: 'contain',
+      lockAspectRatio: true,
+      opacity: 1,
+    },
+  },
+})
+
+export function createComponentInstance(type, { id, canvas, tagId = null, index = 0 }) {
+  const definition = COMPONENT_REGISTRY[type]
+  if (!definition) throw new Error(`Unknown component type: ${type}`)
+  const { width, height } = definition.defaultSize
+  const cascade = index * 20
+  return {
+    id,
+    type,
+    name: `${definition.label} ${index + 1}`,
+    position: {
+      x: Math.max(0, canvas.width / 2 - width / 2 + cascade),
+      y: Math.max(0, canvas.height / 2 - height / 2 + cascade),
+      width,
+      height,
+      rotation: 0,
+    },
+    zIndex: index + 1,
+    visible: true,
+    locked: false,
+    binding: type === 'chart'
+      ? { tagId: null, tagIds: tagId ? [tagId] : [] }
+      : { tagId },
+    properties: structuredClone(definition.defaultProperties),
+    metadata: {},
+    ...(type === 'control-popup' ? { children: [] } : {}),
+  }
+}
+
+export function compatibleTags(type, tags = []) {
+  const allowed = COMPONENT_REGISTRY[type]?.allowedDataTypes || []
+  return tags.filter(tag => allowed.includes(tag.dataType))
+}

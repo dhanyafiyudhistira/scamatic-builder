@@ -2037,7 +2037,7 @@ function ScadaSvgPlaceholder({ telemetry = {}, mode = 'deck-user', onTuningReque
          id="tspan148-4-8"
          style="font-style:italic;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:9.13287px;font-family:Arial;-inkscape-font-specification:'Arial, Italic';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;fill:#0a0808;fill-opacity:1;stroke:#040404;stroke-width:0.306562;stroke-opacity:1"
          x="302.104"
-         y="72.602715">Bahan Kimia</tspan></text><path
+         y="72.602715">Bahan Kimia Koagulan</tspan></text><path
        style="fill:none;stroke:#4c4c4c;stroke-width:0.152592px;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-opacity:1"
        d="m 171.13654,113.01473 6.58281,6.26489 h 88.99925 l 6.31948,-6.26489 V 34.327295 l -6.31948,-6.014327 h -88.99925 l -6.58281,6.014327 v 78.687435"
        id="path24" /><path

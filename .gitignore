@@ -1,5 +1,8 @@
 node_modules
 dist
+.pnpm-store/
+.claude/worktrees/
+coverage/
 .DS_Store
 npm-debug.log*
 

@@ -150,6 +150,17 @@ const runtimeStreamSessionSchema = new mongoose.Schema({
 runtimeStreamSessionSchema.index({ runtimeSessionId: 1, revokedAt: 1, expiresAt: 1 })
 export const RuntimeStreamSession = defineModel('ScadaRuntimeStreamSession', runtimeStreamSessionSchema)
 
+const projectUnlockSessionSchema = new mongoose.Schema({
+  _id: { type: String, required: true },
+  authSessionId: { type: String, required: true, index: true },
+  userId: { type: String, required: true, index: true },
+  projectId: { type: String, required: true, index: true },
+  pinVersion: { type: Number, required: true },
+  expiresAt: { type: Date, required: true, index: { expires: 0 } },
+}, { timestamps: true })
+projectUnlockSessionSchema.index({ authSessionId: 1, projectId: 1 }, { unique: true })
+export const ProjectUnlockSession = defineModel('ScadaProjectUnlockSession', projectUnlockSessionSchema)
+
 const connectorSchema = new mongoose.Schema({
   _id: { type: String, default: () => randomUUID() },
   workspaceId: { type: String, required: true, index: true },
@@ -183,6 +194,17 @@ const connectorEnvironmentSchema = new mongoose.Schema({
     checkedAt: { type: Date, default: null },
     lastAcknowledgedAt: { type: Date, default: null },
     lastTimeoutAt: { type: Date, default: null },
+  },
+  authentication: {
+    mode: { type: String, enum: ['unconfigured', 'manual-jwt', 'refresh-token'], default: 'unconfigured' },
+    state: { type: String, enum: ['unconfigured', 'manual', 'healthy', 'expiring', 'refreshing', 'error'], default: 'unconfigured' },
+    message: { type: String, default: 'ThingsBoard authentication is not configured.' },
+    accessTokenExpiresAt: { type: Date, default: null },
+    refreshTokenExpiresAt: { type: Date, default: null },
+    lastRefreshedAt: { type: Date, default: null },
+    lastRefreshAttemptAt: { type: Date, default: null },
+    refreshLeaseOwner: { type: String, default: null },
+    refreshLeaseUntil: { type: Date, default: null },
   },
   secretConfiguredAt: { type: Date, default: null },
   deviceTokenConfiguredAt: { type: Date, default: null },
@@ -282,6 +304,13 @@ const projectSchema = new mongoose.Schema({
   svgAssetId: { type: String, default: null },
   activeVersionId: { type: String, default: null },
   hiddenAt: { type: Date, default: null, index: true },
+  security: {
+    pinEnabled: { type: Boolean, default: false },
+    pinHash: { type: String, default: null, select: false },
+    pinVersion: { type: Number, default: 0 },
+    pinConfiguredAt: { type: Date, default: null },
+    pinConfiguredBy: { type: String, default: null },
+  },
   lastVersionNumber: { type: Number, default: 0 },
   createdBy: { type: String, required: true },
   updatedBy: { type: String, required: true },

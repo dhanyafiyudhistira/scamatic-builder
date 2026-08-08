@@ -1,7 +1,7 @@
 import 'dotenv/config'
 import { connectMongo, mongoConnectionStatus } from '../api/_lib/mongo.js'
-import { AuditEvent, ChartStorageConfiguration, ChartStorageSecret, CommandEvent, Connector, ConnectorEnvironment, ConnectorHealthEvent, ConnectorSecret, Project, ProjectDraft, ProjectVersion, TagValueSnapshot } from '../api/_lib/models.js'
-import { chartStorageSecretId, connectorSecretId, decryptChartStorageSecret, decryptConnectorSecret } from '../api/_lib/connector-secrets.js'
+import { AuditEvent, ChartStorageConfiguration, ChartStorageSecret, CommandEvent, Connector, ConnectorEnvironment, ConnectorHealthEvent, Project, ProjectDraft, ProjectVersion, TagValueSnapshot } from '../api/_lib/models.js'
+import { chartStorageSecretId, decryptChartStorageSecret } from '../api/_lib/connector-secrets.js'
 import { ConnectorRuntime } from './connectors/connector-runtime.js'
 import { createConnectorDriver } from './connectors/driver-registry.js'
 import { selectConnectorRuntimeSchema } from './connectors/runtime-schema-selection.js'
@@ -13,6 +13,7 @@ import { storedChartStorageConfig } from '../api/_lib/chart-storage-configuratio
 import { isDatabaseUnavailableError } from '../api/_lib/security.js'
 import { retryStartup } from './connectors/startup-retry.js'
 import { commandAcknowledgment, commandAcknowledgmentTimeout } from '../shared/command-acknowledgment.js'
+import { getThingsBoardAccessToken } from '../api/_lib/thingsboard-auth.js'
 
 if (process.env.CONNECTOR_PLATFORM_ENABLED !== 'true') {
   console.error('[ConnectorWorker] CONNECTOR_PLATFORM_ENABLED is not true; refusing to start.')
@@ -148,7 +149,6 @@ async function main() {
     const wanted = new Set()
     for (const connector of connectors) {
       const environment = await ConnectorEnvironment.findOne({ connectorId: connector._id, environmentRef }).lean()
-      const secretRecord = environment?.secretConfiguredAt && await ConnectorSecret.findById(connectorSecretId(connector._id, environmentRef)).select('+payloadCiphertext +payloadIv +payloadTag +wrappedKey +wrappedKeyIv +wrappedKeyTag +keyVersion').lean()
       const project = environment && await Project.findOne({ _id: connector.projectId, workspaceId: connector.workspaceId }).lean()
       const version = project?.activeVersionId && await ProjectVersion.findById(project.activeVersionId).lean()
       let selection = selectConnectorRuntimeSchema({ connector, environmentRef, publishedVersion: version })
@@ -156,20 +156,29 @@ async function main() {
         const draft = await ProjectDraft.findById(project._id).lean()
         selection = selectConnectorRuntimeSchema({ connector, environmentRef, publishedVersion: version, draft })
       }
-      if (!environment || !secretRecord || !selection) continue
+      if (!environment?.secretConfiguredAt || !selection) continue
       const { source, bindings, mode } = selection
+      let authentication
+      try {
+        authentication = await getThingsBoardAccessToken({ connectorId: connector._id, environmentRef })
+      } catch (error) {
+        const message = error?.code === 'THINGSBOARD_JWT_EXPIRED'
+          ? 'ThingsBoard JWT expired; reconnect the account in Builder.'
+          : 'ThingsBoard authentication is unavailable.'
+        await ConnectorEnvironment.updateOne({ _id: environment._id }, { $set: { health: { state: 'error', message, checkedAt: new Date() } } })
+        continue
+      }
       wanted.add(connector._id)
-      const fingerprint = `${selection.fingerprint}:${JSON.stringify(environment.config || {})}:${secretRecord.updatedAt?.toISOString?.() || secretRecord.updatedAt}`
+      const fingerprint = `${selection.fingerprint}:${JSON.stringify(environment.config || {})}:${authentication.secretUpdatedAt?.toISOString?.() || authentication.secretUpdatedAt}`
       const existingRuntime = runtimes.get(connector._id)
       if (existingRuntime?.fingerprint === fingerprint) {
         if (environment.health?.state === 'online') await ConnectorEnvironment.updateOne({ _id: environment._id }, { $set: { 'health.checkedAt': new Date() } })
         continue
       }
       if (existingRuntime) { await existingRuntime.stop(); runtimes.delete(connector._id) }
-      const secret = decryptConnectorSecret(secretRecord, { connectorId: connector._id, environmentRef })
       const runtime = new ConnectorRuntime({
         connector: { ...connector, id: connector._id },
-        environment: { ...environment, secret }, source, bindings,
+        environment: { ...environment, secret: authentication.secret }, source, bindings,
         driverFactory: () => createConnectorDriver(connector.type),
         onEvent: async event => {
           if (mode === 'bootstrap') return

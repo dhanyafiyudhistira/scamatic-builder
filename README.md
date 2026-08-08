@@ -12,22 +12,60 @@ Schema-driven SCADA schematic builder built from the original WTP Mixer HMI.
 4. Create a mock boolean tag.
 5. Add Indicator Lamp, Value Span, Control Button, Tuning Slider, Text Label,
    Chart, and Control Pop-up components through the shared registry.
-6. Bind typed mock tags and configure rules, formatting, thresholds, and
+6. Import Node-RED flow JSON into reviewed tags and suggested components, or
+   create tags manually.
+7. Bind typed mock tags and configure rules, formatting, thresholds, and
    command behavior.
-7. Edit using drag/resize, grid snapping, zoom, layers, multi-select,
+8. Edit using drag/resize, grid snapping, zoom, layers, multi-select,
    lock/hide, copy/paste, duplicate, and undo/redo.
-8. Preview the draft using mock values and permission-aware mock commands.
-9. Autosave with optimistic revision checking and local crash recovery.
-10. Publish an immutable, checksummed version with draft revision and idempotency protection.
-11. Browse version history or restore an older snapshot as a new version.
-12. Open the private runtime at `/runtime/{projectSlug}`.
-13. Execute project-scoped commands through the server command gateway.
-14. Review publish, rollback, security, and command events in the audit panel.
+9. Preview the draft using mock values and permission-aware mock commands.
+10. Autosave with optimistic revision checking and local crash recovery.
+11. Publish an immutable, checksummed version with draft revision and idempotency protection.
+12. Browse version history or restore an older snapshot as a new version.
+13. Open the private runtime at `/runtime/{projectSlug}`.
+14. Execute project-scoped commands through the server command gateway.
+15. Review publish, rollback, security, and command events in the audit panel.
+16. Optionally protect each project with a hashed six-digit security PIN.
 
 Roles are `OWNER`, `ADMIN`, `EDITOR`, `OPERATOR`, and `VIEWER`. Runtime and
 command access are resolved server-side from workspace and project membership.
 
+Project PIN protection is enforced by the API across Builder and published
+Runtime routes. Unlocks are scoped to the authenticated browser session, expire
+after eight hours by default, and are revoked when the PIN changes or the auth
+session ends. Configure the bounded unlock lifetime with
+`SCADA_PROJECT_UNLOCK_SECONDS`. Users with project-management permission can
+recover a forgotten PIN only after re-entering their account password; recovery
+attempts are rate-limited and audited. The PIN is a secondary project gate and
+does not replace workspace RBAC or project membership checks.
+
 The original mixer HMI remains available at `/legacy`.
+
+### Node-RED flow import and export
+
+Builder → File → **Import flow JSON** parses an exported Node-RED flow
+locally in the browser. The importer recognizes S7 endpoint variables,
+ThingsBoard telemetry paths, S7 outputs, statically declared RPC methods, and
+common Node-RED Dashboard nodes. It previews inferred data types, access modes,
+and suggested Builder components before applying one undoable draft change.
+
+Function-node JavaScript is never executed. Broker configuration, passwords,
+tokens, and other credentials are not copied into the project schema. Re-import
+uses source metadata and existing bindings to reuse tags and components instead
+of duplicating them. Numeric control limits and any unresolved RPC mappings must
+still be reviewed by the user before publishing.
+
+Builder → File → **Export flow JSON** performs the reverse conversion and
+downloads a deterministic Node-RED flow from the current draft. The generated
+flow includes native MQTT telemetry/RPC nodes, S7 nodes when a tag contains a
+verified `metadata.plcAddress`, common Node-RED Dashboard nodes, and a comment
+containing a safe metadata subset for accurate re-import. Tags without a PLC
+address use explicit template or TODO nodes instead of fabricated mappings.
+
+Exported broker and S7 configuration uses environment placeholders. JWTs,
+device tokens, account passwords, connector references, and arbitrary component
+properties are never serialized. Configure the ThingsBoard device token and PLC
+endpoint in Node-RED before deploying the flow.
 
 ## Local setup
 
@@ -62,6 +100,29 @@ npm run dev
 Frontend: `http://localhost:5173`
 
 Local API: `http://localhost:3001`
+
+### Local Caddy gateway
+
+After building the frontend, `Caddyfile` exposes the combined local application
+at `http://127.0.0.1:8088`. Requests under `/api/*` retain their prefix and are
+proxied to Express on `127.0.0.1:3001`. Requests under `/api-fast/*` have that
+prefix removed and are proxied to Axum, which defaults to
+`127.0.0.1:3003`. All other paths serve `dist`, with `/index.html` as the SPA
+fallback for nested routes.
+
+```powershell
+npm run build
+caddy validate --config .\Caddyfile
+caddy run --config .\Caddyfile
+```
+
+Port `3002` remains reserved for the connector runtime stream. To use a
+different Axum address, set it before starting Caddy:
+
+```powershell
+$env:AXUM_UPSTREAM = '127.0.0.1:4000'
+caddy run --config .\Caddyfile
+```
 
 ### MongoDB connection troubleshooting
 
@@ -175,6 +236,16 @@ default. A temporary, read-only compatibility bridge can be enabled with
 `LEGACY_DIRECT_THINGSBOARD_ENABLED=true` while an existing `/legacy` HMI is
 migrated. This intentionally preserves its browser-visible ThingsBoard token,
 so it must not be treated as the final Builder/runtime architecture.
+
+Builder connectors can use **Connect ThingsBoard** in the Data sources panel to
+exchange an account login for an encrypted access/refresh token pair. The
+password is used only for that exchange and is never persisted. Active worker
+and serverless connectors refresh the JWT five minutes before expiry, coordinate
+concurrent refreshes through a short MongoDB lease, and retry one unauthorized
+upstream request after rotation. Existing manual JWT connectors remain
+supported and can be upgraded through the same button. A manual JWT rotation
+clears any older refresh token; automatic mode accepts access and refresh tokens
+only as one replacement pair.
 
 See [the architecture decision](docs/adr/0001-connector-platform.md) and [the
 staging runbook](docs/runbooks/thingsboard-staging.md). The platform and live

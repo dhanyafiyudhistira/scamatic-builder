@@ -1,0 +1,25 @@
+:8088 {
+	encode zstd gzip
+
+	# Express keeps the /api prefix because its routes are registered with it.
+	@node_api path /api /api/*
+	handle @node_api {
+		reverse_proxy 127.0.0.1:3001
+	}
+
+	# Axum receives /health instead of /api-fast/health. Override the default
+	# upstream by setting AXUM_UPSTREAM before starting Caddy when necessary.
+	@axum_api path /api-fast /api-fast/*
+	handle @axum_api {
+		uri strip_prefix /api-fast
+		reverse_proxy {$AXUM_UPSTREAM:127.0.0.1:3003}
+	}
+
+	# Static assets are served directly; unknown non-API paths fall back to the
+	# SPA entry point so nested Builder and Runtime routes survive a refresh.
+	handle {
+		root * ./dist
+		try_files {path} /index.html
+		file_server
+	}
+}

@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto'
 import { connectMongo } from '../_lib/mongo.js'
-import { Connector, ConnectorEnvironment, ConnectorSecret, Project, ProjectVersion, RuntimeSession, TagValueSnapshot } from '../_lib/models.js'
+import { Connector, ConnectorEnvironment, Project, ProjectVersion, RuntimeSession, TagValueSnapshot } from '../_lib/models.js'
 import { requirePrincipal } from '../_lib/auth.js'
 import { PERMISSIONS, requireProjectPermission } from '../_lib/authorization.js'
-import { connectorSecretId, decryptConnectorSecret } from '../_lib/connector-secrets.js'
 import { enforceRateLimit, requestId } from '../_lib/security.js'
 import { readThingsBoardLatestTelemetry, telemetryEventFromLatest } from '../_lib/thingsboard-serverless.js'
 import { runtimeUsesLiveTelemetry } from '../../shared/runtime-profile.js'
+import { withThingsBoardAccessToken } from '../_lib/thingsboard-auth.js'
 
 export default async function handler(req, res) {
   const principal = await requirePrincipal(req, res)
@@ -55,12 +55,11 @@ export default async function handler(req, res) {
         const connector = await Connector.findOne({ _id: source.connectorRef, workspaceId: principal.workspaceId, projectId, enabled: true }).lean()
         const environmentRef = source.environmentRef || 'staging'
         const environment = connector && await ConnectorEnvironment.findOne({ connectorId: connector._id, environmentRef }).lean()
-        const secretRecord = environment?.secretConfiguredAt && await ConnectorSecret.findById(connectorSecretId(connector._id, environmentRef))
-          .select('+payloadCiphertext +payloadIv +payloadTag +wrappedKey +wrappedKeyIv +wrappedKeyTag +keyVersion')
-          .lean()
-        if (!connector || !environment || !secretRecord) throw Object.assign(new Error('Connector configuration is incomplete.'), { code: 'CONNECTOR_UNAVAILABLE' })
-        const { jwt } = decryptConnectorSecret(secretRecord, { connectorId: connector._id, environmentRef })
-        const latest = await readThingsBoardLatestTelemetry({ config: environment.config, jwt, keys: tags.map(tag => tag.path) })
+        if (!connector || !environment?.secretConfiguredAt) throw Object.assign(new Error('Connector configuration is incomplete.'), { code: 'CONNECTOR_UNAVAILABLE' })
+        const latest = await withThingsBoardAccessToken(
+          { connectorId: connector._id, environmentRef },
+          jwt => readThingsBoardLatestTelemetry({ config: environment.config, jwt, keys: tags.map(tag => tag.path) }),
+        )
         const receivedAt = Date.now()
         for (const tag of tags) {
           const event = latest[tag.path] && telemetryEventFromLatest({

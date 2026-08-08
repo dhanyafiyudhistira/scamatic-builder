@@ -7,6 +7,7 @@ import { assertSafeConnectorTarget, normalizeConnectorServerUrl } from '../_lib/
 import { publicConnector } from '../../shared/connector-contract.js'
 import { enforceRateLimit, redactMetadata, requestId } from '../_lib/security.js'
 import { usesServerlessConnectorExecution } from '../_lib/connector-execution.js'
+import { loginThingsBoardAccount, mergeThingsBoardSecret, thingsBoardAuthenticationMetadata, withThingsBoardAccessToken } from '../_lib/thingsboard-auth.js'
 
 const ENVIRONMENTS = new Set(['development', 'staging', 'production'])
 
@@ -91,25 +92,63 @@ async function connectorAction(req, res, principal, projectId) {
   const environment = await ConnectorEnvironment.findOne({ connectorId: connector.id, environmentRef })
   if (!environment) return res.status(404).json({ error: 'Connector environment not found.' })
   const action = String(req.body.action)
-  if (['rotate-secret', 'test'].includes(action) && !(await enforceRateLimit(req, res, `connector-${action}`, { limit: 8, windowMs: 60_000, identity: `${principal.id}:${projectId}:${connector.id}` }))) return
-  if (action === 'rotate-secret') {
+  if (['rotate-secret', 'connect-account', 'test'].includes(action) && !(await enforceRateLimit(req, res, `connector-${action}`, { limit: action === 'connect-account' ? 5 : 8, windowMs: 60_000, identity: `${principal.id}:${projectId}:${connector.id}` }))) return
+  if (action === 'connect-account') {
     if (!roleCan(principal.role, PERMISSIONS.SECRET_ROTATE)) return res.status(403).json({ error: 'Insufficient permission.', code: 'PERMISSION_DENIED' })
-    const jwtInput = req.body?.secret?.jwt
-    const deviceTokenInput = req.body?.secret?.deviceToken
-    if (jwtInput == null && deviceTokenInput == null) return res.status(400).json({ error: 'A ThingsBoard JWT or device access token is required.' })
-    const jwt = jwtInput == null ? null : String(jwtInput).trim()
-    const deviceToken = deviceTokenInput == null ? null : String(deviceTokenInput).trim()
-    if (jwt != null && (jwt.length < 16 || jwt.length > 16_384)) return res.status(400).json({ error: 'A valid ThingsBoard JWT is required.' })
-    if (deviceToken != null && (deviceToken.length < 8 || deviceToken.length > 512 || /[\s/]/.test(deviceToken))) return res.status(400).json({ error: 'A valid ThingsBoard device access token is required.' })
+    const username = String(req.body?.username || '').trim()
+    const password = String(req.body?.password || '')
+    if (username.length < 3 || username.length > 320 || password.length < 1 || password.length > 1_024) {
+      return res.status(400).json({ error: 'Valid ThingsBoard account credentials are required.' })
+    }
+    let pair
+    try {
+      pair = await loginThingsBoardAccount({ serverUrl: environment.config?.serverUrl, username, password })
+    } catch {
+      await audit(principal, projectId, 'connector.account.connect.failed', connector.id, { environmentRef })
+      return res.status(422).json({ error: 'ThingsBoard rejected the account connection.', code: 'THINGSBOARD_LOGIN_FAILED' })
+    }
     const secretId = connectorSecretId(connector.id, environmentRef)
     const currentRecord = await ConnectorSecret.findById(secretId).select('+payloadCiphertext +payloadIv +payloadTag +wrappedKey +wrappedKeyIv +wrappedKeyTag +keyVersion').lean()
     const currentSecret = currentRecord ? decryptConnectorSecret(currentRecord, { connectorId: connector.id, environmentRef }) : {}
     const nextSecret = {
-      ...(currentSecret.jwt ? { jwt: currentSecret.jwt } : {}),
       ...(currentSecret.deviceToken ? { deviceToken: currentSecret.deviceToken } : {}),
-      ...(jwt != null ? { jwt } : {}),
-      ...(deviceToken != null ? { deviceToken } : {}),
+      jwt: pair.token,
+      refreshToken: pair.refreshToken,
     }
+    const encrypted = encryptConnectorSecret(nextSecret, { connectorId: connector.id, environmentRef })
+    const connectedAt = new Date()
+    await ConnectorSecret.findOneAndUpdate(
+      { _id: secretId },
+      { $set: { connectorId: connector.id, environmentRef, ...encrypted, rotatedBy: principal.id } },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    )
+    environment.authentication = thingsBoardAuthenticationMetadata(nextSecret, { now: connectedAt })
+    environment.secretConfiguredAt = connectedAt
+    environment.health = usesServerlessConnectorExecution()
+      ? { state: 'degraded', message: 'ThingsBoard account connected; run a connection test.', checkedAt: connectedAt }
+      : { state: 'offline', message: 'ThingsBoard account connected; waiting for worker.', checkedAt: connectedAt }
+    environment.updatedBy = principal.id
+    await environment.save()
+    await audit(principal, projectId, 'connector.account.connected', connector.id, { environmentRef, autoRefresh: true })
+    return res.status(200).json({ connector: publicConnector(connector.toObject(), environment.toObject()) })
+  }
+  if (action === 'rotate-secret') {
+    if (!roleCan(principal.role, PERMISSIONS.SECRET_ROTATE)) return res.status(403).json({ error: 'Insufficient permission.', code: 'PERMISSION_DENIED' })
+    const jwtInput = req.body?.secret?.jwt
+    const refreshTokenInput = req.body?.secret?.refreshToken
+    const deviceTokenInput = req.body?.secret?.deviceToken
+    if (jwtInput == null && refreshTokenInput == null && deviceTokenInput == null) return res.status(400).json({ error: 'A ThingsBoard JWT, refresh token, or device access token is required.' })
+    if (refreshTokenInput != null && jwtInput == null) return res.status(400).json({ error: 'A refresh token must be rotated together with its access JWT.' })
+    const jwt = jwtInput == null ? null : String(jwtInput).trim()
+    const refreshToken = refreshTokenInput == null ? null : String(refreshTokenInput).trim()
+    const deviceToken = deviceTokenInput == null ? null : String(deviceTokenInput).trim()
+    if (jwt != null && (jwt.length < 16 || jwt.length > 16_384)) return res.status(400).json({ error: 'A valid ThingsBoard JWT is required.' })
+    if (refreshToken != null && (refreshToken.length < 16 || refreshToken.length > 16_384)) return res.status(400).json({ error: 'A valid ThingsBoard refresh token is required.' })
+    if (deviceToken != null && (deviceToken.length < 8 || deviceToken.length > 512 || /[\s/]/.test(deviceToken))) return res.status(400).json({ error: 'A valid ThingsBoard device access token is required.' })
+    const secretId = connectorSecretId(connector.id, environmentRef)
+    const currentRecord = await ConnectorSecret.findById(secretId).select('+payloadCiphertext +payloadIv +payloadTag +wrappedKey +wrappedKeyIv +wrappedKeyTag +keyVersion').lean()
+    const currentSecret = currentRecord ? decryptConnectorSecret(currentRecord, { connectorId: connector.id, environmentRef }) : {}
+    const nextSecret = mergeThingsBoardSecret(currentSecret, { jwt, refreshToken, deviceToken })
     const encrypted = encryptConnectorSecret(nextSecret, { connectorId: connector.id, environmentRef })
     const rotatedAt = new Date()
     await ConnectorSecret.findOneAndUpdate(
@@ -117,8 +156,9 @@ async function connectorAction(req, res, principal, projectId) {
       { $set: { connectorId: connector.id, environmentRef, ...encrypted, rotatedBy: principal.id } },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     )
-    if (jwt != null) {
+    if (jwt != null || refreshToken != null) {
       environment.secretConfiguredAt = rotatedAt
+      environment.authentication = thingsBoardAuthenticationMetadata(nextSecret, { now: rotatedAt })
       environment.health = usesServerlessConnectorExecution()
         ? { state: 'degraded', message: 'JWT rotated; run a connection test.', checkedAt: rotatedAt }
         : { state: 'offline', message: 'JWT rotated; waiting for worker.', checkedAt: rotatedAt }
@@ -126,7 +166,7 @@ async function connectorAction(req, res, principal, projectId) {
     if (deviceToken != null) environment.deviceTokenConfiguredAt = rotatedAt
     environment.updatedBy = principal.id
     await environment.save()
-    await audit(principal, projectId, 'connector.secret.rotated', connector.id, { environmentRef, jwt: jwt != null, simulationDeviceToken: deviceToken != null })
+    await audit(principal, projectId, 'connector.secret.rotated', connector.id, { environmentRef, jwt: jwt != null, refreshToken: refreshToken != null, simulationDeviceToken: deviceToken != null })
     return res.status(200).json({ connector: publicConnector(connector.toObject(), environment.toObject()) })
   }
   if (action === 'test') {
@@ -169,12 +209,12 @@ async function deleteConnector(req, res, principal, projectId) {
 }
 
 async function testConnection(connector, environment) {
-  const secretRecord = await ConnectorSecret.findById(connectorSecretId(connector.id, environment.environmentRef)).select('+payloadCiphertext +payloadIv +payloadTag +wrappedKey +wrappedKeyIv +wrappedKeyTag +keyVersion').lean()
-  if (!secretRecord) return { ok: false, code: 'SECRET_MISSING', message: 'Connector secret is not configured.' }
   try {
-    const { jwt } = decryptConnectorSecret(secretRecord, { connectorId: connector.id, environmentRef: environment.environmentRef })
     const serverUrl = await assertSafeConnectorTarget(environment.config.serverUrl)
-    const response = await fetch(`${serverUrl}/api/auth/user`, { headers: { 'X-Authorization': `Bearer ${jwt}` }, redirect: 'manual', signal: AbortSignal.timeout(8_000) })
+    const response = await withThingsBoardAccessToken(
+      { connectorId: connector.id, environmentRef: environment.environmentRef },
+      jwt => fetch(`${serverUrl}/api/auth/user`, { headers: { 'X-Authorization': `Bearer ${jwt}` }, redirect: 'manual', signal: AbortSignal.timeout(8_000) }),
+    )
     if (!response.ok) return { ok: false, code: `HTTP_${response.status}`, message: 'ThingsBoard rejected the connector credentials.' }
     return { ok: true, code: 'OK', message: 'ThingsBoard connection succeeded.' }
   } catch (error) {

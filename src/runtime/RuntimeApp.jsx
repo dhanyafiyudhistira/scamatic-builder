@@ -15,6 +15,8 @@ export default function RuntimeApp({ slug }) {
   const [runtime, setRuntime] = useState(null)
   const [runtimeSession, setRuntimeSession] = useState(null)
   const [state, setState] = useState('checking-access')
+  const [lockedProjectId, setLockedProjectId] = useState(null)
+  const [bootstrapAttempt, setBootstrapAttempt] = useState(0)
   const [showRuntimeReady, setShowRuntimeReady] = useState(false)
   const [error, setError] = useState('')
   const [values, setValues] = useState({})
@@ -109,7 +111,7 @@ export default function RuntimeApp({ slug }) {
     if (!session.user) return
     let cancelled = false
     const bootstrap = async () => {
-      setState('loading-schema'); setError('')
+      setState('loading-schema'); setError(''); setLockedProjectId(null)
       try {
         const data = await apiRequest(`/api/runtime?slug=${encodeURIComponent(slug)}`)
         if (cancelled) return
@@ -127,12 +129,18 @@ export default function RuntimeApp({ slug }) {
         const waitsForTransport = ['poll', 'stream', 'simulation'].includes(scoped.telemetry?.mode) || Boolean(scoped.stream?.url)
         setState(waitsForTransport ? 'connecting' : 'online')
       } catch (requestError) {
-        if (!cancelled) { setError(requestError.message); setState('invalid-project') }
+        if (!cancelled && requestError.code === 'PROJECT_LOCKED') {
+          setLockedProjectId(requestError.result?.projectId || null)
+          setState('project-locked')
+        } else if (!cancelled) {
+          setError(requestError.message)
+          setState('invalid-project')
+        }
       }
     }
     bootstrap()
     return () => { cancelled = true }
-  }, [createRuntimeSession, session.user, slug])
+  }, [bootstrapAttempt, createRuntimeSession, session.user, slug])
 
   useEffect(() => {
     if (!runtimeSession?.stream?.url || !runtimeSession?.stream?.ticket) return
@@ -679,6 +687,7 @@ export default function RuntimeApp({ slug }) {
   const profileStatusLabel = profile.id === 'monitor' ? 'MONITORING' : profile.id.toUpperCase()
   if (session.loading) return <RuntimeState title="Checking runtime access…" />
   if (!session.user) return <RuntimeLogin onAuthenticated={checkSession} />
+  if (state === 'project-locked' && lockedProjectId) return <RuntimeProjectUnlock projectId={lockedProjectId} onUnlocked={() => setBootstrapAttempt(attempt => attempt + 1)} />
   if (error) return <RuntimeState title={error} detail={statusLabel} />
   if (!runtime) return <RuntimeState title="Preparing published runtime…" detail={statusLabel} />
   const runtimeConnecting = !runtimeSession || ['connecting', 'reconnecting'].includes(state)
@@ -878,4 +887,41 @@ function RuntimeLogin({ onAuthenticated }) {
   const submit = async event => { event.preventDefault(); setBusy(true); setError(''); try { await login(email, password); await onAuthenticated() } catch (requestError) { setError(requestError.message) } finally { setBusy(false) } }
   return <div className="sb-runtime-login"><form className="sb-login-card" onSubmit={submit}><div className="sb-login-card-head"><div className="sb-login-mark">SC</div><ThemeToneToggle /></div><p className="eyebrow">PRIVATE SCADA RUNTIME</p><h1>Runtime access</h1><p>Sign in with an account assigned to this project.</p><label>Email<input type="email" value={email} onChange={event => setEmail(event.target.value)} required /></label><label>Password<input type="password" value={password} onChange={event => setPassword(event.target.value)} required autoFocus /></label>{error && <div className="sb-form-error">{error}</div>}<button type="submit" className="primary" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button></form></div>
 }
+
+function RuntimeProjectUnlock({ projectId, onUnlocked }) {
+  const [pin, setPin] = useState('')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const submit = async event => {
+    event.preventDefault()
+    setBusy(true)
+    setError('')
+    try {
+      await apiRequest(`/api/projects?id=${encodeURIComponent(projectId)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ projectId, action: 'unlock', pin }),
+      })
+      onUnlocked()
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="sb-runtime-login">
+      <form className="sb-login-card sb-runtime-pin-card" onSubmit={submit}>
+        <div className="sb-login-card-head"><div className="sb-login-mark"><i className="fa-solid fa-lock" /></div><ThemeToneToggle /></div>
+        <p className="eyebrow">LOCKED PROJECT</p>
+        <h1>Enter project PIN</h1>
+        <p>This workspace has an additional security lock.</p>
+        <label>6-digit PIN<input className="sb-project-pin-input" type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength="6" autoComplete="off" value={pin} onChange={event => setPin(event.target.value.replace(/\D/g, '').slice(0, 6))} required autoFocus /></label>
+        {error && <div className="sb-form-error">{error}</div>}
+        <button type="submit" className="primary" disabled={busy || pin.length !== 6}>{busy ? 'Unlocking…' : 'Unlock project'}</button>
+        <a className="sb-runtime-pin-back" href="/">Back to Builder</a>
+      </form>
+    </div>
+  )
+}
+
 function RuntimeState({ title, detail }) { return <div className="sb-centered-state"><span className="sb-spinner" /><p>{title}</p>{detail && <small>{detail}</small>}</div> }

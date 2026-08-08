@@ -1,7 +1,7 @@
 import { createHash, randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto'
 import { promisify } from 'node:util'
 import { connectMongo } from './mongo.js'
-import { AuthSession, RuntimeSession, RuntimeStreamSession, SimulationResponderLease, User, Workspace, WorkspaceMember } from './models.js'
+import { AuthSession, ProjectUnlockSession, RuntimeSession, RuntimeStreamSession, SimulationResponderLease, User, Workspace, WorkspaceMember } from './models.js'
 
 const scrypt = promisify(scryptCallback)
 const SESSION_COOKIE = 'scada_session'
@@ -229,6 +229,7 @@ export async function revokeSessionHierarchy(sessionIds, revokedAt = new Date())
   await Promise.all([
     AuthSession.updateMany({ _id: { $in: ids }, revokedAt: null }, { $set: { revokedAt } }),
     RuntimeSession.updateMany({ authSessionId: { $in: ids }, revokedAt: null }, { $set: { revokedAt } }),
+    ProjectUnlockSession.deleteMany({ authSessionId: { $in: ids } }),
     runtimeIds.length
       ? RuntimeStreamSession.updateMany({ runtimeSessionId: { $in: runtimeIds }, revokedAt: null }, { $set: { revokedAt } })
       : Promise.resolve(),

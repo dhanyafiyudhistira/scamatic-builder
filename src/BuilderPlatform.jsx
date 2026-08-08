@@ -8,10 +8,12 @@ import { ComponentInspector, ComponentLibrary, LayersPanel, MockControls, TagMan
 import { COMPONENT_REGISTRY, compatibleTags, createComponentInstance } from '../shared/component-registry.js'
 import { executeMockCommand, initialMockValue } from '../shared/runtime-evaluator.js'
 import { validateProjectSchema } from '../shared/project-schema.js'
+import { applyNodeRedImportPlan } from '../shared/node-red-import.js'
+import { createNodeRedExport, serializeNodeRedExport } from '../shared/node-red-export.js'
 import { arrangeSelection, moveSelection } from '../shared/placement.js'
 import { describeVersion, nextVersionNumber } from '../shared/version-history.js'
 import { auditActionCategory, auditActionLabel } from '../shared/audit-display.js'
-import { ConnectorManager } from './platform/ConnectorManager.jsx'
+import { ConnectorManager, FlowImportModal } from './platform/ConnectorManager.jsx'
 import { ChartStorageManager } from './platform/ChartStorageManager.jsx'
 import { assignControlToPopup, copySafeComponent, detachControlFromPopup, removeComponentsAndCleanPopups, reorderPopupControl } from '../shared/control-popup.js'
 import { RUNTIME_PROFILES, runtimeProfileMetadata } from '../shared/runtime-profile.js'
@@ -84,6 +86,7 @@ export default function BuilderPlatform() {
   const [lastSavedAt, setLastSavedAt] = useState(null)
   const [versions, setVersions] = useState([])
   const [auditEvents, setAuditEvents] = useState([])
+  const [flowImportOpen, setFlowImportOpen] = useState(false)
 
   useEffect(() => { draftRef.current = draft }, [draft])
   useEffect(() => { sidebarWidthsRef.current = sidebarWidths }, [sidebarWidths])
@@ -490,6 +493,24 @@ export default function BuilderPlatform() {
   }
   const closeProject = () => { setCurrentProject(null); editor.replace(null); setSelectedIds([]); setDesignAssets({}) }
 
+  const exportNodeRedFlow = () => {
+    try {
+      const result = createNodeRedExport(draftRef.current)
+      const url = URL.createObjectURL(new Blob([serializeNodeRedExport(result)], { type: 'application/json;charset=utf-8' }))
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = result.fileName
+      anchor.style.display = 'none'
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      setTimeout(() => URL.revokeObjectURL(url), 0)
+      setNotice({ type: 'success', text: `Node-RED flow exported: ${result.stats.tags} tags, ${result.stats.dashboardNodes} dashboard nodes, no credentials, and ${result.warnings.length} embedded setup note${result.warnings.length === 1 ? '' : 's'}.` })
+    } catch (exportError) {
+      setNotice({ type: 'error', text: exportError.message })
+    }
+  }
+
   if (session.loading) return <CenteredState title="Loading session…" />
   if (!session.user) return <LoginScreen onAuthenticated={loadSession} />
   if (!currentProject || !draft) return <ProjectHome user={session.user} projects={projects} busy={busy} onOpen={openProject} onCreated={async project => { await loadProjects(); await openProject(project) }} onProjectsChanged={loadProjects} onNotice={setNotice} onLogout={handleLogout} notice={notice} />
@@ -517,6 +538,10 @@ export default function BuilderPlatform() {
             busy={busy}
             onSave={() => saveDraft()}
             onPreview={() => setPreview(true)}
+            canImportFlow={session.user.capabilities?.includes('source.configure')}
+            onImportFlow={() => setFlowImportOpen(true)}
+            exportFlowDisabled={!draft.tags.length && !draft.components.length}
+            onExportFlow={exportNodeRedFlow}
             canPublish={session.user.capabilities?.includes('project.publish')}
             onPublish={publish}
             runtimeHref={currentProject.activeVersionId ? `/runtime/${currentProject.slug}` : null}
@@ -624,11 +649,17 @@ export default function BuilderPlatform() {
           onKeyDown={event => resizeSidebarByKeyboard('right', event)}
         />
       </div>
+      {flowImportOpen && <FlowImportModal schema={draft} onClose={() => setFlowImportOpen(false)} onApply={plan => {
+        changeDraft(previous => applyNodeRedImportPlan(previous, plan))
+        setMockValues(previous => ({ ...previous, ...Object.fromEntries(plan.tags.map(tag => [tag.id, initialMockValue(tag)])) }))
+        setFlowImportOpen(false)
+        setNotice({ type: 'success', text: `Flow imported: ${plan.stats.tagsCreated} new tags and ${plan.stats.componentsCreated} new components. Reused items were not duplicated.` })
+      }} />}
     </div>
   )
 }
 
-function FileMenu({ autoSave, onAutoSaveChange, dirty, revision, lastSavedAt, busy, onSave, onPreview, canPublish, onPublish, runtimeHref }) {
+function FileMenu({ autoSave, onAutoSaveChange, dirty, revision, lastSavedAt, busy, onSave, onPreview, canImportFlow, onImportFlow, exportFlowDisabled, onExportFlow, canPublish, onPublish, runtimeHref }) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef(null)
 
@@ -665,6 +696,9 @@ function FileMenu({ autoSave, onAutoSaveChange, dirty, revision, lastSavedAt, bu
             {lastSavedAt && <small>Last saved {lastSavedAt.toLocaleTimeString()}</small>}
           </div>
           <ViewMenuItem label="Autosave" value={autoSave ? 'On' : 'Off'} checked={autoSave} onClick={() => act(() => onAutoSaveChange(value => !value))} />
+          <div className="sb-view-menu-divider" role="separator" />
+          {canImportFlow && <ViewMenuItem label="Import flow JSON" disabled={busy} onClick={() => act(onImportFlow)} />}
+          <ViewMenuItem label="Export flow JSON" disabled={busy || exportFlowDisabled} onClick={() => act(onExportFlow)} />
           <div className="sb-view-menu-divider" role="separator" />
           <ViewMenuItem label="Save" disabled={busy || !dirty} onClick={() => act(onSave)} />
           <ViewMenuItem label="Preview" onClick={() => act(onPreview)} />
@@ -861,6 +895,7 @@ function ProjectHome({ user, projects, busy, onOpen, onCreated, onProjectsChange
   const [showPassword, setShowPassword] = useState(false)
   const [showHidden, setShowHidden] = useState(false)
   const [actionBusyId, setActionBusyId] = useState(null)
+  const [pinRequest, setPinRequest] = useState(null)
   const canManage = user.capabilities?.includes('project.manage')
   const canDelete = user.capabilities?.includes('project.delete')
   const hiddenCount = projects.filter(project => project.hiddenAt).length
@@ -886,7 +921,13 @@ function ProjectHome({ user, projects, busy, onOpen, onCreated, onProjectsChange
         onNotice({ type: 'success', text: `${project.name} was permanently deleted.` })
       } else {
         await apiRequest(`/api/projects?id=${encodeURIComponent(project.id)}`, { method: 'PATCH', body: JSON.stringify(payload) })
-        const message = action === 'rename' ? `Project renamed to ${payload.name}.` : action === 'hide' ? `${project.name} is now hidden.` : `${project.name} is visible again.`
+        const message = action === 'rename'
+          ? `Project renamed to ${payload.name}.`
+          : action === 'hide'
+            ? `${project.name} is now hidden.`
+            : action === 'unhide'
+              ? `${project.name} is visible again.`
+              : `${project.name} is locked for this session.`
         onNotice({ type: 'success', text: message })
       }
       await onProjectsChanged()
@@ -895,6 +936,18 @@ function ProjectHome({ user, projects, busy, onOpen, onCreated, onProjectsChange
     } finally {
       setActionBusyId(null)
     }
+  }
+
+  const requestOpen = project => {
+    if (project.security?.pinEnabled && !project.security?.unlocked) {
+      setPinRequest({ project, intent: 'open' })
+      return
+    }
+    onOpen(project)
+  }
+
+  const requestSecurity = project => {
+    setPinRequest({ project, intent: project.security?.pinEnabled && !project.security?.unlocked ? 'manage-after-unlock' : 'setup' })
   }
 
   return (
@@ -910,13 +963,41 @@ function ProjectHome({ user, projects, busy, onOpen, onCreated, onProjectsChange
         </div>
         {notice && <div className={`sb-notice ${notice.type}`}>{notice.text}</div>}
         <div className="sb-project-grid">
-          {visibleProjects.map(project => <ProjectCard key={project.id} project={project} disabled={busy || actionBusyId === project.id} canManage={canManage} canDelete={canDelete} onOpen={onOpen} onAction={runAction} />)}
+          {visibleProjects.map(project => <ProjectCard key={project.id} project={project} disabled={busy || actionBusyId === project.id} canManage={canManage} canDelete={canDelete} onOpen={requestOpen} onAction={runAction} onSecurity={requestSecurity} />)}
           {visibleProjects.length === 0 && <div className="sb-empty-projects">{projects.length === 0 ? 'No projects yet. Create the first builder project.' : 'No visible projects. Use “Show hidden” to restore one.'}</div>}
         </div>
       </main>
       {showCreate && <CreateProjectModal onClose={() => setShowCreate(false)} onCreated={async project => { setShowCreate(false); await onCreated(project) }} />}
       {showMembers && <MemberAdminModal projects={projects} onClose={() => setShowMembers(false)} />}
       {showPassword && <ChangePasswordModal onClose={() => setShowPassword(false)} onChanged={() => { setShowPassword(false); onNotice({ type: 'success', text: 'Password changed successfully. Other signed-in devices have been logged out.' }) }} />}
+      {pinRequest && <ProjectPinModal
+        project={pinRequest.project}
+        mode={pinRequest.intent === 'setup' ? 'setup' : 'unlock'}
+        canRecover={canManage}
+        onClose={() => setPinRequest(null)}
+        onUnlocked={async () => {
+          const unlockedProject = { ...pinRequest.project, security: { ...pinRequest.project.security, unlocked: true } }
+          await onProjectsChanged()
+          if (pinRequest.intent === 'open') {
+            setPinRequest(null)
+            await onOpen(unlockedProject)
+          } else {
+            setPinRequest({ project: unlockedProject, intent: 'setup' })
+          }
+        }}
+        onRecovered={async () => {
+          const unlockedProject = { ...pinRequest.project, security: { ...pinRequest.project.security, unlocked: true } }
+          await onProjectsChanged()
+          setPinRequest(null)
+          if (pinRequest.intent === 'open') await onOpen(unlockedProject)
+          else onNotice({ type: 'success', text: `${pinRequest.project.name} security PIN was reset.` })
+        }}
+        onChanged={async message => {
+          setPinRequest(null)
+          await onProjectsChanged()
+          onNotice({ type: 'success', text: message })
+        }}
+      />}
     </div>
   )
 }
@@ -951,7 +1032,7 @@ function UserSettingsMenu({ user, onManageUsers, onChangePassword, onLogout }) {
   )
 }
 
-function ProjectCard({ project, disabled, canManage, canDelete, onOpen, onAction }) {
+function ProjectCard({ project, disabled, canManage, canDelete, onOpen, onAction, onSecurity }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const rootRef = useRef(null)
   useEffect(() => {
@@ -973,15 +1054,75 @@ function ProjectCard({ project, disabled, canManage, canDelete, onOpen, onAction
         <strong>{project.name}</strong>
         <code>/{project.slug}</code>
         <span>{project.canvas.width} × {project.canvas.height}</span>
+        {project.security?.pinEnabled && <span className={`sb-project-pin-state ${project.security.unlocked ? 'is-unlocked' : 'is-locked'}`}><i aria-hidden="true">{project.security.unlocked ? '◇' : '◆'}</i>{project.security.unlocked ? 'PIN unlocked' : 'PIN locked'}</span>}
         <em>{project.hiddenAt ? 'Hidden' : project.activeVersionId ? 'Published' : 'Draft only'}</em>
       </button>
       {(canManage || canDelete) && <button type="button" className="sb-project-card-menu-trigger" aria-label={`Actions for ${project.name}`} aria-haspopup="menu" aria-expanded={menuOpen} disabled={disabled} onClick={() => setMenuOpen(value => !value)}>•••</button>}
       {menuOpen && <div className="sb-project-card-menu" role="menu">
         {canManage && <button type="button" role="menuitem" onClick={() => act('rename')}>Rename</button>}
         {canManage && <button type="button" role="menuitem" onClick={() => act(project.hiddenAt ? 'unhide' : 'hide')}>{project.hiddenAt ? 'Unhide' : 'Hide'}</button>}
+        {canManage && <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); onSecurity(project) }}>{project.security?.pinEnabled ? 'Manage security PIN' : 'Set security PIN'}</button>}
+        {project.security?.pinEnabled && project.security?.unlocked && <button type="button" role="menuitem" onClick={() => act('lock')}>Lock now</button>}
         {canDelete && <button type="button" role="menuitem" className="danger" onClick={() => act('delete')}>Delete</button>}
       </div>}
     </article>
+  )
+}
+
+function ProjectPinModal({ project, mode, canRecover, onClose, onUnlocked, onRecovered, onChanged }) {
+  const unlockMode = mode === 'unlock'
+  const [recovering, setRecovering] = useState(false)
+  const [form, setForm] = useState({ pin: '', confirmPin: '', password: '' })
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const submit = async event => {
+    event.preventDefault()
+    setError('')
+    if (!/^\d{6}$/.test(form.pin)) return setError('Enter exactly 6 digits.')
+    if ((!unlockMode || recovering) && form.pin !== form.confirmPin) return setError('PIN confirmation does not match.')
+    setBusy(true)
+    try {
+      await apiRequest(`/api/projects?id=${encodeURIComponent(project.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ projectId: project.id, action: recovering ? 'recover-pin' : unlockMode ? 'unlock' : 'set-pin', pin: form.pin, confirmPin: form.confirmPin, password: form.password }),
+      })
+      if (recovering) await onRecovered()
+      else if (unlockMode) await onUnlocked()
+      else await onChanged(project.security?.pinEnabled ? `${project.name} security PIN was changed.` : `${project.name} is now protected by a PIN.`)
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+  const removePin = async () => {
+    if (!window.confirm(`Remove PIN protection from “${project.name}”?`)) return
+    setBusy(true); setError('')
+    try {
+      await apiRequest(`/api/projects?id=${encodeURIComponent(project.id)}`, { method: 'PATCH', body: JSON.stringify({ projectId: project.id, action: 'remove-pin' }) })
+      await onChanged(`${project.name} PIN protection was removed.`)
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="sb-modal-backdrop" onMouseDown={onClose}>
+      <form className="sb-create-modal sb-project-pin-modal" onSubmit={submit} onMouseDown={event => event.stopPropagation()} aria-labelledby="project-pin-title" autoComplete="off">
+        <div className="sb-project-pin-heading"><span className="sb-project-pin-icon" aria-hidden="true">{unlockMode && !recovering ? '◆' : '◇'}</span><div><span className="eyebrow">PROJECT SECURITY</span><h2 id="project-pin-title">{recovering ? 'Reset security PIN' : unlockMode ? `Unlock ${project.name}` : project.security?.pinEnabled ? 'Change security PIN' : 'Set security PIN'}</h2><p>{recovering ? 'Confirm your account password, then choose a new project PIN. Existing unlock sessions will be revoked.' : unlockMode ? 'Enter the project PIN to continue. Unlock applies only to your current signed-in session.' : 'Use a non-sequential 6-digit PIN. The PIN is hashed and never returned after saving.'}</p></div></div>
+        {recovering && <label>Account password<input type="password" autoComplete="current-password" value={form.password} onChange={event => setForm(previous => ({ ...previous, password: event.target.value }))} autoFocus required /></label>}
+        <label>{unlockMode && !recovering ? 'Project PIN' : 'New project PIN'}<input type="password" inputMode="numeric" pattern="[0-9]{6}" minLength="6" maxLength="6" value={form.pin} onChange={event => setForm(previous => ({ ...previous, pin: event.target.value.replace(/\D/g, '').slice(0, 6) }))} autoFocus={!recovering} required /></label>
+        {(!unlockMode || recovering) && <label>Confirm project PIN<input type="password" inputMode="numeric" pattern="[0-9]{6}" minLength="6" maxLength="6" value={form.confirmPin} onChange={event => setForm(previous => ({ ...previous, confirmPin: event.target.value.replace(/\D/g, '').slice(0, 6) }))} required /></label>}
+        {unlockMode && canRecover && <button type="button" className="sb-project-pin-recovery" onClick={() => { setRecovering(value => !value); setForm({ pin: '', confirmPin: '', password: '' }); setError('') }} disabled={busy}>{recovering ? 'Use existing project PIN' : 'Forgot PIN? Reset with account password'}</button>}
+        {error && <div className="sb-form-error" role="alert">{error}</div>}
+        <div className="sb-modal-actions sb-project-pin-actions">
+          {!unlockMode && project.security?.pinEnabled ? <button type="button" className="danger" onClick={removePin} disabled={busy}>Remove PIN</button> : <span />}
+          <button type="button" onClick={onClose} disabled={busy}>Cancel</button>
+          <button type="submit" className="primary" disabled={busy}>{busy ? 'Please wait…' : recovering ? 'Reset and unlock' : unlockMode ? 'Unlock project' : 'Save PIN'}</button>
+        </div>
+      </form>
+    </div>
   )
 }
 

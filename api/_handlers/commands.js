@@ -1,15 +1,15 @@
 import { createHash } from 'node:crypto'
 import { connectMongo } from '../_lib/mongo.js'
-import { AuditEvent, CommandEvent, Connector, ConnectorEnvironment, ConnectorSecret, Project, ProjectVersion, RuntimeSession, TagValueSnapshot } from '../_lib/models.js'
+import { AuditEvent, CommandEvent, Connector, ConnectorEnvironment, Project, ProjectVersion, RuntimeSession, TagValueSnapshot } from '../_lib/models.js'
 import { requireCsrf, requirePrincipal } from '../_lib/auth.js'
 import { PERMISSIONS, requireProjectPermission, roleMeetsRequirement } from '../_lib/authorization.js'
 import { enforceRateLimit, requestId as correlationIdFor } from '../_lib/security.js'
 import { executeMockCommand, initialMockValue } from '../../shared/runtime-evaluator.js'
 import { isTerminalCommandStatus } from '../../shared/command-lifecycle.js'
 import { commandAcknowledgment, commandAcknowledgmentTimeout } from '../../shared/command-acknowledgment.js'
-import { connectorSecretId, decryptConnectorSecret } from '../_lib/connector-secrets.js'
 import { usesServerlessConnectorExecution } from '../_lib/connector-execution.js'
 import { sendThingsBoardRpc, waitForThingsBoardFeedback } from '../_lib/thingsboard-serverless.js'
+import { withThingsBoardAccessToken } from '../_lib/thingsboard-auth.js'
 import { runtimeCommandExecutionPlan, runtimeProfile } from '../../shared/runtime-profile.js'
 import { previousSimulationCommandValue } from '../../shared/simulation-command-state.js'
 
@@ -130,11 +130,7 @@ async function executeMock(event, result, principal, res) {
 async function executeServerlessCommand({ event, evaluated, principal, res, version, component, connector, environment }) {
   const acknowledgment = commandAcknowledgment(component, environment.config, evaluated.value)
   if (!acknowledgment) return finishUnavailable(event, res, 'Command acknowledgment is not configured.', 'ACKNOWLEDGMENT_REQUIRED')
-  const secretRecord = await ConnectorSecret.findById(connectorSecretId(connector._id, environment.environmentRef))
-    .select('+payloadCiphertext +payloadIv +payloadTag +wrappedKey +wrappedKeyIv +wrappedKeyTag +keyVersion')
-    .lean()
-  if (!secretRecord) return finishUnavailable(event, res, 'Connector secret is not configured.', 'CONNECTOR_SECRET_MISSING')
-  const { jwt } = decryptConnectorSecret(secretRecord, { connectorId: connector._id, environmentRef: environment.environmentRef })
+  if (!environment.secretConfiguredAt) return finishUnavailable(event, res, 'Connector secret is not configured.', 'CONNECTOR_SECRET_MISSING')
   const feedbackTag = acknowledgment.mode === 'feedback-tag'
     ? version.schema.tags?.find(item => item.id === acknowledgment.tagId)
     : null
@@ -163,8 +159,8 @@ async function executeServerlessCommand({ event, evaluated, principal, res, vers
 
   try {
     const primary = await performServerlessRpc({
+      connector,
       environment,
-      jwt,
       component,
       acknowledgment,
       feedbackTag,
@@ -178,8 +174,8 @@ async function executeServerlessCommand({ event, evaluated, principal, res, vers
     if (evaluated.resetAfterMs) {
       await delay(evaluated.resetAfterMs)
       const release = await performServerlessRpc({
+        connector,
         environment,
-        jwt,
         component,
         acknowledgment,
         feedbackTag,
@@ -215,25 +211,32 @@ async function executeServerlessCommand({ event, evaluated, principal, res, vers
   }
 }
 
-async function performServerlessRpc({ environment, jwt, component, acknowledgment, feedbackTag, targetValue, expectedFeedbackValue, feedbackAfterTimestamp }) {
-  const receipt = await sendThingsBoardRpc({
-    config: environment.config,
-    jwt,
-    method: component.properties?.rpcMethod || component.properties?.action || 'setValue',
-    params: targetValue,
-    timeoutMs: acknowledgment.timeoutMs,
-    mode: acknowledgment.mode,
-  })
+async function performServerlessRpc({ connector, environment, component, acknowledgment, feedbackTag, targetValue, expectedFeedbackValue, feedbackAfterTimestamp }) {
+  const authContext = { connectorId: connector._id, environmentRef: environment.environmentRef }
+  const receipt = await withThingsBoardAccessToken(
+    authContext,
+    jwt => sendThingsBoardRpc({
+      config: environment.config,
+      jwt,
+      method: component.properties?.rpcMethod || component.properties?.action || 'setValue',
+      params: targetValue,
+      timeoutMs: acknowledgment.timeoutMs,
+      mode: acknowledgment.mode,
+    }),
+  )
   if (!receipt.accepted || receipt.rejected || receipt.timedOut || receipt.acknowledged || acknowledgment.mode !== 'feedback-tag') return receipt
-  const feedback = await waitForThingsBoardFeedback({
-    config: environment.config,
-    jwt,
-    key: feedbackTag.path,
-    dataType: feedbackTag.dataType,
-    expectedValue: expectedFeedbackValue ?? acknowledgment.expectedValue,
-    timeoutMs: acknowledgment.timeoutMs,
-    afterTimestamp: feedbackAfterTimestamp,
-  })
+  const feedback = await withThingsBoardAccessToken(
+    authContext,
+    jwt => waitForThingsBoardFeedback({
+      config: environment.config,
+      jwt,
+      key: feedbackTag.path,
+      dataType: feedbackTag.dataType,
+      expectedValue: expectedFeedbackValue ?? acknowledgment.expectedValue,
+      timeoutMs: acknowledgment.timeoutMs,
+      afterTimestamp: feedbackAfterTimestamp,
+    }),
+  )
   return {
     ...receipt,
     acknowledged: feedback.matched,

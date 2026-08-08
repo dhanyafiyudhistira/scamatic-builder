@@ -39,13 +39,17 @@ test('connector secrets use authenticated envelope encryption', () => {
 })
 
 test('public connector projection normalizes legacy command offline without hiding liveness', () => {
-  const value = publicConnector({ _id: 'c', projectId: 'p', name: 'TB', type: 'thingsboard', enabled: true, jwt: 'bad' }, { _id: 'e', environmentRef: 'staging', config: { serverUrl: 'https://tb.example' }, health: { state: 'online' }, commandHealth: { state: 'offline', message: 'Device responder timed out.' }, secretConfiguredAt: new Date('2026-07-21T00:00:00Z'), deviceTokenConfiguredAt: new Date('2026-07-21T00:01:00Z'), payloadCiphertext: 'bad' })
+  const value = publicConnector({ _id: 'c', projectId: 'p', name: 'TB', type: 'thingsboard', enabled: true, jwt: 'bad' }, { _id: 'e', environmentRef: 'staging', config: { serverUrl: 'https://tb.example' }, health: { state: 'online' }, commandHealth: { state: 'offline', message: 'Device responder timed out.' }, authentication: { mode: 'refresh-token', state: 'healthy', message: 'JWT auto-refresh is active.', accessTokenExpiresAt: new Date('2026-07-21T02:00:00Z'), refreshLeaseOwner: 'must-not-leak' }, secretConfiguredAt: new Date('2026-07-21T00:00:00Z'), deviceTokenConfiguredAt: new Date('2026-07-21T00:01:00Z'), payloadCiphertext: 'bad' })
   assert.equal(value.environment.secret.configured, true)
   assert.equal(value.environment.simulationSecret.configured, true)
   assert.equal(value.environment.health.state, 'online')
   assert.equal(value.environment.commandHealth.state, 'unverified')
+  assert.equal(value.environment.authentication.mode, 'refresh-token')
+  assert.equal(value.environment.authentication.state, 'healthy')
   assert.equal(JSON.stringify(value).includes('payloadCiphertext'), false)
   assert.equal(JSON.stringify(value).includes('"jwt"'), false)
+  assert.equal(JSON.stringify(value).includes('refreshLeaseOwner'), false)
+  assert.equal(JSON.stringify(value).includes('must-not-leak'), false)
 })
 
 test('backoff is capped and jitter stays bounded', () => {

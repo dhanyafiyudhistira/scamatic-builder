@@ -1,4 +1,5 @@
 import { Project, ProjectMember } from './models.js'
+import { isProjectUnlocked } from './project-pin.js'
 
 export const PERMISSIONS = Object.freeze({
   WORKSPACE_MANAGE: 'workspace.manage',
@@ -45,7 +46,7 @@ export function requireWorkspacePermission(principal, res, permission) {
   return false
 }
 
-export async function requireProjectPermission(principal, res, projectOrId, permission) {
+export async function requireProjectPermission(principal, res, projectOrId, permission, { bypassProjectLock = false } = {}) {
   const project = typeof projectOrId === 'string' ? await Project.findById(projectOrId) : projectOrId
   if (!project || project.workspaceId !== principal.workspaceId) {
     res.status(404).json({ error: 'Project not found.' })
@@ -62,6 +63,14 @@ export async function requireProjectPermission(principal, res, projectOrId, perm
   }
   if (!roleCan(effectiveRole, permission)) {
     res.status(403).json({ error: 'Insufficient permission.', code: 'PERMISSION_DENIED', permission })
+    return null
+  }
+  if (!bypassProjectLock && project.security?.pinEnabled && !(await isProjectUnlocked(principal, project))) {
+    res.status(423).json({
+      error: 'Project PIN is required.',
+      code: 'PROJECT_LOCKED',
+      projectId: String(project._id || project.id),
+    })
     return null
   }
   return { project, effectiveRole, capabilities: capabilitiesForRole(effectiveRole) }

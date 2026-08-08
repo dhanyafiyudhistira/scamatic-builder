@@ -59,6 +59,26 @@ export function publicConnector(connector, environment = null) {
         message: environment.commandHealth.message || 'Legacy command timeout; outcome is unverified.',
       }
     : environment?.commandHealth
+  const storedAuthentication = environment?.authentication?.toObject?.() || environment?.authentication || {}
+  const authentication = environment?.secretConfiguredAt
+    ? {
+        mode: !storedAuthentication.mode || storedAuthentication.mode === 'unconfigured' ? 'manual-jwt' : storedAuthentication.mode,
+        state: !storedAuthentication.state || storedAuthentication.state === 'unconfigured' ? 'manual' : storedAuthentication.state,
+        message: !storedAuthentication.message || storedAuthentication.message === 'ThingsBoard authentication is not configured.' ? 'Manual JWT rotation is active.' : storedAuthentication.message,
+        accessTokenExpiresAt: storedAuthentication.accessTokenExpiresAt || null,
+        refreshTokenExpiresAt: storedAuthentication.refreshTokenExpiresAt || null,
+        lastRefreshedAt: storedAuthentication.lastRefreshedAt || null,
+        lastRefreshAttemptAt: storedAuthentication.lastRefreshAttemptAt || null,
+      }
+    : {
+        mode: 'unconfigured',
+        state: 'unconfigured',
+        message: 'ThingsBoard authentication is not configured.',
+        accessTokenExpiresAt: null,
+        refreshTokenExpiresAt: null,
+        lastRefreshedAt: null,
+        lastRefreshAttemptAt: null,
+      }
   return {
     id: String(connector._id || connector.id),
     projectId: connector.projectId,
@@ -71,6 +91,7 @@ export function publicConnector(connector, environment = null) {
       config: environment.config || {},
       health: environment.health || { state: 'unconfigured' },
       commandHealth: commandHealth || { state: 'unknown', message: 'No RPC result observed yet.' },
+      authentication,
       secret: {
         configured: Boolean(environment.secretConfiguredAt),
         lastRotatedAt: environment.secretConfiguredAt || null,

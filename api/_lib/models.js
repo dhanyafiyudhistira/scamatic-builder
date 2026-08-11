@@ -388,10 +388,20 @@ const commandEventSchema = new mongoose.Schema({
   payloadSummary: { type: mongoose.Schema.Types.Mixed, default: {} },
   resultSummary: { type: mongoose.Schema.Types.Mixed, default: {} },
   correlationId: { type: String, required: true },
+  acknowledgmentMode: { type: String, enum: ['two-way', 'feedback-tag'], default: null },
+  requestReceivedAt: { type: Date, default: null },
+  authorizedAt: { type: Date, default: null },
+  dispatchedAt: { type: Date, default: null },
+  upstreamStartedAt: { type: Date, default: null },
+  gatewayAcceptedAt: { type: Date, default: null },
+  upstreamCompletedAt: { type: Date, default: null },
   completedAt: { type: Date, default: null },
+  terminalAuditPending: { type: Boolean, default: false },
 }, { timestamps: true })
 commandEventSchema.index({ projectId: 1, requestId: 1 }, { unique: true })
 commandEventSchema.index({ projectId: 1, createdAt: -1 })
+commandEventSchema.index({ status: 1, executionMode: 1, createdAt: 1 })
+commandEventSchema.index({ terminalAuditPending: 1, completedAt: 1 }, { partialFilterExpression: { terminalAuditPending: true } })
 export const CommandEvent = defineModel('ScadaCommandEvent', commandEventSchema)
 
 const requestLimitSchema = new mongoose.Schema({

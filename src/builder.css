@@ -4379,6 +4379,12 @@ body.sb-is-resizing-sidebar * {
   color: #3ddc97;
 }
 
+.sb-runtime-state.state-degraded,
+.sb-runtime-state.state-standby,
+.sb-runtime-state.state-synchronizing {
+  color: #f6c85f;
+}
+
 .sb-runtime-state.state-invalid-project {
   color: #ff6978;
 }

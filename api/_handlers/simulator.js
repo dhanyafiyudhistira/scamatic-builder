@@ -91,6 +91,7 @@ export default async function handler(req, res) {
         error: 'Another runtime session owns the Simulation RPC responder lease.',
         code: 'SIMULATION_RESPONDER_STANDBY',
         retryAfterMs: lease.retryAfterMs,
+        expiresAt: lease.expiresAt,
         correlationId,
       })
     }

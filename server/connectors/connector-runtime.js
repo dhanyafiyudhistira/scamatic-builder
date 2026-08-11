@@ -37,19 +37,56 @@ export class ConnectorRuntime {
 
   async write(request, onAccepted) {
     if (!this.driver) throw new Error('Connector is offline.')
-    const receipt = await this.driver.write(request)
-    if (receipt.accepted) await onAccepted?.(receipt)
-    if (!receipt.accepted || receipt.acknowledged || request.acknowledgment?.mode !== 'feedback-tag') return receipt
-    const feedback = await this.waitForFeedback(request.acknowledgment.tagId, request.acknowledgment.expectedValue, request.timeoutMs)
-    return { ...receipt, acknowledged: feedback, code: feedback ? 'FEEDBACK_ACK' : 'FEEDBACK_TIMEOUT' }
+    const waitsForFeedback = request.acknowledgment?.mode === 'feedback-tag'
+    const feedbackWaiter = waitsForFeedback
+      ? this.#createFeedbackWaiter(request.acknowledgment.tagId, request.acknowledgment.expectedValue, request.timeoutMs)
+      : null
+    let receipt
+    try {
+      receipt = await this.driver.write(request)
+    } catch (error) {
+      feedbackWaiter?.finish(false)
+      throw error
+    }
+    const acceptedForFeedback = receipt.accepted && !receipt.acknowledged && !receipt.rejected && waitsForFeedback
+    if (!acceptedForFeedback) {
+      feedbackWaiter?.finish(false)
+      return receipt
+    }
+    try {
+      await onAccepted?.(receipt)
+      const feedback = await feedbackWaiter.promise
+      return { ...receipt, acknowledged: feedback, code: feedback ? 'FEEDBACK_ACK' : 'FEEDBACK_TIMEOUT' }
+    } catch (error) {
+      feedbackWaiter.finish(false)
+      throw error
+    }
   }
 
   waitForFeedback(tagId, expectedValue, timeoutMs) {
-    return new Promise(resolve => {
-      const waiter = { tagId, expectedValue, resolve, timer: null }
-      waiter.timer = setTimeout(() => { this.feedbackWaiters.delete(waiter); resolve(false) }, timeoutMs)
-      this.feedbackWaiters.add(waiter)
-    })
+    return this.#createFeedbackWaiter(tagId, expectedValue, timeoutMs).promise
+  }
+
+  #createFeedbackWaiter(tagId, expectedValue, timeoutMs) {
+    let resolvePromise
+    let active = true
+    const waiter = {
+      tagId,
+      expectedValue,
+      timer: null,
+      promise: new Promise(resolve => { resolvePromise = resolve }),
+      finish: matched => {
+        if (!active) return false
+        active = false
+        clearTimeout(waiter.timer)
+        this.feedbackWaiters.delete(waiter)
+        resolvePromise(Boolean(matched))
+        return true
+      },
+    }
+    waiter.timer = setTimeout(() => waiter.finish(false), timeoutMs)
+    this.feedbackWaiters.add(waiter)
+    return waiter
   }
 
   async #run() {
@@ -100,7 +137,7 @@ export class ConnectorRuntime {
     this.lastQuality.set(tag.id, 'good')
     for (const waiter of [...this.feedbackWaiters]) {
       if (waiter.tagId === tag.id && Object.is(event.value, waiter.expectedValue)) {
-        clearTimeout(waiter.timer); this.feedbackWaiters.delete(waiter); waiter.resolve(true)
+        waiter.finish(true)
       }
     }
     await this.onEvent(event)

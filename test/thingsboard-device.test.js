@@ -35,6 +35,22 @@ test('timestamped telemetry rejects invalid and far-future clocks', () => {
   assert.throws(() => timestampedDeviceTelemetry({ Valve_205: true }, 1_000_000, { now: 1000, maxSkewMs: 5000 }), /clock window/)
 })
 
+test('RPC long-poll treats HTTP 408 as idle without hiding telemetry failures', async t => {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(408, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'request timeout' }))
+  })
+  await listen(server)
+  t.after(() => close(server))
+  const transport = { serverUrl: baseUrl(server), deviceToken: 'device-token-test' }
+
+  assert.equal(await pollDeviceRpc({ ...transport, longPollMs: 1000 }), null)
+  await assert.rejects(
+    publishDeviceTelemetry({ ...transport, values: { Valve_205: false } }),
+    error => error.code === 'HTTP_408',
+  )
+})
+
 function listen(server) {
   return new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
 }

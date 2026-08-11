@@ -14,6 +14,10 @@ import { isDatabaseUnavailableError } from '../api/_lib/security.js'
 import { retryStartup } from './connectors/startup-retry.js'
 import { commandAcknowledgment, commandAcknowledgmentTimeout } from '../shared/command-acknowledgment.js'
 import { getThingsBoardAccessToken } from '../api/_lib/thingsboard-auth.js'
+import { CoalescingBatchWriter } from './connectors/coalescing-batch-writer.js'
+import { dispatchRuntimeEvent } from './connectors/runtime-event-dispatch.js'
+import { flushPendingTerminalCommandAudits, persistAndPublishTerminalCommand } from './connectors/command-completion.js'
+import { createAdaptiveRecoveryScheduler } from './connectors/adaptive-recovery-scheduler.js'
 
 if (process.env.CONNECTOR_PLATFORM_ENABLED !== 'true') {
   console.error('[ConnectorWorker] CONNECTOR_PLATFORM_ENABLED is not true; refusing to start.')
@@ -60,6 +64,57 @@ async function main() {
   }
   const runtimes = new Map()
   const healthSummaries = new Map()
+  let lastSnapshotWriterErrorAt = 0
+  let lastSnapshotWriterDropAt = 0
+  let lastHealthWriterErrorAt = 0
+  let lastCommandHealthWriterErrorAt = 0
+  let lastTerminalAuditErrorAt = 0
+  const reportSnapshotWriterError = (event, details) => {
+    const now = Date.now()
+    const lastReportedAt = event === 'error' ? lastSnapshotWriterErrorAt : lastSnapshotWriterDropAt
+    if (now - lastReportedAt < 10_000) return
+    if (event === 'error') lastSnapshotWriterErrorAt = now
+    else lastSnapshotWriterDropAt = now
+    console.error('[ConnectorWorker] Latest telemetry snapshot persistence degraded', details)
+  }
+  const snapshotWriter = new CoalescingBatchWriter({
+    batchSize: boundedInteger(process.env.CONNECTOR_SNAPSHOT_BATCH_SIZE, 10, 2000, 500),
+    flushMs: boundedInteger(process.env.CONNECTOR_SNAPSHOT_FLUSH_MS, 25, 5000, 100),
+    maxPending: boundedInteger(process.env.CONNECTOR_SNAPSHOT_MAX_PENDING, 100, 200_000, 20_000),
+    keyFor: event => event?.projectId && event?.tagId ? `${event.projectId}:${event.tagId}` : null,
+    writeBatch: writeLatestSnapshots,
+    onError: (error, stats) => reportSnapshotWriterError('error', { code: error?.code || 'WRITE_FAILED', pending: stats.pending, dropped: stats.dropped }),
+    onDrop: stats => reportSnapshotWriterError('drop', { code: 'QUEUE_OVERFLOW', pending: stats.pending, dropped: stats.dropped }),
+  })
+  const lastEventHealthWriter = new CoalescingBatchWriter({
+    batchSize: boundedInteger(process.env.CONNECTOR_HEALTH_BATCH_SIZE, 10, 1000, 100),
+    flushMs: boundedInteger(process.env.CONNECTOR_HEALTH_FLUSH_MS, 1000, 30_000, 5000),
+    maxPending: boundedInteger(process.env.CONNECTOR_HEALTH_MAX_PENDING, 100, 20_000, 10_000),
+    keyFor: value => value?.environmentId,
+    writeBatch: writeLastEventHealth,
+    onError: (error, stats) => {
+      const now = Date.now()
+      if (now - lastHealthWriterErrorAt < 10_000) return
+      lastHealthWriterErrorAt = now
+      console.error('[ConnectorWorker] Connector last-event health persistence delayed', { code: error?.code || 'WRITE_FAILED', pending: stats.pending })
+    },
+  })
+  const commandHealthWriter = new CoalescingBatchWriter({
+    batchSize: boundedInteger(process.env.CONNECTOR_COMMAND_HEALTH_BATCH_SIZE, 10, 1000, 100),
+    flushMs: boundedInteger(process.env.CONNECTOR_COMMAND_HEALTH_FLUSH_MS, 25, 5000, 100),
+    maxPending: boundedInteger(process.env.CONNECTOR_COMMAND_HEALTH_MAX_PENDING, 100, 20_000, 10_000),
+    keyFor: value => value?.environmentId,
+    writeBatch: writeCommandHealth,
+    onError: (error, stats) => {
+      const now = Date.now()
+      if (now - lastCommandHealthWriterErrorAt < 10_000) return
+      lastCommandHealthWriterErrorAt = now
+      console.error('[ConnectorWorker] Command health persistence delayed', { code: error?.code || 'WRITE_FAILED', pending: stats.pending })
+    },
+  })
+  snapshotWriter.start()
+  lastEventHealthWriter.start()
+  commandHealthWriter.start()
   const chartConfig = chartStorageConfig()
   let lastChartStoreErrorAt = 0
   const environmentTelemetryWriter = chartConfig.enabled
@@ -180,14 +235,10 @@ async function main() {
         connector: { ...connector, id: connector._id },
         environment: { ...environment, secret: authentication.secret }, source, bindings,
         driverFactory: () => createConnectorDriver(connector.type),
-        onEvent: async event => {
-          if (mode === 'bootstrap') return
-          await TagValueSnapshot.findOneAndUpdate({ _id: `${event.projectId}:${event.tagId}` }, { $set: { ...event, sourceTimestamp: new Date(event.sourceTimestamp), receivedAt: new Date(event.receivedAt) } }, { upsert: true, setDefaultsOnInsert: true })
-          hub.publish(event)
+        onEvent: event => {
           const workspaceArchiveWriter = workspaceTelemetryWriters.get(event.workspaceId)?.writer
           const archiveWriter = workspaceArchiveWriter || (configuredChartWorkspaces.has(event.workspaceId) ? null : environmentTelemetryWriter)
-          archiveWriter?.enqueue(event)
-          await ConnectorEnvironment.updateOne({ _id: environment._id }, { $set: { 'health.lastEventAt': new Date(event.receivedAt) } })
+          dispatchRuntimeEvent({ mode, event, environmentId: environment._id, hub, snapshotWriter, archiveWriter, healthWriter: lastEventHealthWriter })
         },
         onHealth: async (state, message) => {
           const now = new Date()
@@ -211,13 +262,29 @@ async function main() {
   }
 
   await reload()
+  const terminalAuditRecovery = createAdaptiveRecoveryScheduler({
+    recover: () => flushPendingTerminalCommandAudits(),
+    activeDelayMs: boundedInteger(process.env.CONNECTOR_TERMINAL_AUDIT_ACTIVE_MS, 100, 60_000, 1_000),
+    idleDelayMs: boundedInteger(process.env.CONNECTOR_TERMINAL_AUDIT_IDLE_MS, 1_000, 300_000, 30_000),
+    onError: error => {
+      const now = Date.now()
+      if (now - lastTerminalAuditErrorAt >= 10_000) {
+        lastTerminalAuditErrorAt = now
+        console.error('[ConnectorWorker] terminal audit recovery delayed', { code: error?.code || 'AUDIT_RECOVERY_FAILED' })
+      }
+    },
+  })
+  await terminalAuditRecovery.start()
   startup.initialized = true
   startup.phase = 'ready'
   const reloadTimer = setInterval(() => reload().catch(error => console.error('[ConnectorWorker] reload failed', error.message)), 10_000)
-  const commandTimer = setInterval(() => dispatchCommands(runtimes).catch(error => console.error('[ConnectorWorker] command poll failed', error.message)), 250)
+  const commandTimer = setInterval(() => dispatchCommands(runtimes, hub, commandHealthWriter, terminalAuditRecovery).catch(error => console.error('[ConnectorWorker] command poll failed', error.message)), 250)
   const shutdown = async () => {
     clearInterval(reloadTimer); clearInterval(commandTimer)
+    await terminalAuditRecovery.stop()
     await Promise.all([...runtimes.values()].map(runtime => runtime.stop()))
+    const [snapshotStats, healthStats, commandHealthStats] = await Promise.all([snapshotWriter.close(), lastEventHealthWriter.close(), commandHealthWriter.close()])
+    console.log('[ConnectorWorker] Deferred persistence stopped', { snapshots: snapshotStats, health: healthStats, commandHealth: commandHealthStats })
     if (environmentTelemetryWriter) {
       const writerStats = await environmentTelemetryWriter.close()
       console.log('[ConnectorWorker] Chart telemetry archive stopped', writerStats)
@@ -266,65 +333,123 @@ function positiveInteger(value, fallback) {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
 }
 
+function boundedInteger(value, min, max, fallback) {
+  const parsed = Number.parseInt(value, 10)
+  return Number.isInteger(parsed) ? Math.min(max, Math.max(min, parsed)) : fallback
+}
+
+async function writeLatestSnapshots(events) {
+  if (!events.length) return { written: 0 }
+  await TagValueSnapshot.bulkWrite(events.map(event => ({
+    updateOne: {
+      filter: { _id: `${event.projectId}:${event.tagId}` },
+      update: { $set: { ...event, sourceTimestamp: new Date(event.sourceTimestamp), receivedAt: new Date(event.receivedAt) } },
+      upsert: true,
+      setDefaultsOnInsert: true,
+    },
+  })), { ordered: false })
+  return { written: events.length }
+}
+
+async function writeLastEventHealth(entries) {
+  if (!entries.length) return { written: 0 }
+  await ConnectorEnvironment.bulkWrite(entries.map(entry => ({
+    updateOne: {
+      filter: { _id: entry.environmentId },
+      update: { $max: { 'health.lastEventAt': new Date(entry.receivedAt) } },
+    },
+  })), { ordered: false })
+  return { written: entries.length }
+}
+
+async function writeCommandHealth(entries) {
+  if (!entries.length) return { written: 0 }
+  await ConnectorEnvironment.bulkWrite(entries.map(entry => ({
+    updateOne: {
+      filter: { _id: entry.environmentId },
+      update: { $set: entry.fields },
+    },
+  })), { ordered: false })
+  return { written: entries.length }
+}
+
 function nonNegativeInteger(value, fallback) {
   const parsed = Number.parseInt(value, 10)
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback
 }
 
-async function dispatchCommands(runtimes) {
-  const candidates = await CommandEvent.find({ status: 'authorized', executionMode: { $ne: 'serverless' } }).sort({ createdAt: 1 }).limit(20).lean()
+async function dispatchCommands(runtimes, hub, commandHealthWriter, terminalAuditRecovery) {
+  const candidates = await CommandEvent.find({ status: 'authorized', executionMode: 'worker' }).sort({ createdAt: 1 }).limit(20).lean()
   for (const candidate of candidates) {
-    const claimed = await CommandEvent.findOneAndUpdate({ _id: candidate._id, status: 'authorized' }, { $set: { status: 'dispatched' } }, { new: true }).lean()
+    const claimed = await CommandEvent.findOneAndUpdate({ _id: candidate._id, status: 'authorized', executionMode: 'worker' }, { $set: { status: 'dispatched', dispatchedAt: new Date() } }, { new: true }).lean()
     if (!claimed) continue
+    hub.publishCommand(claimed)
     const version = await ProjectVersion.findById(claimed.versionId).lean()
     const tag = version?.schema?.tags?.find(item => item.id === claimed.tagId)
     const component = version?.schema?.components?.find(item => item.id === claimed.componentId)
     const source = tag && version.schema.dataSources?.find(item => item.id === tag.sourceId)
     const runtime = source && runtimes.get(source.connectorRef)
-    if (!runtime || runtime.mode !== 'published' || !component || !tag) { await finishCommand(claimed, 'failed', 'Published connector runtime is unavailable.'); continue }
+    if (!runtime || runtime.mode !== 'published' || !component || !tag) { await finishCommand(hub, claimed, 'failed', 'Published connector runtime is unavailable.', {}, {}, terminalAuditRecovery); continue }
     const acknowledgment = commandAcknowledgment(component, runtime.environment.config, claimed.payloadSummary?.value)
-    if (!acknowledgment) { await finishCommand(claimed, 'failed', 'Command acknowledgment is not configured.'); continue }
+    if (!acknowledgment) { await finishCommand(hub, claimed, 'failed', 'Command acknowledgment is not configured.', {}, {}, terminalAuditRecovery); continue }
+    const executionTiming = {
+      acknowledgmentMode: acknowledgment.mode,
+      upstreamStartedAt: new Date(),
+      gatewayAcceptedAt: null,
+      upstreamCompletedAt: null,
+    }
     try {
       const receipt = await runtime.write({ method: component.properties?.rpcMethod || component.properties?.action || 'setValue', params: claimed.payloadSummary?.value, timeoutMs: acknowledgment.timeoutMs, acknowledgment }, async gatewayReceipt => {
-        await updateCommandHealth(runtime, 'waiting', acknowledgment.mode === 'two-way' ? 'Waiting for device RPC response.' : 'Waiting for process feedback.')
-        await CommandEvent.updateOne({ _id: claimed._id, status: 'dispatched' }, { $set: { status: 'accepted_by_gateway', resultSummary: { message: 'Accepted by ThingsBoard gateway.', receipt: gatewayReceipt.code } } })
+        executionTiming.gatewayAcceptedAt = new Date()
+        queueCommandHealth(commandHealthWriter, runtime, 'waiting', 'Waiting for process feedback.')
+        const accepted = await CommandEvent.findOneAndUpdate({ _id: claimed._id, status: 'dispatched' }, { $set: { status: 'accepted_by_gateway', resultSummary: { message: 'Accepted by ThingsBoard gateway.', receipt: gatewayReceipt.code } } }, { new: true }).lean()
+        if (accepted) hub.publishCommand(accepted)
         await AuditEvent.create({ workspaceId: claimed.workspaceId, projectId: claimed.projectId, actorId: claimed.actorId, action: 'command.accepted_by_gateway', targetType: 'component', targetId: claimed.componentId, correlationId: claimed.correlationId, metadata: { requestId: claimed.requestId, tagId: claimed.tagId } })
       })
+      executionTiming.upstreamCompletedAt = new Date()
       if (receipt.rejected) {
-        await updateCommandHealth(runtime, 'online', 'Device RPC responder returned a rejection.', { lastAcknowledgedAt: new Date() })
-        await finishCommand(claimed, 'rejected', 'Device rejected the command.', { code: receipt.code, deviceResult: receipt.result })
+        await finishCommand(hub, claimed, 'rejected', 'Device rejected the command.', { code: receipt.code, deviceResult: receipt.result }, executionTiming, terminalAuditRecovery)
+        queueCommandHealth(commandHealthWriter, runtime, 'online', 'Device RPC responder returned a rejection.', { lastAcknowledgedAt: new Date() })
       } else if (!receipt.accepted) {
-        await updateCommandHealth(runtime, 'degraded', 'ThingsBoard rejected the RPC dispatch.')
-        await finishCommand(claimed, 'failed', 'ThingsBoard rejected the RPC.', { code: receipt.code })
+        await finishCommand(hub, claimed, 'failed', 'ThingsBoard rejected the RPC.', { code: receipt.code }, executionTiming, terminalAuditRecovery)
+        queueCommandHealth(commandHealthWriter, runtime, 'degraded', 'ThingsBoard rejected the RPC dispatch.')
       } else if (receipt.acknowledged) {
-        await updateCommandHealth(runtime, 'online', acknowledgment.mode === 'two-way' ? 'Device RPC responder acknowledged the command.' : 'Process feedback matched the command.', { lastAcknowledgedAt: new Date() })
-        await finishCommand(claimed, 'acknowledged', 'Command acknowledged.', { value: claimed.payloadSummary?.value, receipt: receipt.code })
+        await finishCommand(hub, claimed, 'acknowledged', 'Command acknowledged.', { value: claimed.payloadSummary?.value, receipt: receipt.code }, executionTiming, terminalAuditRecovery)
+        queueCommandHealth(commandHealthWriter, runtime, 'online', acknowledgment.mode === 'two-way' ? 'Device RPC responder acknowledged the command.' : 'Process feedback matched the command.', { lastAcknowledgedAt: new Date() })
       } else {
         const timeout = commandAcknowledgmentTimeout(acknowledgment.mode, receipt.code)
-        await updateCommandHealth(runtime, timeout.commandHealth.state, timeout.commandHealth.message, { lastTimeoutAt: new Date() })
-        await finishCommand(claimed, timeout.command.status, timeout.command.message, timeout.command.result)
+        await finishCommand(hub, claimed, timeout.command.status, timeout.command.message, timeout.command.result, executionTiming, terminalAuditRecovery)
+        queueCommandHealth(commandHealthWriter, runtime, timeout.commandHealth.state, timeout.commandHealth.message, { lastTimeoutAt: new Date() })
       }
     } catch (error) {
+      executionTiming.upstreamCompletedAt ||= new Date()
       if (error?.name === 'TimeoutError') {
         const timeout = commandAcknowledgmentTimeout(acknowledgment.mode)
-        await updateCommandHealth(runtime, timeout.commandHealth.state, timeout.commandHealth.message, { lastTimeoutAt: new Date() })
-        await finishCommand(claimed, timeout.command.status, timeout.command.message, timeout.command.result)
+        await finishCommand(hub, claimed, timeout.command.status, timeout.command.message, timeout.command.result, executionTiming, terminalAuditRecovery)
+        queueCommandHealth(commandHealthWriter, runtime, timeout.commandHealth.state, timeout.commandHealth.message, { lastTimeoutAt: new Date() })
       } else {
-        await updateCommandHealth(runtime, 'degraded', 'RPC dispatch failed.')
-        await finishCommand(claimed, 'failed', 'Command dispatch failed.')
+        await finishCommand(hub, claimed, 'failed', 'Command dispatch failed.', {}, executionTiming, terminalAuditRecovery)
+        queueCommandHealth(commandHealthWriter, runtime, 'degraded', 'RPC dispatch failed.')
       }
     }
   }
 }
 
-async function finishCommand(event, status, message, result = {}) {
-  await CommandEvent.updateOne({ _id: event._id }, { $set: { status, resultSummary: { ...result, message }, completedAt: new Date() } })
-  await AuditEvent.create({ workspaceId: event.workspaceId, projectId: event.projectId, actorId: event.actorId, action: `command.${status}`, targetType: 'component', targetId: event.componentId, correlationId: event.correlationId, metadata: { requestId: event.requestId, tagId: event.tagId, result: status } })
+function finishCommand(hub, event, status, message, result = {}, timing = {}, terminalAuditRecovery) {
+  return persistAndPublishTerminalCommand({
+    hub,
+    event,
+    status,
+    message,
+    result,
+    timing,
+    onAuditDeferred: () => terminalAuditRecovery?.request(),
+  })
 }
 
-async function updateCommandHealth(runtime, state, message, timestamps = {}) {
+function queueCommandHealth(writer, runtime, state, message, timestamps = {}) {
   const environmentId = runtime?.environment?._id
-  if (!environmentId) return
+  if (!environmentId) return false
   const checkedAt = new Date()
   const fields = {
     'commandHealth.state': state,
@@ -333,5 +458,5 @@ async function updateCommandHealth(runtime, state, message, timestamps = {}) {
   }
   if (timestamps.lastAcknowledgedAt) fields['commandHealth.lastAcknowledgedAt'] = timestamps.lastAcknowledgedAt
   if (timestamps.lastTimeoutAt) fields['commandHealth.lastTimeoutAt'] = timestamps.lastTimeoutAt
-  await ConnectorEnvironment.updateOne({ _id: environmentId }, { $set: fields })
+  return writer.enqueue({ environmentId, fields })
 }

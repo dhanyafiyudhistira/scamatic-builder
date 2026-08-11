@@ -29,3 +29,40 @@ test('worker exposes distinct liveness and readiness on the stream port', async 
   assert.equal(readyResponse.status, 200)
   assert.equal((await readyResponse.json()).status, 'ready')
 })
+
+test('command status push is isolated to the matching actor, project, version, and capability', async t => {
+  const hub = new RuntimeStreamHub({ port: 0 })
+  t.after(async () => { hub.clients.clear(); await hub.close() })
+  await hub.ready()
+  const messages = { actor: [], other: [], viewer: [] }
+  const client = (userId, capabilities, sink) => ({
+    userId,
+    workspaceId: 'workspace-a',
+    projectId: 'project-a',
+    versionId: 'version-a',
+    capabilities: new Set(capabilities),
+    socket: { readyState: 1, send: frame => sink.push(JSON.parse(frame)), close() {}, terminate() {} },
+  })
+  hub.clients.add(client('operator-a', ['command.execute'], messages.actor))
+  hub.clients.add(client('operator-b', ['command.execute'], messages.other))
+  hub.clients.add(client('operator-a', ['runtime.view'], messages.viewer))
+
+  const delivered = hub.publishCommand({
+    workspaceId: 'workspace-a',
+    projectId: 'project-a',
+    versionId: 'version-a',
+    actorId: 'operator-a',
+    requestId: 'request-1',
+    componentId: 'button-a',
+    tagId: 'tag-a',
+    status: 'dispatched',
+    payloadSummary: { token: 'must-not-leak' },
+  })
+
+  assert.equal(delivered, 1)
+  assert.equal(messages.actor[0].type, 'command-status')
+  assert.equal(messages.actor[0].command.status, 'dispatched')
+  assert.equal(JSON.stringify(messages.actor[0]).includes('must-not-leak'), false)
+  assert.equal(messages.other.length, 0)
+  assert.equal(messages.viewer.length, 0)
+})

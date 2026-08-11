@@ -20,6 +20,7 @@ export async function pollDeviceRpc({ serverUrl, deviceToken, fetchImpl = fetch,
     fetchImpl,
     timeoutMs,
     allowEmpty: true,
+    idleStatusCodes: [408],
   })
   if (!response) return null
   if ((typeof response.id !== 'number' && typeof response.id !== 'string') || typeof response.method !== 'string') {
@@ -35,7 +36,7 @@ export async function respondDeviceRpc({ serverUrl, deviceToken, requestId, payl
   return { success: true }
 }
 
-async function deviceRequest({ serverUrl, deviceToken, resource, method, body, fetchImpl, timeoutMs, allowEmpty = false }) {
+async function deviceRequest({ serverUrl, deviceToken, resource, method, body, fetchImpl, timeoutMs, allowEmpty = false, idleStatusCodes = [] }) {
   const token = String(deviceToken || '').trim()
   if (token.length < 8 || token.length > 512 || /[\s/]/.test(token)) throw bridgeError('ThingsBoard device token is invalid.', 'SIMULATION_DEVICE_TOKEN_INVALID')
   const origin = await assertSafeConnectorTarget(serverUrl)
@@ -46,6 +47,10 @@ async function deviceRequest({ serverUrl, deviceToken, resource, method, body, f
     redirect: 'manual',
     signal: AbortSignal.timeout(timeoutMs),
   })
+  if (idleStatusCodes.includes(response.status)) {
+    await response.text()
+    return null
+  }
   if (!response.ok) throw bridgeError(`ThingsBoard device transport returned HTTP ${response.status}.`, `HTTP_${response.status}`)
   const text = await response.text()
   if (!text.trim()) return allowEmpty ? null : {}

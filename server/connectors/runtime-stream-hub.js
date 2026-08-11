@@ -3,6 +3,9 @@ import { createServer } from 'node:http'
 import { WebSocketServer } from 'ws'
 import { allowedOrigins, isAuthSessionRecordActive } from '../../api/_lib/auth.js'
 import { AuthSession, Project, ProjectVersion, RuntimeSession, RuntimeStreamSession } from '../../api/_lib/models.js'
+import { runtimeCommandProjection } from '../../shared/command-lifecycle.js'
+
+const COMMAND_EXECUTE = 'command.execute'
 
 export class RuntimeStreamHub {
   constructor({ port = 3002, path = '/runtime-stream', flushMs = 100, revalidateMs = 5_000, allowedOriginList = allowedOrigins(), healthProvider = defaultHealth } = {}) {
@@ -63,7 +66,7 @@ export class RuntimeStreamHub {
       const version = project && await ProjectVersion.findById(session.versionId).lean()
       if (!project || !version) return socket.close(4403, 'Stale stream ticket')
       const allowedTags = new Set((version.schema?.tags || []).map(tag => tag.id))
-      const client = { socket, workspaceId: session.workspaceId, projectId: session.projectId, versionId: session.versionId, runtimeSessionId: runtimeSession._id, authSessionId: authSession._id, allowedTags, pending: new Map(), timer: null, validating: false }
+      const client = { socket, userId: session.userId, workspaceId: session.workspaceId, projectId: session.projectId, versionId: session.versionId, runtimeSessionId: runtimeSession._id, authSessionId: authSession._id, capabilities: new Set(runtimeSession.capabilities || []), allowedTags, pending: new Map(), timer: null, validating: false }
       this.clients.add(client)
       const sessionTimer = setTimeout(() => socket.close(4401, 'Runtime session expired'), Math.max(1, new Date(runtimeSession.expiresAt).getTime() - Date.now()))
       const validationTimer = setInterval(() => this.#revalidate(client), this.revalidateMs)
@@ -101,6 +104,23 @@ export class RuntimeStreamHub {
     }
   }
 
+  publishCommand(event) {
+    const command = runtimeCommandProjection(event)
+    if (!command.requestId || !command.componentId) return 0
+    const frame = JSON.stringify({ type: 'command-status', command })
+    let delivered = 0
+    for (const client of this.clients) {
+      if (!canReceiveRuntimeCommand(client, event) || client.socket.readyState !== 1) continue
+      try {
+        client.socket.send(frame)
+        delivered += 1
+      } catch {
+        client.socket.close(1011, 'Command status delivery failed')
+      }
+    }
+    return delivered
+  }
+
   #flush(client) {
     client.timer = null
     if (client.socket.readyState !== 1 || !client.pending.size) return
@@ -123,4 +143,12 @@ export function isRuntimeStreamOriginAllowed(origin, originList = allowedOrigins
   const value = String(origin || '')
   if (!value) return !production
   return originList.includes(value)
+}
+
+export function canReceiveRuntimeCommand(client, event) {
+  return String(client?.userId || '') === String(event?.actorId || '')
+    && String(client?.workspaceId || '') === String(event?.workspaceId || '')
+    && String(client?.projectId || '') === String(event?.projectId || '')
+    && String(client?.versionId || '') === String(event?.versionId || '')
+    && client?.capabilities?.has?.(COMMAND_EXECUTE) === true
 }

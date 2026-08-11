@@ -43,3 +43,13 @@ export function simulationCommandState(schema, commands = []) {
 export function previousSimulationCommandValue(schema, commands, component, tag) {
   return simulationCommandState(schema, commands).get(tag?.id)?.value ?? initialMockValue(tag)
 }
+
+export function simulationCommandReadScope(schema, component, tag) {
+  const action = component?.properties?.action || 'toggle-boolean'
+  if (component?.type !== 'control-button' || action !== 'toggle-boolean' || !component.id || !tag?.id) return null
+  const resetComponentIds = (schema?.components || [])
+    .filter(item => item?.type === 'operation-shifter' && item.properties?.controlledComponentIds?.includes(component.id))
+    .map(item => item.id)
+    .filter(Boolean)
+  return { componentId: component.id, tagId: tag.id, resetComponentIds }
+}

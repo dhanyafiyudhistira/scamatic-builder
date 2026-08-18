@@ -1,5 +1,6 @@
 import { coerceConnectorValue } from './connector-contract.js'
 import { evaluateOperationShift, initialMockValue } from './runtime-evaluator.js'
+import { resolveNumericRange } from './numeric-tag-config.js'
 
 export function simulationTelemetryPayload(schema, values, { allowEmpty = false } = {}) {
   if (!values || typeof values !== 'object' || Array.isArray(values)) throw new TypeError('Simulation values must be an object.')
@@ -95,7 +96,7 @@ export function applySimulationRpc(schema, values, request) {
   let nextValue
   try {
     if (component.type === 'tuning-slider') {
-      nextValue = validateTuningValue(component, requested)
+      nextValue = validateTuningValue(component, commandTag, requested)
     } else if (targetTag.dataType === 'boolean') {
       const parsed = parseBoolean(requested)
       if (parsed != null) nextValue = parsed
@@ -115,11 +116,12 @@ export function applySimulationRpc(schema, values, request) {
   return accepted(component, method, changes, `${targetTag.path}=${String(nextValue)}`, pulse)
 }
 
-function validateTuningValue(component, input) {
+function validateTuningValue(component, tag, input) {
   const value = Number(input)
-  const min = Number(component.properties?.min ?? 0)
-  const max = Number(component.properties?.max ?? 100)
-  const step = Number(component.properties?.step ?? 1)
+  const range = resolveNumericRange(tag, component.properties, 'write')
+  const min = range.min
+  const max = range.max
+  const step = range.step
   if (!Number.isFinite(value) || value < min || value > max) throw new TypeError(`Value must be between ${min} and ${max}.`)
   const steps = (value - min) / step
   if (!Number.isFinite(step) || step <= 0 || Math.abs(steps - Math.round(steps)) > 1e-7) throw new TypeError(`Value must follow a step of ${step}.`)

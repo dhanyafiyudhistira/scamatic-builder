@@ -46,14 +46,19 @@ export default async function handler(req, res) {
     const connectorIssues = await validateConnectorReadiness(migratedDraft, project, principal.workspaceId)
     if (connectorIssues.length) return res.status(422).json({ error: 'Connector readiness validation failed.', code: 'CONNECTOR_NOT_READY', issues: connectorIssues })
     const asset = await ScadaAsset.findOne({ _id: migratedDraft.project.svgAssetId, projectId }).lean()
-    if (!asset) return res.status(422).json({ error: 'Sanitized SVG asset is missing.', issues })
+    if (!asset) return res.status(422).json({
+      error: 'Sanitized SVG asset is missing.',
+      issues: [...issues, { severity: 'error', code: 'asset.notFound', message: 'The selected sanitized SVG asset no longer exists in project storage.', path: 'project.svgAssetId' }],
+    })
     const designAssetIds = referencedDesignAssetIds(migratedDraft)
     if (designAssetIds.length) {
       const storedDesignAssetIds = await ScadaAsset.find({ _id: { $in: designAssetIds }, projectId, kind: DESIGN_IMAGE_TYPE }).distinct('_id')
       const missing = designAssetIds.filter(id => !storedDesignAssetIds.map(String).includes(id))
       if (missing.length) return res.status(422).json({
         error: 'One or more design elements are missing.',
-        issues: [...issues, { severity: 'error', code: 'designAsset.missing', message: 'Upload the missing design element again before publishing.', path: 'components' }],
+        issues: [...issues, ...missing.flatMap(assetId => migratedDraft.components.flatMap((component, componentIndex) => component?.type === DESIGN_IMAGE_TYPE && component.properties?.assetId === assetId
+          ? [{ severity: 'error', code: 'designAsset.missing', message: `Design asset ${assetId} is no longer available. Upload it again before publishing.`, path: `components.${componentIndex}.properties.assetId` }]
+          : []))],
       })
     }
 
@@ -116,9 +121,11 @@ async function validateConnectorReadiness(schema, project, workspaceId) {
   const executionMode = connectorExecutionMode()
   const issues = []
   for (const source of sources) {
+    const sourceIndex = (schema.dataSources || []).indexOf(source)
+    const sourcePath = sourceIndex >= 0 ? `dataSources.${sourceIndex}` : 'dataSources'
     const connector = await Connector.findOne({ _id: source.connectorRef, projectId: project.id, workspaceId, enabled: true }).lean()
     if (!connector || connector.type !== source.type) {
-      issues.push({ severity: 'error', code: 'connector.missing', message: `Connector for source ${source.id} is unavailable.`, path: `dataSources.${source.id}` })
+      issues.push({ severity: 'error', code: 'connector.missing', message: `Connector for source ${source.id} is unavailable.`, path: `${sourcePath}.connectorRef` })
       continue
     }
     const environment = await ConnectorEnvironment.findOne({ connectorId: connector._id, environmentRef: source.environmentRef || 'staging' }).lean()
@@ -127,7 +134,7 @@ async function validateConnectorReadiness(schema, project, workspaceId) {
       const requirement = executionMode === 'serverless'
         ? 'is not configured and online'
         : 'does not have a fresh online worker heartbeat'
-      issues.push({ severity: 'error', code: 'connector.unhealthy', message: `Connector ${connector.name} ${requirement} in ${source.environmentRef || 'staging'}.`, path: `dataSources.${source.id}` })
+      issues.push({ severity: 'error', code: 'connector.unhealthy', message: `Connector ${connector.name} ${requirement} in ${source.environmentRef || 'staging'}.`, path: `${sourcePath}.environmentRef` })
     }
   }
   return issues

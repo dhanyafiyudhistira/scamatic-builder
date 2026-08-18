@@ -301,7 +301,7 @@ export function FlowImportModal({ schema, onClose, onApply }) {
       <div className="sb-flow-import-modal" role="dialog" aria-modal="true" aria-labelledby="flow-import-title" onMouseDown={event => event.stopPropagation()}>
         <header className="sb-flow-import-header">
           <div><span className="eyebrow">FLOW CONVERSION</span><h2 id="flow-import-title">Import Node-RED JSON</h2><p>{analysis ? `${analysis.flowName} · ${analysis.nodeCount} nodes · ${analysis.fingerprint}` : 'Convert flow variables into Builder tags and ready-to-place components.'}</p></div>
-          <button type="button" className="sb-flow-import-close" aria-label="Close flow importer" onClick={onClose}>×</button>
+          <button type="button" className="sb-flow-import-close" aria-label="Close flow importer" onClick={onClose}><span aria-hidden="true" /></button>
         </header>
 
         {!analysis ? <div className="sb-flow-import-input-step">

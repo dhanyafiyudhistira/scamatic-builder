@@ -86,8 +86,27 @@ SCADA_ADMIN_EMAIL
 SCADA_ADMIN_PASSWORD
 SCADA_WORKSPACE_ID
 APP_ORIGIN
+GOOGLE_CLIENT_ID
+GOOGLE_CLIENT_SECRET
+GOOGLE_REDIRECT_URI
+VITE_GOOGLE_AUTH_URL
 MONGO_URI
 SCADA_CONNECTOR_MASTER_KEY
+```
+
+`VITE_GOOGLE_AUTH_URL` is the browser-visible Google OAuth start endpoint used
+by the login button. `GOOGLE_REDIRECT_URI` must exactly match an authorized
+redirect URI on the Google Web application client. The server validates OAuth
+state and nonce, uses PKCE for the authorization-code exchange, verifies the
+Google identity, and then creates the same revocable HttpOnly session used by
+password login. Include a URL-encoded `next` query value for the final local
+page after authentication; the Builder home is `?next=%2F`.
+
+Register these exact callback URIs on the Google Web application client:
+
+```text
+https://scada-dhany-wtp.vercel.app/api/auth/callback/google
+http://localhost:5173/api/auth/callback/google
 ```
 
 Then run:

@@ -79,6 +79,69 @@ test('exported flow round-trips exact tag semantics through validated embedded m
   assert.equal(hasBlockingIssues(validateProjectSchema(imported)), false)
 })
 
+test('Gauge exports native dashboard ranges and round-trips its safe appearance metadata', () => {
+  const schema = createProjectSchema({ id: 'gauge-export', name: 'Gauge export', slug: 'gauge-export' })
+  schema.tags = [
+    { id: 'tag_temperature', name: 'Temperature', path: 'temperature', dataType: 'number', access: 'read', sourceId: 'source_mock' },
+  ]
+  const gauge = createComponentInstance('gauge', { id: 'cmp_temperature', canvas: schema.project.canvas, tagId: 'tag_temperature', index: 0 })
+  gauge.properties = {
+    ...gauge.properties,
+    label: 'TEMPERATURE',
+    min: -60,
+    max: 60,
+    lowZoneEnd: -10,
+    highZoneStart: 30,
+    tickCount: 12,
+    decimals: 1,
+    scale: 2,
+    offset: -1,
+    unitMode: 'custom',
+    suffix: ' °C',
+    fallback: 'N/A',
+    lowColor: '#123456',
+    normalColor: '#abcdef',
+    highColor: '#fedcba',
+    needleColor: '#112233',
+    faceColor: '#ddeeff',
+    textColor: '#223344',
+    showDigital: false,
+  }
+  schema.components = [gauge]
+
+  const exported = createNodeRedExport(schema)
+  const dashboardGauge = exported.nodes.find(node => node.type === 'ui_gauge')
+  assert.deepEqual([dashboardGauge.min, dashboardGauge.max, dashboardGauge.seg1, dashboardGauge.seg2], [-60, 60, -10, 30])
+  assert.deepEqual(dashboardGauge.colors, ['#123456', '#abcdef', '#fedcba'])
+
+  const analysis = parseNodeRedFlow(serializeNodeRedExport(exported))
+  const candidate = analysis.candidates.find(item => item.path === 'temperature')
+  assert.equal(candidate.componentType, 'gauge')
+  assert.deepEqual(candidate.componentProperties, {
+    label: 'TEMPERATURE',
+    rangeMode: 'inherit',
+    min: -60,
+    max: 60,
+    decimals: 1,
+    unitMode: 'custom',
+    suffix: ' °C',
+    lowZoneEnd: -10,
+    highZoneStart: 30,
+    scale: 2,
+    offset: -1,
+    tickCount: 12,
+    lowColor: '#123456',
+    normalColor: '#abcdef',
+    highColor: '#fedcba',
+    needleColor: '#112233',
+    faceColor: '#ddeeff',
+    textColor: '#223344',
+    fallback: 'N/A',
+    showDigital: false,
+  })
+  assert.deepEqual(candidate.engineering, { min: -60, max: 60, unit: ' °C', decimals: 1 })
+})
+
 test('export excludes connector and component secrets instead of serializing project objects wholesale', () => {
   const schema = exportFixture()
   schema.dataSources[0].credentials = { username: 'admin', password: 'must-not-leak-password' }

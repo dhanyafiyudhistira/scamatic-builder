@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { apiRequest, login, logout } from './platform/api'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { apiRequest, logout } from './platform/api'
 import { RuntimeCanvas } from './platform/RuntimeCanvas'
 import { ThemeToneToggle, useThemeTone } from './platform/ThemeTone'
 import { BoardToneToggle, useBoardTone } from './platform/BoardTone'
@@ -7,7 +7,7 @@ import { useEditorHistory } from './platform/useEditorHistory'
 import { ComponentInspector, ComponentLibrary, LayersPanel, MockControls, TagManager } from './platform/BuilderPanels'
 import { COMPONENT_REGISTRY, compatibleTags, createComponentInstance } from '../shared/component-registry.js'
 import { executeMockCommand, initialMockValue } from '../shared/runtime-evaluator.js'
-import { validateProjectSchema } from '../shared/project-schema.js'
+import { hasBlockingIssues, validateProjectSchema } from '../shared/project-schema.js'
 import { applyNodeRedImportPlan } from '../shared/node-red-import.js'
 import { createNodeRedExport, serializeNodeRedExport } from '../shared/node-red-export.js'
 import { arrangeSelection, moveSelection } from '../shared/placement.js'
@@ -20,6 +20,10 @@ import { RUNTIME_PROFILES, runtimeProfileMetadata } from '../shared/runtime-prof
 import { RuntimeProfileBanner, RuntimeProfileSelector } from './platform/RuntimeProfile.jsx'
 import { validationNoticeDetails } from '../shared/validation-notice.js'
 import { encodeHardPassword } from '../shared/hard-password.js'
+import { runtimeHrefWithMetrics } from '../shared/runtime-metrics-option.js'
+import { validationSummary } from '../shared/validation-diagnostics.js'
+import { ValidationConsole } from './platform/ValidationConsole.jsx'
+import { AuthScreen } from './platform/AuthScreen.jsx'
 
 const makeId = prefix => `${prefix}_${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`
 const recoveryKey = projectId => `scamatic.recovery.${projectId}`
@@ -87,10 +91,19 @@ export default function BuilderPlatform() {
   const [versions, setVersions] = useState([])
   const [auditEvents, setAuditEvents] = useState([])
   const [flowImportOpen, setFlowImportOpen] = useState(false)
+  const [validationConsoleOpen, setValidationConsoleOpen] = useState(false)
+  const [validationConsoleMinimized, setValidationConsoleMinimized] = useState(false)
+  const [validationConsoleSource, setValidationConsoleSource] = useState(null)
 
   useEffect(() => { draftRef.current = draft }, [draft])
   useEffect(() => { sidebarWidthsRef.current = sidebarWidths }, [sidebarWidths])
   useEffect(() => () => sidebarResizeCleanupRef.current?.(), [])
+  useEffect(() => {
+    if (!notice?.floating) return
+    const timer = window.setTimeout(() => setNotice(current => current === notice ? null : current), 2400)
+    return () => window.clearTimeout(timer)
+  }, [notice])
+  const issues = useMemo(() => draft ? validateProjectSchema(draft, { requireAsset: true }) : [], [draft])
 
   const updateSidebarWidth = useCallback((side, width, persist = false) => {
     setSidebarWidths(previous => {
@@ -183,6 +196,8 @@ export default function BuilderPlatform() {
       setSvg(data.svg)
       setDesignAssets(data.designAssets || {})
       setSelectedIds([])
+      setValidationConsoleOpen(false)
+      setValidationConsoleSource(null)
       setDirty(recovered)
       setMockValues(Object.fromEntries((schema.tags || []).map(tag => [tag.id, initialMockValue(tag)])))
       setNotice(recovered ? { type: 'info', text: 'Local recovery restored. Autosave will persist it.' } : null)
@@ -207,7 +222,14 @@ export default function BuilderPlatform() {
     if (transient) editor.mutate(updater)
     else editor.commit(updater)
     setDirty(true)
+    setValidationConsoleSource(null)
   }, [editor.commit, editor.mutate])
+
+  const reviewValidation = useCallback((nextIssues = null, origin = 'Live draft validation') => {
+    setValidationConsoleSource({ issues: nextIssues, origin })
+    setValidationConsoleMinimized(false)
+    setValidationConsoleOpen(true)
+  }, [])
 
   const updateComponent = useCallback((componentId, patch, options) => {
     changeDraft(previous => ({
@@ -405,6 +427,14 @@ export default function BuilderPlatform() {
   const saveDraft = useCallback(async ({ silent = false } = {}) => {
     const snapshot = draftRef.current
     if (!snapshot || !currentProject || savingRef.current) return null
+    const localIssues = validateProjectSchema(snapshot)
+    if (hasBlockingIssues(localIssues)) {
+      if (!silent) {
+        setNotice({ type: 'error', text: 'Draft validation failed. Review the Validation Console.', details: validationNoticeDetails(localIssues) })
+        reviewValidation(null, 'Draft save preflight')
+      }
+      return null
+    }
     savingRef.current = true
     if (!silent) { setBusy(true); setNotice({ type: 'info', text: 'Saving draft…' }) }
     try {
@@ -421,13 +451,14 @@ export default function BuilderPlatform() {
       if (!silent) setNotice({ type: 'success', text: `Draft saved · revision ${data.revision}` })
       return data.revision
     } catch (error) {
-      setNotice({ type: 'error', text: error.message })
+      setNotice({ type: 'error', text: error.message, details: validationNoticeDetails(error.issues) })
+      if (error.issues?.length && !silent) reviewValidation(error.issues, 'Draft save · server validation')
       return null
     } finally {
       savingRef.current = false
       if (!silent) setBusy(false)
     }
-  }, [currentProject, revision])
+  }, [currentProject, revision, reviewValidation])
 
   useEffect(() => {
     if (!autoSave || !dirty || !draft || !currentProject || busy) return
@@ -436,6 +467,12 @@ export default function BuilderPlatform() {
   }, [autoSave, dirty, draft, currentProject, busy, saveDraft])
 
   const publish = async () => {
+    const preflightIssues = validateProjectSchema(draftRef.current, { requireAsset: true })
+    if (hasBlockingIssues(preflightIssues)) {
+      setNotice({ type: 'error', text: 'Publish validation failed. Review the Validation Console.', details: validationNoticeDetails(preflightIssues) })
+      reviewValidation(null, 'Publish preflight')
+      return
+    }
     let publishRevision = revision
     if (dirty) {
       const saved = await saveDraft()
@@ -452,6 +489,7 @@ export default function BuilderPlatform() {
       await loadGovernance(currentProject.id)
     } catch (error) {
       setNotice({ type: 'error', text: error.message, details: validationNoticeDetails(error.issues) })
+      if (error.issues?.length) reviewValidation(error.issues, 'Publish · server validation')
     } finally { setBusy(false) }
   }
 
@@ -491,7 +529,25 @@ export default function BuilderPlatform() {
     await logout().catch(() => { })
     setSession({ loading: false, user: null }); setCurrentProject(null); editor.replace(null)
   }
-  const closeProject = () => { setCurrentProject(null); editor.replace(null); setSelectedIds([]); setDesignAssets({}) }
+  const closeProject = () => { setCurrentProject(null); editor.replace(null); setSelectedIds([]); setDesignAssets({}); setValidationConsoleOpen(false); setValidationConsoleSource(null) }
+  const handleWorkspaceSwitch = async workspaceId => {
+    if (!workspaceId || workspaceId === session.user?.workspaceId) return
+    setBusy(true)
+    setNotice(null)
+    try {
+      const data = await apiRequest('/api/auth', { method: 'PUT', body: JSON.stringify({ workspaceId }) })
+      setProjects([])
+      closeProject()
+      setSession({ loading: false, user: data.user })
+      const workspace = data.user.workspaces?.find(item => item.current)
+      setNotice({ type: 'success', text: `${workspace?.name || 'Selected workspace'} active`, floating: true })
+    } catch (error) {
+      setNotice({ type: 'error', text: error.message })
+      throw error
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const exportNodeRedFlow = () => {
     try {
@@ -512,8 +568,8 @@ export default function BuilderPlatform() {
   }
 
   if (session.loading) return <CenteredState title="Loading session…" />
-  if (!session.user) return <LoginScreen onAuthenticated={loadSession} />
-  if (!currentProject || !draft) return <ProjectHome user={session.user} projects={projects} busy={busy} onOpen={openProject} onCreated={async project => { await loadProjects(); await openProject(project) }} onProjectsChanged={loadProjects} onNotice={setNotice} onLogout={handleLogout} notice={notice} />
+  if (!session.user) return <AuthScreen onAuthenticated={loadSession} />
+  if (!currentProject || !draft) return <ProjectHome user={session.user} projects={projects} busy={busy} onOpen={openProject} onCreated={async project => { await loadProjects(); await openProject(project) }} onProjectsChanged={loadProjects} onNotice={setNotice} onSwitchWorkspace={handleWorkspaceSwitch} onLogout={handleLogout} notice={notice} />
 
   if (preview) {
     const previewProfile = runtimeProfileMetadata(draft)
@@ -521,7 +577,6 @@ export default function BuilderPlatform() {
   }
 
   const selected = selectedIds.length === 1 ? draft.components.find(component => component.id === selectedIds[0]) : null
-  const issues = validateProjectSchema(draft, { requireAsset: true })
   const profile = runtimeProfileMetadata(draft)
 
   return (
@@ -589,7 +644,7 @@ export default function BuilderPlatform() {
         }}
       >
         <aside className="sb-sidebar left">
-          <Panel title="Components" description={`${componentTypeCount} component types · Controls and indicators`} collapsible defaultOpen={false} storageKey={`scamatic.panel.components.${currentProject.id}`}><ComponentLibrary onAdd={addComponent} /></Panel>
+          <Panel title="Components" description={`${componentTypeCount} component types · Controls and indicators`} collapsible expandable defaultOpen={false} storageKey={`scamatic.panel.components.${currentProject.id}`}><ComponentLibrary onAdd={addComponent} /></Panel>
           <Panel title="Schematic Assets" description={`${Object.keys(designAssets).length} custom images · PNG, JPG, or SVG`}>
             <div className="sb-schematic-assets">
               <span className="sb-asset-section-label">Base schematic</span>
@@ -608,7 +663,7 @@ export default function BuilderPlatform() {
             </div>
           </Panel>
           <Panel title="Layers" description={`${draft.components.length} layers · Visibility, locking, and stacking order`} collapsible defaultOpen={false} storageKey={`scamatic.panel.layers.${currentProject.id}`}><LayersPanel components={draft.components} selectedIds={selectedIds} onSelect={selectComponent} onPatch={updateComponent} onReorder={reorderComponent} /></Panel>
-          <Panel title={`Validation · ${issues.length}`}>{issues.length === 0 ? <p className="sb-ok">Ready to publish</p> : <ul className="sb-issue-list">{issues.map((issue, index) => <li key={`${issue.code}-${index}`} className={issue.severity}>{issue.message}</li>)}</ul>}</Panel>
+          <Panel title={`Validation · ${issues.length}`}><ValidationPanel issues={issues} onReview={() => reviewValidation(null, 'Live draft validation')} /></Panel>
         </aside>
         <div
           className="sb-sidebar-resizer left"
@@ -655,21 +710,42 @@ export default function BuilderPlatform() {
         setFlowImportOpen(false)
         setNotice({ type: 'success', text: `Flow imported: ${plan.stats.tagsCreated} new tags and ${plan.stats.componentsCreated} new components. Reused items were not duplicated.` })
       }} />}
+      <ValidationConsole
+        open={validationConsoleOpen}
+        minimized={validationConsoleMinimized}
+        schema={draft}
+        issues={validationConsoleSource?.issues ?? issues}
+        origin={validationConsoleSource?.origin || 'Live draft validation'}
+        onMinimize={() => setValidationConsoleMinimized(value => !value)}
+        onClose={() => { setValidationConsoleOpen(false); setValidationConsoleSource(null) }}
+        onLocate={diagnostic => {
+          if (!diagnostic.sourceId) return
+          setSelectedIds([diagnostic.sourceId])
+          setValidationConsoleMinimized(true)
+        }}
+      />
     </div>
   )
 }
 
 function FileMenu({ autoSave, onAutoSaveChange, dirty, revision, lastSavedAt, busy, onSave, onPreview, canImportFlow, onImportFlow, exportFlowDisabled, onExportFlow, canPublish, onPublish, runtimeHref }) {
   const [open, setOpen] = useState(false)
+  const [runtimePromptOpen, setRuntimePromptOpen] = useState(false)
   const rootRef = useRef(null)
 
   useEffect(() => {
     if (!open) return
     const closeOnOutsidePress = event => {
-      if (!rootRef.current?.contains(event.target)) setOpen(false)
+      if (!rootRef.current?.contains(event.target)) {
+        setRuntimePromptOpen(false)
+        setOpen(false)
+      }
     }
     const closeOnEscape = event => {
-      if (event.key === 'Escape') setOpen(false)
+      if (event.key === 'Escape') {
+        setRuntimePromptOpen(false)
+        setOpen(false)
+      }
     }
     window.addEventListener('pointerdown', closeOnOutsidePress)
     window.addEventListener('keydown', closeOnEscape)
@@ -681,14 +757,27 @@ function FileMenu({ autoSave, onAutoSaveChange, dirty, revision, lastSavedAt, bu
 
   const act = callback => {
     callback()
+    setRuntimePromptOpen(false)
     setOpen(false)
+  }
+
+  const openRuntime = metricsEnabled => {
+    setRuntimePromptOpen(false)
+    setOpen(false)
+    globalThis.open(runtimeHrefWithMetrics(runtimeHref, metricsEnabled), '_blank', 'noopener,noreferrer')
+  }
+
+  const toggleFileMenu = next => {
+    const resolved = typeof next === 'function' ? next(open) : next
+    if (!resolved) setRuntimePromptOpen(false)
+    setOpen(resolved)
   }
 
   return (
     <div className={`sb-view-menu sb-file-menu ${open ? 'is-open' : ''}`} ref={rootRef}>
-      <HeaderMenuTrigger label="File" open={open} onToggle={setOpen} />
+      <HeaderMenuTrigger label="File" open={open} onToggle={toggleFileMenu} />
       {open && (
-        <div className="sb-view-menu-popover" role="menu" aria-label="File actions">
+        <div className={`sb-view-menu-popover ${runtimePromptOpen ? 'has-runtime-submenu' : ''}`} role="menu" aria-label="File actions">
           <div className="sb-file-menu-status" role="status">
             <span className={`sb-save-state ${dirty ? 'is-dirty' : ''}`}>
               {dirty ? `Unsaved · Revision ${revision}` : `Revision ${revision}`}
@@ -703,9 +792,29 @@ function FileMenu({ autoSave, onAutoSaveChange, dirty, revision, lastSavedAt, bu
           <ViewMenuItem label="Save" disabled={busy || !dirty} onClick={() => act(onSave)} />
           <ViewMenuItem label="Preview" onClick={() => act(onPreview)} />
           {canPublish && <ViewMenuItem label="Publish" disabled={busy} onClick={() => act(onPublish)} />}
-          {runtimeHref && <ViewMenuItem label="Runtime" value="Open" onClick={() => act(() => globalThis.open(runtimeHref, '_blank', 'noopener,noreferrer'))} />}
+          {runtimeHref && (
+            <div className="sb-runtime-file-entry" role="none">
+              <ViewMenuItem label="Runtime" value={runtimePromptOpen ? 'Choose' : 'Open'} hasPopup expanded={runtimePromptOpen} onClick={() => setRuntimePromptOpen(value => !value)} />
+              {runtimePromptOpen && <RuntimeLaunchMenu onChoose={openRuntime} />}
+            </div>
+          )}
         </div>
       )}
+    </div>
+  )
+}
+
+function RuntimeLaunchMenu({ onChoose }) {
+  const enableRef = useRef(null)
+
+  useEffect(() => {
+    enableRef.current?.focus()
+  }, [])
+
+  return (
+    <div className="sb-runtime-launch-menu" role="menu" aria-label="Runtime metrics options">
+      <button ref={enableRef} type="button" role="menuitem" onClick={() => onChoose(true)}>ENABLE METRICS</button>
+      <button type="button" role="menuitem" onClick={() => onChoose(false)}>DISABLE METRICS</button>
     </div>
   )
 }
@@ -865,7 +974,7 @@ function HeaderMenuTrigger({ label, open, onToggle }) {
   )
 }
 
-function ViewMenuItem({ label, value = '', checked, disabled = false, onClick }) {
+function ViewMenuItem({ label, value = '', checked, disabled = false, hasPopup = false, expanded, onClick }) {
   const isToggle = typeof checked === 'boolean'
   const displayValue = value || (isToggle ? (checked ? 'On' : 'Off') : '')
   return (
@@ -874,6 +983,8 @@ function ViewMenuItem({ label, value = '', checked, disabled = false, onClick })
       className="sb-view-menu-item"
       role={isToggle ? 'menuitemcheckbox' : 'menuitem'}
       aria-checked={isToggle ? checked : undefined}
+      aria-haspopup={hasPopup ? 'menu' : undefined}
+      aria-expanded={hasPopup ? Boolean(expanded) : undefined}
       disabled={disabled}
       onClick={onClick}
     >
@@ -883,23 +994,33 @@ function ViewMenuItem({ label, value = '', checked, disabled = false, onClick })
   )
 }
 
-function LoginScreen({ onAuthenticated, compact = false }) {
-  const [email, setEmail] = useState('admin@scada.local'); const [password, setPassword] = useState(''); const [error, setError] = useState(''); const [busy, setBusy] = useState(false)
-  const submit = async event => { event.preventDefault(); setBusy(true); setError(''); try { await login(email, password); await onAuthenticated() } catch (requestError) { setError(requestError.message) } finally { setBusy(false) } }
-  return <div className={compact ? 'sb-runtime-login' : 'sb-login-page'}><form className="sb-login-card" onSubmit={submit}><div className="sb-login-card-head"><div className="sb-login-mark">SC</div><ThemeToneToggle /></div><p className="eyebrow">SCADA SCHEMATIC PLATFORM</p><h1>{compact ? 'Runtime access' : 'Welcome to Scamatic Builder'}</h1><p>Private workspace access with revocable HttpOnly sessions.</p><label>Email<input type="email" value={email} onChange={event => setEmail(event.target.value)} required /></label><label>Password<input type="password" value={password} onChange={event => setPassword(event.target.value)} required autoFocus /></label>{error && <div className="sb-form-error">{error}</div>}<button type="submit" className="primary" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button></form></div>
-}
-
-function ProjectHome({ user, projects, busy, onOpen, onCreated, onProjectsChanged, onNotice, onLogout, notice }) {
+function ProjectHome({ user, projects, busy, onOpen, onCreated, onProjectsChanged, onNotice, onSwitchWorkspace, onLogout, notice }) {
   const [showCreate, setShowCreate] = useState(false)
   const [showMembers, setShowMembers] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
   const [showHidden, setShowHidden] = useState(false)
   const [actionBusyId, setActionBusyId] = useState(null)
   const [pinRequest, setPinRequest] = useState(null)
+  const [workspaceSwitching, setWorkspaceSwitching] = useState(false)
+  const canBuild = user.capabilities?.includes('builder.read')
+  const canCreate = user.capabilities?.includes('project.create')
   const canManage = user.capabilities?.includes('project.manage')
   const canDelete = user.capabilities?.includes('project.delete')
+  const runtimeOnly = !canBuild && user.capabilities?.includes('runtime.view')
+  const activeWorkspace = user.workspaces?.find(workspace => workspace.current)
   const hiddenCount = projects.filter(project => project.hiddenAt).length
   const visibleProjects = showHidden ? projects : projects.filter(project => !project.hiddenAt)
+  const chooseWorkspace = async event => {
+    const workspaceId = event.target.value
+    if (workspaceId === user.workspaceId) return
+    setWorkspaceSwitching(true)
+    try { await onSwitchWorkspace(workspaceId) } catch { /* The home notice shows the API error. */ } finally { setWorkspaceSwitching(false) }
+  }
+  const emptyProjectsMessage = runtimeOnly
+    ? <>No projects are assigned in <strong>{activeWorkspace?.name || 'this workspace'}</strong>. Choose the linked workspace above if needed; otherwise ask an administrator to confirm the project assignment.</>
+    : user.workspaces?.length > 1
+      ? <>No projects exist in <strong>{activeWorkspace?.name || 'the active workspace'}</strong>. Choose another workspace above to see its projects.</>
+      : 'No projects yet. Create the first builder project.'
 
   const runAction = async (project, action) => {
     let payload = { projectId: project.id, action }
@@ -938,12 +1059,21 @@ function ProjectHome({ user, projects, busy, onOpen, onCreated, onProjectsChange
     }
   }
 
+  const openForCurrentRole = project => {
+    if (canBuild) return onOpen(project)
+    if (!project.activeVersionId) {
+      onNotice({ type: 'error', text: `${project.name} has not been published yet. Ask an administrator to publish it before operator access.` })
+      return
+    }
+    globalThis.location.assign(`/runtime/${encodeURIComponent(project.slug)}`)
+  }
+
   const requestOpen = project => {
     if (project.security?.pinEnabled && !project.security?.unlocked) {
       setPinRequest({ project, intent: 'open' })
       return
     }
-    onOpen(project)
+    openForCurrentRole(project)
   }
 
   const requestSecurity = project => {
@@ -952,19 +1082,22 @@ function ProjectHome({ user, projects, busy, onOpen, onCreated, onProjectsChange
 
   return (
     <div className="sb-home">
-      <header className="sb-home-header"><div><span className="eyebrow">SCADA SCHEMATIC PLATFORM</span><h1>Scamatic<span>.Builder</span></h1></div><div className="sb-user-chip"><UserSettingsMenu user={user} onManageUsers={() => setShowMembers(true)} onChangePassword={() => setShowPassword(true)} onLogout={onLogout} /></div></header>
+      <header className="sb-home-header"><div><span className="eyebrow">SCADA SCHEMATIC PLATFORM</span><h1>Scamatic<span>.Builder</span></h1></div><div className="sb-user-chip"><UserSettingsMenu user={user} onManageUsers={() => setShowMembers(true)} onChangePassword={() => setShowPassword(true)} onSwitchWorkspace={onSwitchWorkspace} onLogout={onLogout} /></div></header>
       <main>
         <div className="sb-home-lead">
-          <div><h2>Projects</h2><p>Build schema-driven SCADA screens from sanitized SVG assets.</p></div>
+          <div><h2>{runtimeOnly ? 'Assigned runtimes' : 'Projects'}</h2><p>{runtimeOnly ? `Operator access in ${activeWorkspace?.name || 'the active workspace'}. Open a published project to start the runtime.` : 'Build schema-driven SCADA screens from sanitized SVG assets.'}</p></div>
           <div className="sb-home-actions">
+            {user.workspaces?.length > 1 && <label className="sb-home-workspace-select"><span>Active workspace</span><select value={user.workspaceId} onChange={chooseWorkspace} disabled={busy || workspaceSwitching}>{user.workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.name} · {workspace.role}</option>)}</select></label>}
             {canManage && hiddenCount > 0 && <button type="button" className={showHidden ? 'is-active' : ''} onClick={() => setShowHidden(value => !value)}>{showHidden ? 'Hide hidden projects' : `Show hidden (${hiddenCount})`}</button>}
-            <button type="button" className="primary" onClick={() => setShowCreate(true)}>+ New project</button>
+            {canCreate && <button type="button" className="primary" onClick={() => setShowCreate(true)}>+ New project</button>}
           </div>
         </div>
-        {notice && <div className={`sb-notice ${notice.type}`}>{notice.text}</div>}
+        {notice && (notice.floating
+          ? <div className={`sb-builder-notice ${notice.type}`} role="status" aria-live="polite"><span>{notice.text}</span></div>
+          : <div className={`sb-notice ${notice.type}`}>{notice.text}</div>)}
         <div className="sb-project-grid">
-          {visibleProjects.map(project => <ProjectCard key={project.id} project={project} disabled={busy || actionBusyId === project.id} canManage={canManage} canDelete={canDelete} onOpen={requestOpen} onAction={runAction} onSecurity={requestSecurity} />)}
-          {visibleProjects.length === 0 && <div className="sb-empty-projects">{projects.length === 0 ? 'No projects yet. Create the first builder project.' : 'No visible projects. Use “Show hidden” to restore one.'}</div>}
+          {visibleProjects.map(project => <ProjectCard key={project.id} project={project} runtimeOnly={runtimeOnly} disabled={busy || actionBusyId === project.id} canManage={canManage} canDelete={canDelete} onOpen={requestOpen} onAction={runAction} onSecurity={requestSecurity} />)}
+          {visibleProjects.length === 0 && <div className="sb-empty-projects">{projects.length === 0 ? emptyProjectsMessage : 'No visible projects. Use “Show hidden” to restore one.'}</div>}
         </div>
       </main>
       {showCreate && <CreateProjectModal onClose={() => setShowCreate(false)} onCreated={async project => { setShowCreate(false); await onCreated(project) }} />}
@@ -980,7 +1113,7 @@ function ProjectHome({ user, projects, busy, onOpen, onCreated, onProjectsChange
           await onProjectsChanged()
           if (pinRequest.intent === 'open') {
             setPinRequest(null)
-            await onOpen(unlockedProject)
+            await openForCurrentRole(unlockedProject)
           } else {
             setPinRequest({ project: unlockedProject, intent: 'setup' })
           }
@@ -989,7 +1122,7 @@ function ProjectHome({ user, projects, busy, onOpen, onCreated, onProjectsChange
           const unlockedProject = { ...pinRequest.project, security: { ...pinRequest.project.security, unlocked: true } }
           await onProjectsChanged()
           setPinRequest(null)
-          if (pinRequest.intent === 'open') await onOpen(unlockedProject)
+          if (pinRequest.intent === 'open') await openForCurrentRole(unlockedProject)
           else onNotice({ type: 'success', text: `${pinRequest.project.name} security PIN was reset.` })
         }}
         onChanged={async message => {
@@ -1002,8 +1135,9 @@ function ProjectHome({ user, projects, busy, onOpen, onCreated, onProjectsChange
   )
 }
 
-function UserSettingsMenu({ user, onManageUsers, onChangePassword, onLogout }) {
+function UserSettingsMenu({ user, onManageUsers, onChangePassword, onSwitchWorkspace, onLogout }) {
   const [open, setOpen] = useState(false)
+  const [switching, setSwitching] = useState(false)
   const rootRef = useRef(null)
   useEffect(() => {
     if (!open) return
@@ -1017,11 +1151,25 @@ function UserSettingsMenu({ user, onManageUsers, onChangePassword, onLogout }) {
     return () => { document.removeEventListener('pointerdown', close); document.removeEventListener('keydown', close) }
   }, [open])
   const act = action => { setOpen(false); action() }
+  const switchWorkspace = async event => {
+    const workspaceId = event.target.value
+    if (workspaceId === user.workspaceId) return
+    setSwitching(true)
+    try {
+      await onSwitchWorkspace(workspaceId)
+      setOpen(false)
+    } catch {
+      // The project home displays the authoritative API error.
+    } finally {
+      setSwitching(false)
+    }
+  }
   return (
     <div className="sb-settings-menu" ref={rootRef}>
       <button type="button" className="sb-settings-trigger" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(value => !value)}><span className="sb-settings-gear" aria-hidden="true"></span>Settings<i aria-hidden="true" /></button>
       {open && <div className="sb-settings-popover" role="menu">
         <div className="sb-settings-identity"><span>{user.role}</span><div><strong>{user.displayName || 'SCADA user'}</strong><small>{user.email}</small></div></div>
+        {user.workspaces?.length > 1 && <div className="sb-settings-section sb-workspace-switcher"><small>Active workspace</small><select aria-label="Active workspace" value={user.workspaceId} onChange={switchWorkspace} disabled={switching}>{user.workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.name} · {workspace.role}</option>)}</select>{switching && <span>Switching workspace…</span>}</div>}
         <div className="sb-settings-section"><small>Appearance</small><ThemeToneToggle /></div>
         <div className="sb-settings-divider" role="separator" />
         {user.capabilities?.includes('members.manage') && <button type="button" role="menuitem" onClick={() => act(onManageUsers)}>Manage users</button>}
@@ -1032,7 +1180,7 @@ function UserSettingsMenu({ user, onManageUsers, onChangePassword, onLogout }) {
   )
 }
 
-function ProjectCard({ project, disabled, canManage, canDelete, onOpen, onAction, onSecurity }) {
+function ProjectCard({ project, runtimeOnly = false, disabled, canManage, canDelete, onOpen, onAction, onSecurity }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const rootRef = useRef(null)
   useEffect(() => {
@@ -1049,13 +1197,13 @@ function ProjectCard({ project, disabled, canManage, canDelete, onOpen, onAction
   const act = action => { setMenuOpen(false); void onAction(project, action) }
   return (
     <article className={`sb-project-card ${project.hiddenAt ? 'is-hidden' : ''}`} ref={rootRef}>
-      <button type="button" className="sb-project-card-open" onClick={() => onOpen(project)} disabled={disabled}>
+      <button type="button" className="sb-project-card-open" onClick={() => onOpen(project)} disabled={disabled || (runtimeOnly && !project.activeVersionId)}>
         <span className="sb-project-icon">SC</span>
         <strong>{project.name}</strong>
         <code>/{project.slug}</code>
         <span>{project.canvas.width} × {project.canvas.height}</span>
         {project.security?.pinEnabled && <span className={`sb-project-pin-state ${project.security.unlocked ? 'is-unlocked' : 'is-locked'}`}><i aria-hidden="true">{project.security.unlocked ? '◇' : '◆'}</i>{project.security.unlocked ? 'PIN unlocked' : 'PIN locked'}</span>}
-        <em>{project.hiddenAt ? 'Hidden' : project.activeVersionId ? 'Published' : 'Draft only'}</em>
+        <em>{project.hiddenAt ? 'Hidden' : project.activeVersionId ? (runtimeOnly ? 'Open runtime' : 'Published') : runtimeOnly ? 'Awaiting publish' : 'Draft only'}</em>
       </button>
       {(canManage || canDelete) && <button type="button" className="sb-project-card-menu-trigger" aria-label={`Actions for ${project.name}`} aria-haspopup="menu" aria-expanded={menuOpen} disabled={disabled} onClick={() => setMenuOpen(value => !value)}>•••</button>}
       {menuOpen && <div className="sb-project-card-menu" role="menu">
@@ -1137,17 +1285,107 @@ const MEMBER_ROLE_META = {
 function MemberAdminModal({ projects, onClose }) {
   const [members, setMembers] = useState([])
   const [form, setForm] = useState({ email: '', displayName: '', password: '', role: 'VIEWER', projectIds: [] })
+  const [accountCheck, setAccountCheck] = useState({ state: 'idle', available: false })
+  const [success, setSuccess] = useState('')
   const [error, setError] = useState(''); const [busy, setBusy] = useState(true)
+  const [editingMember, setEditingMember] = useState(null)
+  const [editBusy, setEditBusy] = useState(false)
+  const [editError, setEditError] = useState('')
+  const [directoryNotice, setDirectoryNotice] = useState('')
   const load = useCallback(async () => { setBusy(true); try { const data = await apiRequest('/api/members'); setMembers(data.members || []) } catch (requestError) { setError(requestError.message) } finally { setBusy(false) } }, [])
   useEffect(() => { load() }, [load])
+  useEffect(() => {
+    const email = form.email.trim().toLowerCase()
+    if (!/^\S+@\S+\.\S+$/.test(email)) {
+      setAccountCheck({ state: 'idle', available: false })
+      return
+    }
+    const controller = new AbortController()
+    const timer = setTimeout(async () => {
+      setAccountCheck({ state: 'checking', available: false })
+      try {
+        const data = await apiRequest(`/api/members?email=${encodeURIComponent(email)}`, { signal: controller.signal })
+        setAccountCheck(data.account || { state: 'check_error', available: false, message: 'Unable to verify this account.' })
+        if (data.account?.exists) setForm(previous => previous.email.trim().toLowerCase() === email ? { ...previous, displayName: data.account.displayName || '', password: '' } : previous)
+      } catch (requestError) {
+        if (requestError.name !== 'AbortError') setAccountCheck({ state: 'check_error', available: false, message: requestError.message })
+      }
+    }, 350)
+    return () => { clearTimeout(timer); controller.abort() }
+  }, [form.email])
   useEffect(() => {
     const previousOverflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     return () => { document.body.style.overflow = previousOverflow }
   }, [])
   const toggleProject = projectId => setForm(previous => ({ ...previous, projectIds: previous.projectIds.includes(projectId) ? previous.projectIds.filter(id => id !== projectId) : [...previous.projectIds, projectId] }))
-  const submit = async event => { event.preventDefault(); setBusy(true); setError(''); try { await apiRequest('/api/members', { method: 'POST', body: JSON.stringify(form) }); setForm({ email: '', displayName: '', password: '', role: 'VIEWER', projectIds: [] }); await load() } catch (requestError) { setError(requestError.message); setBusy(false) } }
+  const startProjectEdit = member => {
+    setEditingMember({ ...member, projectIds: Array.isArray(member.projectIds) ? member.projectIds.map(String) : [] })
+    setEditError('')
+    setDirectoryNotice('')
+  }
+  const toggleEditedProject = projectId => setEditingMember(previous => {
+    if (!previous) return previous
+    const normalizedProjectId = String(projectId)
+    return {
+      ...previous,
+      projectIds: previous.projectIds.includes(normalizedProjectId)
+        ? previous.projectIds.filter(id => id !== normalizedProjectId)
+        : [...previous.projectIds, normalizedProjectId],
+    }
+  })
+  const saveProjectAccess = async event => {
+    event.preventDefault()
+    if (!editingMember) return
+    setEditBusy(true)
+    setEditError('')
+    setDirectoryNotice('')
+    try {
+      await apiRequest('/api/members', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          userId: editingMember.id,
+          role: editingMember.role,
+          status: editingMember.status,
+          projectIds: editingMember.projectIds,
+        }),
+      })
+      const memberLabel = editingMember.displayName || editingMember.email
+      setEditingMember(null)
+      setDirectoryNotice(`Project access updated for ${memberLabel}. Their previous sessions were closed so the new scope applies immediately.`)
+      await load()
+    } catch (requestError) {
+      setEditError(requestError.message)
+    } finally {
+      setEditBusy(false)
+    }
+  }
+  const setEmail = value => {
+    setSuccess('')
+    setError('')
+    setAccountCheck({ state: 'idle', available: false })
+    setForm(previous => ({ ...previous, email: value, displayName: '', password: '' }))
+  }
+  const submit = async event => {
+    event.preventDefault()
+    if (!accountCheck.available) return
+    setBusy(true); setError(''); setSuccess('')
+    try {
+      const data = await apiRequest('/api/members', { method: 'POST', body: JSON.stringify(form) })
+      setSuccess(data.message || 'Workspace member added.')
+      setForm({ email: '', displayName: '', password: '', role: 'VIEWER', projectIds: [] })
+      setAccountCheck({ state: 'idle', available: false })
+      await load()
+    } catch (requestError) {
+      setError(requestError.message)
+      if (requestError.result?.account) setAccountCheck(requestError.result.account)
+      setBusy(false)
+    }
+  }
   const selectedRole = MEMBER_ROLE_META[form.role]
+  const existingAccount = accountCheck.state === 'available'
+  const newAccount = accountCheck.state === 'new_account'
+  const accountCheckLabel = accountCheck.state === 'checking' ? 'CHECKING' : existingAccount ? 'LINK ACCOUNT' : newAccount ? 'NEW ACCOUNT' : accountCheck.available ? 'AVAILABLE' : 'VERIFY EMAIL'
   const initials = member => (member.displayName || member.email || '?').split(/\s+|@/).filter(Boolean).slice(0, 2).map(part => part[0]).join('').toUpperCase()
   return (
     <div className="sb-modal-backdrop" onMouseDown={onClose}>
@@ -1162,17 +1400,30 @@ function MemberAdminModal({ projects, onClose }) {
           <div className="sb-member-list">
             {busy && members.length === 0 && <div className="sb-member-loading"><span className="sb-spinner" /> Loading members…</div>}
             {!busy && members.length === 0 && <div className="sb-member-empty">No workspace members found.</div>}
-            {members.map(member => <article key={member.id} className="sb-member-row"><span className="sb-member-avatar" aria-hidden="true">{initials(member)}</span><span className="sb-member-identity"><strong>{member.displayName || member.email}</strong><small>{member.email}</small></span><span className={`sb-role-badge role-${member.role.toLowerCase()}`}>{MEMBER_ROLE_META[member.role]?.label || member.role}</span><span className={`sb-status-badge status-${member.status}`}>{member.status}</span></article>)}
+            {members.map(member => <article key={member.id} className={`sb-member-row ${editingMember?.id === member.id ? 'is-editing' : ''}`}><span className="sb-member-avatar" aria-hidden="true">{initials(member)}</span><span className="sb-member-identity"><strong>{member.displayName || member.email}</strong><small>{member.email}</small></span><span className={`sb-role-badge role-${member.role.toLowerCase()}`}>{MEMBER_ROLE_META[member.role]?.label || member.role}</span><span className={`sb-status-badge status-${member.status}`}>{member.status}</span>{['OPERATOR', 'VIEWER'].includes(member.role) ? <button type="button" className="sb-member-edit-trigger" onClick={() => startProjectEdit(member)} aria-label={`Edit assigned projects for ${member.displayName || member.email}`}><span>Edit projects</span><small>{member.projectIds?.length || 0} assigned</small></button> : <span className="sb-member-workspace-scope">Workspace-wide</span>}</article>)}
           </div>
+          {editingMember && <form className="sb-member-access-editor" onSubmit={saveProjectAccess}>
+            <div className="sb-member-access-editor-head"><div><span className="eyebrow">EDIT PROJECT ACCESS</span><h4>{editingMember.displayName || editingMember.email}</h4><p>{MEMBER_ROLE_META[editingMember.role]?.label} · {editingMember.email}</p></div><button type="button" onClick={() => { setEditingMember(null); setEditError('') }} disabled={editBusy}>Cancel</button></div>
+            <div className="sb-scope-head"><div><h4>Assigned projects</h4><p>Checked projects are available in this member's workspace home and runtime.</p></div><span>{editingMember.projectIds.length}/{projects.length}</span></div>
+            <div className="sb-project-assignment-list">{projects.map(project => {
+              const projectId = String(project.id)
+              const selected = editingMember.projectIds.includes(projectId)
+              return <label className={`sb-project-assignment ${selected ? 'is-selected' : ''}`} key={project.id}><input type="checkbox" checked={selected} onChange={() => toggleEditedProject(projectId)} disabled={editBusy} /><span className="sb-project-assignment-icon">SC</span><span><strong>{project.name}</strong><small>/{project.slug}</small></span><i>{selected ? '✓' : '+'}</i></label>
+            })}{projects.length === 0 && <p className="sb-member-empty">Create a project before assigning runtime access.</p>}</div>
+            {editError && <div className="sb-form-error" role="alert">{editError}</div>}
+            <footer className="sb-member-access-editor-footer"><p>Saving replaces the current assignment and closes the member's active sessions, so removed access cannot remain open.</p><button type="submit" className="primary" disabled={editBusy}>{editBusy ? 'Saving…' : 'Save project access'}</button></footer>
+          </form>}
+          {directoryNotice && <div className="sb-notice success sb-member-directory-notice" role="status">{directoryNotice}</div>}
         </section>
 
         <form className="sb-member-form" onSubmit={submit} autoComplete="off">
-          <div className="sb-member-section-head"><div><span className="eyebrow">PROVISION ACCOUNT</span><h3>Add a workspace member</h3><p>Create credentials, choose a role, then constrain runtime scope when required.</p></div><span className="sb-step-chip">NEW IDENTITY</span></div>
+          <div className="sb-member-section-head"><div><span className="eyebrow">ACCOUNT CHECK</span><h3>Add a workspace member</h3><p>Verify the email first. New accounts receive credentials; existing accounts keep their current sign-in.</p></div><span className="sb-step-chip">{accountCheckLabel}</span></div>
           <div className="sb-member-form-layout">
             <div className="sb-member-fields">
-              <label>Display name<span className="sb-field-help">Operator-facing identity</span><input autoComplete="off" placeholder="e.g. Shift Supervisor" value={form.displayName} onChange={event => setForm(previous => ({ ...previous, displayName: event.target.value }))} required /></label>
-              <label>Email address<span className="sb-field-help">Used for secure sign-in</span><input type="email" autoComplete="off" placeholder="name@company.com" value={form.email} onChange={event => setForm(previous => ({ ...previous, email: event.target.value }))} required /></label>
-              <label>Temporary password<span className="sb-field-help">Minimum 10 characters</span><input type="password" autoComplete="new-password" minLength="10" placeholder="Enter a temporary password" value={form.password} onChange={event => setForm(previous => ({ ...previous, password: event.target.value }))} required /></label>
+              <label>Email address<span className="sb-field-help">Checked before submission</span><input type="email" autoComplete="off" maxLength="120" placeholder="name@company.com" value={form.email} onChange={event => setEmail(event.target.value)} required /></label>
+              <label>Display name<span className="sb-field-help">{existingAccount ? 'Existing account identity' : 'Operator-facing identity'}</span><input autoComplete="off" maxLength="100" placeholder={existingAccount ? '' : 'e.g. Shift Supervisor'} value={form.displayName} onChange={event => setForm(previous => ({ ...previous, displayName: event.target.value }))} readOnly={existingAccount} disabled={!newAccount && !existingAccount} required={newAccount} /></label>
+              <div className={`sb-account-check state-${accountCheck.state}`} role="status" aria-live="polite"><span aria-hidden="true">{accountCheck.state === 'checking' ? '…' : accountCheck.available ? '✓' : accountCheck.state === 'idle' ? '?' : '!'}</span><div><strong>{accountCheck.state === 'idle' ? 'Enter an email to verify the account' : accountCheck.state === 'checking' ? 'Checking account availability…' : accountCheck.message}</strong>{existingAccount && <small>Password and profile remain owned by the existing account.</small>}{newAccount && <small>A temporary password is required for the first sign-in.</small>}</div></div>
+              {newAccount ? <label>Temporary password<span className="sb-field-help">10–256 characters</span><input type="password" autoComplete="new-password" minLength="10" maxLength="256" placeholder="Enter a temporary password" value={form.password} onChange={event => setForm(previous => ({ ...previous, password: event.target.value }))} required /></label> : <div className="sb-existing-credentials"><span aria-hidden="true">◇</span><div><strong>{existingAccount ? 'Existing credentials preserved' : 'Credentials pending email check'}</strong><small>{existingAccount ? 'The user signs in with their current password or Google account.' : 'Verify the email to determine whether credentials are needed.'}</small></div></div>}
               <label>Workspace role<span className="sb-field-help">Defines capabilities and project scope</span><select value={form.role} onChange={event => setForm(previous => ({ ...previous, role: event.target.value, projectIds: [] }))}><option>ADMIN</option><option>EDITOR</option><option>OPERATOR</option><option>VIEWER</option></select></label>
               <div className="sb-role-summary"><span className={`sb-role-symbol role-${form.role.toLowerCase()}`}>{selectedRole.icon}</span><div><strong>{selectedRole.label}</strong><p>{selectedRole.summary}</p><small>{selectedRole.scope}</small></div></div>
             </div>
@@ -1182,8 +1433,9 @@ function MemberAdminModal({ projects, onClose }) {
               {['OPERATOR', 'VIEWER'].includes(form.role) ? <div className="sb-project-assignment-list">{projects.map(project => <label className={`sb-project-assignment ${form.projectIds.includes(project.id) ? 'is-selected' : ''}`} key={project.id}><input type="checkbox" checked={form.projectIds.includes(project.id)} onChange={() => toggleProject(project.id)} /><span className="sb-project-assignment-icon">SC</span><span><strong>{project.name}</strong><small>/{project.slug}</small></span><i>{form.projectIds.includes(project.id) ? '✓' : '+'}</i></label>)}{projects.length === 0 && <p className="sb-member-empty">Create a project before assigning runtime access.</p>}</div> : <div className="sb-global-scope"><span aria-hidden="true">◇</span><strong>No project selection required</strong><p>{selectedRole.label} receives access to every project in this workspace according to its capability set.</p></div>}
             </div>
           </div>
+          {success && <div className="sb-notice success" role="status">{success}</div>}
           {error && <div className="sb-form-error" role="alert">{error}</div>}
-          <footer className="sb-member-form-footer"><p>Creating a member writes an RBAC audit event. Credentials are never returned after submission.</p><button type="submit" className="primary" disabled={busy}><span aria-hidden="true">＋</span>{busy ? 'Provisioning…' : 'Create member'}</button></footer>
+          <footer className="sb-member-form-footer"><p>{existingAccount ? 'Linking grants access only to this workspace and never changes the account password.' : 'Adding a member writes an RBAC audit event. Credentials are never returned after submission.'}</p><button type="submit" className="primary" disabled={busy || !accountCheck.available}><span aria-hidden="true">＋</span>{busy ? 'Saving…' : existingAccount ? 'Link existing account' : 'Create member'}</button></footer>
         </form>
       </div>
     </div>
@@ -1327,7 +1579,21 @@ function AuditList({ events }) {
   return <div className="sb-audit-list">{events.map(event => <article className="sb-audit-card" key={event.id}><header><b>{auditActionCategory(event.action)}</b><span>{String(event.targetType || 'event').toUpperCase()}</span></header><strong title={event.action}>{auditActionLabel(event.action)}</strong><code>{event.action}</code><footer><span title={event.actorId}>Actor · {event.actorId}</span><time>{event.timestamp ? new Date(event.timestamp).toLocaleString() : 'Unknown time'}</time></footer></article>)}{events.length === 0 && <p className="sb-muted">No audit events.</p>}</div>
 }
 function batchPatch(ids, patch, changeDraft) { const selected = new Set(ids); changeDraft(previous => ({ ...previous, components: previous.components.map(component => selected.has(component.id) ? { ...component, ...patch } : component) })) }
-function Panel({ title, description, children, collapsible = false, defaultOpen = true, storageKey }) {
+function ValidationPanel({ issues, onReview }) {
+  const summary = validationSummary(issues)
+  const preview = [...issues].sort((left, right) => (left.severity === 'error' ? 0 : 1) - (right.severity === 'error' ? 0 : 1)).slice(0, 3)
+  return <div className="sb-validation-panel-summary">
+    <div className={`sb-validation-panel-result ${summary.errors ? 'error' : summary.warnings ? 'warning' : 'ok'}`}>
+      <span aria-hidden="true">{summary.errors ? '!' : summary.warnings ? '△' : '✓'}</span>
+      <div><strong>{summary.errors ? 'Publish blocked' : summary.warnings ? 'Ready with warnings' : 'Ready to publish'}</strong><small>{summary.errors} errors · {summary.warnings} warnings</small></div>
+    </div>
+    {preview.length > 0 && <ul className="sb-issue-list">{preview.map((issue, index) => <li key={`${issue.code}-${issue.path}-${index}`} className={issue.severity}><span>{issue.message}</span>{issue.path && <code>{issue.path}</code>}</li>)}</ul>}
+    {issues.length > preview.length && <small className="sb-validation-panel-more">+{issues.length - preview.length} more diagnostics</small>}
+    <button type="button" className="sb-validation-review-button" onClick={onReview}>Open Validation Console</button>
+  </div>
+}
+
+function Panel({ title, description, children, collapsible = false, expandable = false, defaultOpen = true, storageKey }) {
   const [open, setOpen] = useState(() => {
     if (!collapsible) return true
     try {
@@ -1337,6 +1603,7 @@ function Panel({ title, description, children, collapsible = false, defaultOpen 
       return defaultOpen
     }
   })
+  const [expanded, setExpanded] = useState(false)
 
   useEffect(() => {
     if (!collapsible || !storageKey) return
@@ -1344,7 +1611,17 @@ function Panel({ title, description, children, collapsible = false, defaultOpen 
   }, [collapsible, open, storageKey])
 
   if (!collapsible) return <section className="sb-panel"><h3>{title}</h3>{children}</section>
-  return <section className={`sb-panel sb-collapsible-panel ${open ? 'is-open' : 'is-closed'}`}><button type="button" className="sb-panel-toggle" aria-expanded={open} onClick={() => setOpen(value => !value)}><span><strong>{title}</strong>{description && <small>{description}</small>}</span><i aria-hidden="true" /></button><div className="sb-panel-body" hidden={!open}>{children}</div></section>
+  const toggleOpen = () => {
+    if (open) setExpanded(false)
+    setOpen(value => !value)
+  }
+  return <section className={`sb-panel sb-collapsible-panel ${open ? 'is-open' : 'is-closed'} ${expandable ? 'is-expandable' : ''} ${expanded ? 'is-floating' : ''}`}>
+    <div className="sb-panel-heading">
+      <button type="button" className="sb-panel-toggle" aria-expanded={open} onClick={toggleOpen}><span><strong>{title}</strong>{description && <small>{description}</small>}</span><i aria-hidden="true" /></button>
+      {expandable && open && <button type="button" className="sb-panel-expand" aria-label={expanded ? `Return ${title} to sidebar` : `Expand ${title} into floating window`} aria-pressed={expanded} title={expanded ? 'Return to sidebar' : 'Expand into floating window'} onClick={() => setExpanded(value => !value)}><span className="sb-panel-expand-icon" aria-hidden="true" /></button>}
+    </div>
+    <div className="sb-panel-body" hidden={!open}>{children}</div>
+  </section>
 }
 function CenteredState({ title }) { return <div className="sb-centered-state"><span className="sb-spinner" /><p>{title}</p></div> }
 function slugify(value) { return value.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 80) }

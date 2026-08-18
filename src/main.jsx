@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import './styles.css'
 import './builder.css'
 import { initializeThemeTone } from './platform/ThemeTone.jsx'
+import { runtimeMetricsEnabled } from '../shared/runtime-metrics-option.js'
 
 initializeThemeTone()
 
@@ -16,6 +17,6 @@ const RootApp = runtimeMatch
 
 createRoot(document.getElementById('root')).render(
   <React.StrictMode>
-    <Suspense fallback={<div className="sb-centered-state"><span className="sb-spinner" /><p>Loading application…</p></div>}><RootApp {...(runtimeMatch ? { slug: decodeURIComponent(runtimeMatch[1]) } : {})} /></Suspense>
+    <Suspense fallback={<div className="sb-centered-state"><span className="sb-spinner" /><p>Loading application…</p></div>}><RootApp {...(runtimeMatch ? { slug: decodeURIComponent(runtimeMatch[1]), metricsEnabled: runtimeMetricsEnabled(window.location.search) } : {})} /></Suspense>
   </React.StrictMode>
 )

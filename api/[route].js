@@ -16,6 +16,7 @@ import settings from './_handlers/settings.js'
 import simulationSequence from './_handlers/simulation-sequence.js'
 import simulator from './_handlers/simulator.js'
 import svg from './_handlers/svg.js'
+import signup from './_handlers/signup.js'
 import telemetry from './_handlers/telemetry.js'
 import versions from './_handlers/versions.js'
 
@@ -38,6 +39,7 @@ const handlers = Object.freeze({
   'simulation-sequence': simulationSequence,
   simulator,
   svg,
+  signup,
   telemetry,
   versions,
 })

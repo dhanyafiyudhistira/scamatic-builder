@@ -36,8 +36,10 @@ const userSchema = new mongoose.Schema({
   email: { type: String, required: true, trim: true, lowercase: true },
   displayName: { type: String, default: '' },
   passwordHash: { type: String, required: true, select: false },
+  authProviders: { type: [String], enum: ['local', 'google'], default: ['local'] },
   status: { type: String, enum: ['active', 'disabled'], default: 'active', index: true },
   authVersion: { type: Number, default: 1 },
+  preferredWorkspaceId: { type: String, default: null },
 }, { timestamps: true })
 userSchema.index({ email: 1 }, { unique: true })
 export const User = defineModel('ScadaUser', userSchema)

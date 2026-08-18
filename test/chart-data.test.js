@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildChartModel, buildSeriesPath, chartPointPosition, CHART_SERIES_COLORS } from '../shared/chart-data.js'
+import { buildChartModel, buildSeriesPath, buildSeriesRangePath, chartPointPosition, CHART_SERIES_COLORS } from '../shared/chart-data.js'
 import { appendRuntimeHistory, seedRuntimeHistory } from '../shared/runtime-history.js'
 
 test('runtime history seeds numeric snapshots with their telemetry timestamp', () => {
@@ -54,6 +54,16 @@ test('chart x positions follow timestamp distance instead of sample index', () =
   const positions = model.series[0].points.map(point => chartPointPosition(point, model, plot).x)
   assert.deepEqual(positions, [0, 100, 400])
   assert.match(buildSeriesPath(model.series[0].points, model, plot), /^M0\.00,.+ L100\.00,.+ L400\.00,/)
+})
+
+test('historical Chart range uses requested timestamps and preserves bucket excursions', () => {
+  const tags = [{ id: 'level', name: 'Level' }]
+  const histories = { level: [{ timestamp: 2000, value: 10, min: 2, max: 18, count: 30, resolutionMs: 1000 }] }
+  const model = buildChartModel(tags, histories, { historyLimit: 300, range: { from: 1000, to: 5000 } })
+  assert.deepEqual(model.xDomain, [1000, 5000])
+  assert.equal(model.yDomain[0] < 2, true)
+  assert.equal(model.yDomain[1] > 18, true)
+  assert.match(buildSeriesRangePath(model.series[0].points, model, { x: 0, y: 0, width: 400, height: 100 }), /^M100\.00,.+ L100\.00,/)
 })
 
 test('chart palette stays neutral and ignores legacy cyan accent settings', () => {

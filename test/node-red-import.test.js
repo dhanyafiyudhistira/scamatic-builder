@@ -70,7 +70,7 @@ test('Node-RED Dashboard nodes provide a safe fallback when no PLC endpoint exis
   ])
   assert.deepEqual(analysis.candidates.map(candidate => [candidate.path, candidate.dataType, candidate.access, candidate.componentType]), [
     ['pumpEnable', 'boolean', 'read-write', 'control-button'],
-    ['tankPressure', 'number', 'read', 'value-span'],
+    ['tankPressure', 'number', 'read', 'gauge'],
   ])
 })
 

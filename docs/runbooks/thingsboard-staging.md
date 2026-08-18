@@ -19,6 +19,17 @@ Required worker variables are `MONGO_URI`, `CONNECTOR_PLATFORM_ENABLED=true`,
 `CONNECTOR_STREAM_PUBLIC_URL` and the same master key. Keep
 `CONNECTOR_LIVE_COMMANDS_ENABLED=false` for the read-only gate.
 
+Run exactly one persistent worker replica per connector environment. The worker
+uses an in-process, per-connector command lane so one connector executes RPCs in
+order while different connectors remain parallel; MongoDB's atomic claim still
+prevents duplicate execution. Horizontal worker scaling requires a distributed
+connector lease before adding replicas, otherwise command ordering across
+replicas is not guaranteed. `CONNECTOR_COMMAND_MAX_PENDING` bounds the local
+queue (default 200), and `CONNECTOR_COMMAND_SHUTDOWN_MS` bounds graceful waiting
+for an active RPC (default 35000 ms). Commands canceled before claim remain
+durably `authorized` for the next worker; an active command that outlives the
+shutdown grace must remain unverified and must never be executed automatically.
+
 Configure deployment probes against the worker stream port:
 
 - Liveness: `GET /health/live`

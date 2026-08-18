@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { bootstrapOwnerId, hashPassword, parseCookies, passwordChangeError, requireAllowedOrigin, verifyPassword } from '../api/_lib/auth.js'
+import { bootstrapOwnerId, hashPassword, parseCookies, passwordChangeError, requireAllowedOrigin, signupValidationError, verifyPassword } from '../api/_lib/auth.js'
 import { capabilitiesForRole, PERMISSIONS, roleCan, roleMeetsRequirement } from '../api/_lib/authorization.js'
 import { isDatabaseUnavailableError } from '../api/_lib/security.js'
 
@@ -19,6 +19,13 @@ test('password change validation requires a new confirmed password with safe bou
   assert.equal(passwordChangeError({ currentPassword: 'same-password', newPassword: 'same-password', confirmPassword: 'same-password' }), 'New password must be different from the current password.')
   assert.equal(passwordChangeError({ currentPassword: 'old-password', newPassword: 'new-password', confirmPassword: 'different' }), 'New password confirmation does not match.')
   assert.equal(passwordChangeError({ currentPassword: 'old-password', newPassword: 'new-password', confirmPassword: 'new-password' }), null)
+})
+
+test('self-registration validates email and confirmed password bounds', () => {
+  assert.equal(signupValidationError({ email: 'invalid', password: 'long-enough-password', confirmPassword: 'long-enough-password' }), 'Enter a valid email address.')
+  assert.equal(signupValidationError({ email: 'user@example.com', password: 'short', confirmPassword: 'short' }), 'Password must contain at least 10 characters.')
+  assert.equal(signupValidationError({ email: 'user@example.com', password: 'long-enough-password', confirmPassword: 'different-password' }), 'Password confirmation does not match.')
+  assert.equal(signupValidationError({ email: ' User@Example.com ', password: 'long-enough-password', confirmPassword: 'long-enough-password' }), null)
 })
 
 test('bootstrap owner IDs are deterministic per normalized email without colliding globally', () => {
@@ -49,7 +56,10 @@ test('RBAC capability matrix denies publish and commands by default', () => {
   assert.equal(roleCan('EDITOR', PERMISSIONS.CHART_STORAGE_MANAGE), false)
   assert.equal(roleCan('EDITOR', PERMISSIONS.PROJECT_PUBLISH), false)
   assert.equal(roleCan('EDITOR', PERMISSIONS.BUILDER_WRITE), true)
+  assert.equal(roleCan('OPERATOR', PERMISSIONS.RUNTIME_VIEW), true)
+  assert.equal(roleCan('OPERATOR', PERMISSIONS.BUILDER_READ), false)
   assert.equal(roleCan('OPERATOR', PERMISSIONS.COMMAND_EXECUTE), true)
+  assert.equal(roleCan('VIEWER', PERMISSIONS.RUNTIME_VIEW), true)
   assert.equal(roleCan('VIEWER', PERMISSIONS.COMMAND_EXECUTE), false)
   assert.equal(roleMeetsRequirement('OPERATOR', 'OPERATOR'), true)
   assert.equal(roleMeetsRequirement('VIEWER', 'OPERATOR'), false)

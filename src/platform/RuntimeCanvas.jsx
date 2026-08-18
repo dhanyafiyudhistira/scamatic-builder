@@ -4,6 +4,11 @@ import { commandResultRetentionMs, isPendingCommandStatus } from '../../shared/c
 import { offsetBounds, resizeComponentBounds, resolveSmartSnap, selectionBounds } from '../../shared/placement.js'
 import { TelemetryChart } from './TelemetryChart.jsx'
 import { rootRuntimeComponents } from '../../shared/control-popup.js'
+import { CHART_RANGE_PRESETS, DEFAULT_CHART_TARGET_POINTS, chartRangeBounds, chartRangePreset } from '../../shared/chart-time-range.js'
+import { seedRuntimeHistory } from '../../shared/runtime-history.js'
+import { GAUGE_START_ANGLE, GAUGE_SWEEP_ANGLE, gaugeAngleFor, gaugeArcPath, gaugePoint, gaugeTicks, gaugeValueState } from '../../shared/gauge.js'
+import { numericDisplayProperties, numericDisplayUnit, numericEngineering, numericValueOutOfRange, resolveGaugeZones, resolveNumericRange } from '../../shared/numeric-tag-config.js'
+import { evaluateAlarmState } from '../../shared/alarm.js'
 
 export function RuntimeCanvas({
   schema,
@@ -13,6 +18,7 @@ export function RuntimeCanvas({
   qualities = {},
   histories = {},
   historyStorage = null,
+  onLoadChartHistory,
   selectedIds = [],
   editable = false,
   boardTone,
@@ -261,6 +267,7 @@ export function RuntimeCanvas({
             tags={(expandedChart.binding?.tagIds || []).map(tagId => tags.get(tagId)).filter(Boolean)}
             histories={withCurrentChartSamples(expandedChart, histories, values, qualities)}
             historyStorage={historyStorage}
+            onLoadHistory={onLoadChartHistory}
             onClose={() => setExpandedChartId(null)}
           />
         )}
@@ -447,16 +454,26 @@ function RuntimeComponent({ component, designAsset, tag, value, quality, chartTa
     )
   }
 
+  if (component.type === 'alarm') {
+    return <AlarmComponent component={component} tag={tag} value={value} quality={quality} editable={editable} />
+  }
+
   if (component.type === 'value-span') {
-    const severity = valueSeverity(value, properties)
+    const displayProperties = numericDisplayProperties(tag, properties)
+    const outOfRange = numericValueOutOfRange(tag, value, properties)
+    const severity = outOfRange ? 'critical' : valueSeverity(value, properties)
     const color = severity === 'critical' ? properties.criticalColor : severity === 'warning' ? properties.warningColor : properties.textColor
     return (
       <div className={`sb-value-component severity-${severity} quality-${quality}`} style={{ color, background: properties.backgroundColor }} title={`${tag?.name || 'Unbound'} · ${quality}`}>
         <span className="sb-value-label">{properties.label || component.name}</span>
-        <strong>{formatRuntimeValue(value, properties)}</strong>
-        <small>{qualityLabel || tag?.unit || ''}</small>
+        <strong>{formatRuntimeValue(value, displayProperties)}</strong>
+        <small>{qualityLabel || (outOfRange ? 'OUT OF RANGE' : '')}</small>
       </div>
     )
+  }
+
+  if (component.type === 'gauge') {
+    return <GaugeComponent component={component} tag={tag} value={value} quality={quality} />
   }
 
   if (component.type === 'tuning-slider') {
@@ -570,6 +587,158 @@ function RuntimeComponent({ component, designAsset, tag, value, quality, chartTa
   return <div className="sb-invalid-component">Unsupported component</div>
 }
 
+export function AlarmComponent({ component, tag, value, quality = 'good', editable = false }) {
+  const alarm = evaluateAlarmState({ tag, value, quality, properties: component.properties })
+  const label = component.properties?.label || component.name || 'ALARM'
+  const tone = useAlarmTone({
+    active: alarm.active,
+    enabled: !editable && alarm.presentation === 'buzzer' && alarm.soundEnabled,
+    frequencyHz: alarm.frequencyHz,
+    volume: alarm.volume,
+    pulseMs: alarm.pulseMs,
+  })
+  const className = [
+    'sb-alarm-component',
+    `is-${alarm.presentation}`,
+    alarm.active ? 'is-active' : 'is-idle',
+    alarm.active && alarm.flash ? 'is-flashing' : '',
+    `quality-${quality}`,
+  ].filter(Boolean).join(' ')
+  return (
+    <div
+      className={className}
+      role="status"
+      title={`${tag?.name || 'Unbound'}: ${String(value ?? '--')} · ${quality}`}
+      style={{ '--alarm-active-color': alarm.activeColor, '--alarm-idle-color': alarm.idleColor }}
+    >
+      {alarm.presentation === 'lamp' ? (
+        <span className="sb-alarm-beacon" aria-hidden="true"><i className="sb-alarm-beacon-cap" /><i className="sb-alarm-beacon-light" /><i className="sb-alarm-beacon-base" /></span>
+      ) : (
+        <span className="sb-alarm-buzzer" aria-hidden="true">
+          <svg viewBox="0 0 100 80"><path className="sb-alarm-speaker" d="M15 31h18l22-18v54L33 49H15z" /><path className="sb-alarm-wave wave-one" d="M64 29c8 7 8 15 0 22" /><path className="sb-alarm-wave wave-two" d="M73 19c15 13 15 29 0 42" /></svg>
+        </span>
+      )}
+      <span className="sb-alarm-label">{label}</span>
+      <strong className="sb-alarm-state">{alarm.stateLabel}</strong>
+      {!editable && alarm.presentation === 'buzzer' && alarm.active && alarm.soundEnabled && (
+        <button
+          type="button"
+          className="sb-alarm-silence"
+          aria-pressed={tone.silenced}
+          onPointerDown={event => event.stopPropagation()}
+          onClick={event => { event.stopPropagation(); tone.setSilenced(current => !current) }}
+        >
+          {tone.silenced ? 'SOUND OFF' : 'SILENCE'}
+        </button>
+      )}
+    </div>
+  )
+}
+
+function useAlarmTone({ active, enabled, frequencyHz, volume, pulseMs }) {
+  const [silenced, setSilenced] = useState(false)
+  useEffect(() => {
+    if (!active) setSilenced(false)
+  }, [active])
+  useEffect(() => {
+    if (!active || !enabled || silenced || typeof window === 'undefined') return undefined
+    const AudioContextConstructor = window.AudioContext || window.webkitAudioContext
+    if (!AudioContextConstructor) return undefined
+    let audioContext
+    let oscillator
+    let gain
+    let intervalId
+    let disposed = false
+    const resume = () => { if (!disposed && audioContext?.state === 'suspended') audioContext.resume().catch(() => {}) }
+    try {
+      audioContext = new AudioContextConstructor()
+      oscillator = audioContext.createOscillator()
+      gain = audioContext.createGain()
+      oscillator.type = 'square'
+      oscillator.frequency.setValueAtTime(frequencyHz, audioContext.currentTime)
+      gain.gain.setValueAtTime(volume, audioContext.currentTime)
+      oscillator.connect(gain)
+      gain.connect(audioContext.destination)
+      oscillator.start()
+      let audible = true
+      intervalId = window.setInterval(() => {
+        if (audioContext.state === 'closed') return
+        audible = !audible
+        gain.gain.setTargetAtTime(audible ? volume : 0.0001, audioContext.currentTime, 0.015)
+      }, pulseMs)
+      window.addEventListener('pointerdown', resume, { passive: true })
+      window.addEventListener('keydown', resume)
+      resume()
+    } catch {
+      return undefined
+    }
+    return () => {
+      disposed = true
+      window.clearInterval(intervalId)
+      window.removeEventListener('pointerdown', resume)
+      window.removeEventListener('keydown', resume)
+      try { oscillator?.stop() } catch {}
+      audioContext?.close().catch(() => {})
+    }
+  }, [active, enabled, frequencyHz, pulseMs, silenced, volume])
+  return { silenced, setSilenced }
+}
+
+export function GaugeComponent({ component, tag, value, quality = 'good' }) {
+  const properties = component.properties || {}
+  const range = resolveNumericRange(tag, properties, 'display')
+  const zones = resolveGaugeZones(range, properties)
+  const resolvedProperties = { ...numericDisplayProperties(tag, properties), suffix: numericDisplayUnit(tag, properties), min: range.min, max: range.max, ...zones }
+  const state = gaugeValueState(value, resolvedProperties)
+  const ticks = gaugeTicks(resolvedProperties)
+  const lowEndAngle = gaugeAngleFor(state.lowZoneEnd, resolvedProperties)
+  const highStartAngle = gaugeAngleFor(state.highZoneStart, resolvedProperties)
+  const unit = resolvedProperties.suffix || ''
+  const label = properties.label || component.name || 'GAUGE'
+  const status = !tag ? 'UNBOUND' : quality !== 'good' ? String(quality).toUpperCase() : ''
+  const ariaValue = `${label}: ${state.display}${unit ? ` ${unit}` : ''}${status ? `, ${status}` : ''}`
+  return (
+    <div
+      className={`sb-gauge-component quality-${quality} ${state.valid ? '' : 'is-invalid'}`}
+      style={{
+        '--gauge-low': properties.lowColor || '#38bdf8',
+        '--gauge-normal': properties.normalColor || '#a9bec7',
+        '--gauge-high': properties.highColor || '#fb7185',
+        '--gauge-needle': properties.needleColor || '#ff4b1f',
+        '--gauge-face': properties.faceColor || '#d8e4e8',
+        '--gauge-text': properties.textColor || '#263b45',
+      }}
+      title={`${tag?.name || 'Unbound'} · ${quality}`}
+    >
+      <svg viewBox="0 0 200 200" role="img" aria-label={ariaValue} preserveAspectRatio="xMidYMid meet">
+        <circle className="sb-gauge-shadow" cx="100" cy="100" r="96" />
+        <circle className="sb-gauge-face" cx="100" cy="100" r="93" />
+        <path className="sb-gauge-track" d={gaugeArcPath(100, 100, 78, GAUGE_START_ANGLE, GAUGE_START_ANGLE + GAUGE_SWEEP_ANGLE)} />
+        <path className="sb-gauge-zone is-low" d={gaugeArcPath(100, 100, 78, GAUGE_START_ANGLE, lowEndAngle)} />
+        <path className="sb-gauge-zone is-normal" d={gaugeArcPath(100, 100, 78, lowEndAngle, highStartAngle)} />
+        <path className="sb-gauge-zone is-high" d={gaugeArcPath(100, 100, 78, highStartAngle, GAUGE_START_ANGLE + GAUGE_SWEEP_ANGLE)} />
+        <g className="sb-gauge-ticks" aria-hidden="true">
+          {ticks.map(tick => {
+            const outer = gaugePoint(100, 100, 84, tick.angle)
+            const inner = gaugePoint(100, 100, 70, tick.angle)
+            const text = gaugePoint(100, 100, 59, tick.angle)
+            return <g key={`${tick.value}-${tick.angle}`}><line x1={inner.x} y1={inner.y} x2={outer.x} y2={outer.y} /><text x={text.x} y={text.y}>{tick.label}</text></g>
+          })}
+        </g>
+        <text className="sb-gauge-label" x="100" y="81">{label}</text>
+        <g className="sb-gauge-needle" style={{ transform: `rotate(${state.angle}deg)` }} aria-hidden="true">
+          <line x1="94" y1="100" x2="163" y2="100" />
+        </g>
+        <circle className="sb-gauge-hub-outer" cx="100" cy="100" r="8" />
+        <circle className="sb-gauge-hub-inner" cx="100" cy="100" r="4.5" />
+        <text className="sb-gauge-unit" x="100" y="132">{unit}</text>
+        {properties.showDigital !== false && <g className="sb-gauge-digital"><rect x="67" y="143" width="66" height="24" rx="4" /><text x="100" y="160">{state.display}</text></g>}
+        {status && <text className="sb-gauge-quality" x="100" y="181">{status}</text>}
+      </svg>
+    </div>
+  )
+}
+
 function ControlPopupDialog({ component, childComponents, tags, values, qualities, actorRole, onCommand, commandResults, commandConnectionAvailable, operationModes, onOperationModeChange, operationLockFor, componentById, onClose }) {
   const dialogRef = useRef(null)
   const closeRef = useRef(null)
@@ -653,19 +822,191 @@ function ControlPopupDialog({ component, childComponents, tags, values, qualitie
   )
 }
 
-function ExpandedChart({ component, tags, histories, historyStorage, onClose }) {
+function ExpandedChart({ component, tags, histories, historyStorage, onLoadHistory, onClose }) {
   const closeRef = useRef(null)
+  const rangeMenuRef = useRef(null)
+  const rangeMenuListRef = useRef(null)
+  const rangeTriggerRef = useRef(null)
+  const abortRef = useRef(null)
+  const cacheRef = useRef(new Map())
+  const requestIdRef = useRef(0)
+  const [rangeId, setRangeId] = useState('live')
+  const [rangeMenuOpen, setRangeMenuOpen] = useState(false)
+  const [rangeBounds, setRangeBounds] = useState(null)
+  const [loadedHistory, setLoadedHistory] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [historyError, setHistoryError] = useState('')
+  const tagIds = useMemo(() => tags.map(tag => tag.id), [tags])
+  const tagKey = tagIds.join(',')
   useEffect(() => { closeRef.current?.focus() }, [])
+  useEffect(() => () => abortRef.current?.abort(), [])
+  useEffect(() => {
+    if (!rangeMenuOpen) return undefined
+    const closeMenu = event => {
+      if (!rangeMenuRef.current?.contains(event.target)) setRangeMenuOpen(false)
+    }
+    document.addEventListener('pointerdown', closeMenu)
+    const activeOption = rangeMenuListRef.current?.querySelector('.is-active')
+    activeOption?.scrollIntoView({ block: 'nearest' })
+    return () => document.removeEventListener('pointerdown', closeMenu)
+  }, [rangeMenuOpen])
+
+  const selectRange = async (nextRangeId, { force = false } = {}) => {
+    setRangeId(nextRangeId)
+    setHistoryError('')
+    if (nextRangeId === 'live') {
+      abortRef.current?.abort()
+      setLoading(false)
+      setRangeBounds(null)
+      setLoadedHistory(null)
+      return
+    }
+    const bounds = chartRangeBounds(nextRangeId)
+    if (!bounds) return
+    setRangeBounds(bounds)
+    if (!historyStorage?.enabled || typeof onLoadHistory !== 'function') {
+      setLoadedHistory(null)
+      setLoading(false)
+      return
+    }
+
+    const cacheKey = `${tagKey}:${nextRangeId}`
+    const cached = cacheRef.current.get(cacheKey)
+    if (!force && cached && Date.now() - cached.loadedAt < 60_000) {
+      setLoadedHistory(cached.result)
+      setRangeBounds(resultBounds(cached.result, bounds))
+      setLoading(false)
+      return
+    }
+
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+    const requestId = ++requestIdRef.current
+    setLoading(true)
+    try {
+      const result = await onLoadHistory({
+        tagIds,
+        from: bounds.from,
+        to: bounds.to,
+        targetPoints: DEFAULT_CHART_TARGET_POINTS,
+        signal: controller.signal,
+      })
+      if (controller.signal.aborted || requestId !== requestIdRef.current) return
+      const normalizedResult = { ...result, history: seedRuntimeHistory({}, result.history || {}) }
+      cacheRef.current.set(cacheKey, { result: normalizedResult, loadedAt: Date.now() })
+      setLoadedHistory(normalizedResult)
+      setRangeBounds(resultBounds(normalizedResult, bounds))
+    } catch (error) {
+      if (controller.signal.aborted || error?.name === 'AbortError') return
+      setLoadedHistory(null)
+      setHistoryError(error?.message || 'Historical telemetry is unavailable.')
+    } finally {
+      if (requestId === requestIdRef.current) setLoading(false)
+    }
+  }
+
+  const preset = chartRangePreset(rangeId)
+  const latestTimestamp = latestHistoryTimestamp(histories, tagIds)
+  const activeRange = preset && rangeBounds
+    ? {
+        to: Math.max(rangeBounds.to, latestTimestamp || rangeBounds.to),
+        from: Math.max(rangeBounds.from, Math.max(rangeBounds.to, latestTimestamp || rangeBounds.to) - preset.durationMs),
+      }
+    : null
+  const displayHistories = loadedHistory?.history
+    ? mergeHistoricalWithLive(loadedHistory.history, histories, Date.parse(loadedHistory.range?.to), loadedHistory.resolutionMs)
+    : histories
+  const chartProperties = activeRange
+    ? { ...component.properties, historyLimit: 2000, range: activeRange }
+    : component.properties
+  const archiveAvailable = historyStorage?.enabled === true
+  const activeRangeLabel = rangeId === 'live' ? 'LIVE' : preset?.label || rangeId
+  const status = loading
+    ? 'LOADING HISTORICAL DATA…'
+    : historyError
+      ? `SESSION FALLBACK · ${historyError}`
+      : rangeId === 'live'
+        ? historyStorageLabel(historyStorage)
+        : loadedHistory
+          ? `${preset?.label || rangeId} · ${formatResolution(loadedHistory.resolutionMs)} BUCKETS`
+          : `${preset?.label || rangeId} · SESSION DATA ONLY`
   return (
     <section className="sb-chart-fullscreen" role="dialog" aria-modal="true" aria-label={component.properties?.label || component.name || 'Telemetry chart'} onPointerDown={event => event.stopPropagation()}>
       <header>
         <div>
-          <span>LIVE TELEMETRY · {historyStorageLabel(historyStorage)}</span>
+          <span>{rangeId === 'live' ? 'LIVE TELEMETRY' : 'HISTORICAL TELEMETRY'} · {status}</span>
           <strong>{component.properties?.label || component.name || 'TELEMETRY CHART'}</strong>
         </div>
         <button ref={closeRef} type="button" onClick={onClose} aria-label="Minimize chart"><span aria-hidden="true">—</span> Minimize</button>
       </header>
-      <TelemetryChart tags={tags} histories={histories} properties={component.properties} />
+      <div className="sb-chart-history-toolbar" aria-label="Chart time range">
+        <div
+          className="sb-chart-range-dropdown"
+          ref={rangeMenuRef}
+          onKeyDown={event => {
+            if (event.key !== 'Escape' || !rangeMenuOpen) return
+            event.stopPropagation()
+            setRangeMenuOpen(false)
+            rangeTriggerRef.current?.focus()
+          }}
+        >
+          <button
+            ref={rangeTriggerRef}
+            type="button"
+            className={`sb-chart-range-trigger${rangeMenuOpen ? ' is-open' : ''}`}
+            aria-haspopup="menu"
+            aria-expanded={rangeMenuOpen}
+            onClick={() => setRangeMenuOpen(open => !open)}
+          >
+            <span>Time range</span>
+            <strong>{activeRangeLabel}</strong>
+            <i aria-hidden="true" />
+          </button>
+          {rangeMenuOpen && (
+            <div
+              className="sb-chart-range-menu"
+              role="menu"
+              aria-label="Select chart time range"
+            >
+              <div className="sb-chart-range-options" ref={rangeMenuListRef}>
+                <button
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={rangeId === 'live'}
+                  className={rangeId === 'live' ? 'is-active' : ''}
+                  onClick={() => { setRangeMenuOpen(false); void selectRange('live') }}
+                >
+                  <span>LIVE</span><small>Realtime session</small>
+                </button>
+                {CHART_RANGE_PRESETS.map(range => (
+                  <button
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={rangeId === range.id}
+                    key={range.id}
+                    className={rangeId === range.id ? 'is-active' : ''}
+                    onClick={() => { setRangeMenuOpen(false); void selectRange(range.id) }}
+                  >
+                    <span>{range.label}</span><small>Historical range</small>
+                  </button>
+                ))}
+              </div>
+              {rangeId !== 'live' && archiveAvailable && (
+                <button
+                  type="button"
+                  className="sb-chart-history-refresh"
+                  disabled={loading}
+                  onClick={() => { setRangeMenuOpen(false); void selectRange(rangeId, { force: true }) }}
+                >
+                  ↻ Refresh {activeRangeLabel}
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+      <TelemetryChart tags={tags} histories={displayHistories} properties={chartProperties} />
     </section>
   )
 }
@@ -685,6 +1026,41 @@ function withCurrentChartSamples(component, histories, values, qualities) {
     next[tagId] = [{ timestamp: now, value: Number(values[tagId]), quality: qualities[tagId] || 'good', sequence: null }]
   }
   return next
+}
+
+function resultBounds(result, fallback) {
+  const from = Date.parse(result?.range?.from)
+  const to = Date.parse(result?.range?.to)
+  return Number.isFinite(from) && Number.isFinite(to) && from < to ? { ...fallback, from, to } : fallback
+}
+
+function latestHistoryTimestamp(histories, tagIds) {
+  return tagIds.reduce((latest, tagId) => Math.max(latest, Number(histories[tagId]?.at(-1)?.timestamp) || 0), 0)
+}
+
+function mergeHistoricalWithLive(persisted, live, archivedTo, resolutionMs) {
+  const next = { ...persisted }
+  const overlapMs = Math.max(30_000, Number(resolutionMs) * 2 || 0)
+  const liveFrom = Number.isFinite(archivedTo) ? archivedTo - overlapMs : Number.NEGATIVE_INFINITY
+  for (const [tagId, points] of Object.entries(live || {})) {
+    const merged = [...(persisted[tagId] || []), ...points.filter(point => Number(point?.timestamp) >= liveFrom)]
+    const unique = new Map()
+    for (const point of merged) {
+      const timestamp = Number(point?.timestamp)
+      if (Number.isFinite(timestamp)) unique.set(timestamp, point)
+    }
+    next[tagId] = [...unique.values()].sort((left, right) => left.timestamp - right.timestamp).slice(-2000)
+  }
+  return next
+}
+
+function formatResolution(value) {
+  const milliseconds = Number(value)
+  if (!Number.isFinite(milliseconds) || milliseconds < 1_000) return 'RAW'
+  if (milliseconds < 60_000) return `${milliseconds / 1_000} s`
+  if (milliseconds < 3_600_000) return `${milliseconds / 60_000} min`
+  if (milliseconds < 86_400_000) return `${milliseconds / 3_600_000} h`
+  return `${milliseconds / 86_400_000} d`
 }
 
 function OperationShifter({ component, tag, quality, editable, actorRole, onCommand, commandResult, commandConnectionAvailable, mode, onModeChange }) {
@@ -814,11 +1190,13 @@ function OperationShifter({ component, tag, quality, editable, actorRole, onComm
 
 function TuningSlider({ component, tag, value, quality, editable, actorRole, onCommand, commandResult, commandConnectionAvailable, operationLockLabel = '' }) {
   const properties = component.properties || {}
-  const min = finiteNumber(properties.min, 0)
-  const configuredMax = finiteNumber(properties.max, 100)
-  const max = configuredMax > min ? configuredMax : min + 100
-  const step = Math.max(0.000001, finiteNumber(properties.step, 1))
-  const decimals = Math.max(0, Math.min(8, Number.parseInt(properties.decimals ?? 0, 10) || 0))
+  const range = resolveNumericRange(tag, properties, 'write')
+  const engineering = numericEngineering(tag)
+  const min = range.min
+  const max = range.max
+  const step = range.step
+  const decimals = Math.max(0, Math.min(8, Number.parseInt(properties.decimals ?? engineering.decimals, 10) || 0))
+  const unit = properties.suffix || engineering.unit || ''
   const liveValue = Number.isFinite(Number(value)) ? Number(value) : null
   const [draft, setDraft] = useState(() => normalizeTuningValue(liveValue ?? min, min, max, step))
   const [dirty, setDirty] = useState(false)
@@ -870,7 +1248,7 @@ function TuningSlider({ component, tag, value, quality, editable, actorRole, onC
   const apply = async event => {
     event.stopPropagation()
     if (commandUi.disabled || !dirty) return
-    if (properties.confirmation === 'single' && !window.confirm(`Apply ${formatTuningValue(draft, decimals)}${properties.suffix || ''} to “${properties.label || component.name}”?`)) return
+    if (properties.confirmation === 'single' && !window.confirm(`Apply ${formatTuningValue(draft, decimals)}${unit} to “${properties.label || component.name}”?`)) return
     setCommandState('requested')
     let terminalState = 'failed'
     try {
@@ -892,7 +1270,7 @@ function TuningSlider({ component, tag, value, quality, editable, actorRole, onC
     <div className={`sb-tuning-component state-${visibleCommandState} quality-${quality} ${editing ? 'is-editing' : ''} ${dirty ? 'is-dirty' : ''}`} style={{ '--tuning-accent': properties.accentColor || '#20c4d9' }}>
       <div className="sb-tuning-head">
         <span><strong>{properties.label || component.name || 'SETPOINT'}</strong><small>{tag?.name || 'UNBOUND'}</small></span>
-        <span className="sb-tuning-value">{formatTuningValue(draft, decimals)}<small>{properties.suffix || ''}</small></span>
+        <span className="sb-tuning-value">{formatTuningValue(draft, decimals)}<small>{unit}</small></span>
       </div>
       <input
         type="range"
@@ -913,7 +1291,7 @@ function TuningSlider({ component, tag, value, quality, editable, actorRole, onC
       />
       <div className="sb-tuning-footer">
         <span>{formatTuningValue(min, decimals)}</span>
-        <span className="sb-tuning-live">LIVE {liveValue === null ? '--' : formatTuningValue(liveValue, decimals)}{properties.suffix || ''}</span>
+        <span className="sb-tuning-live">LIVE {liveValue === null ? '--' : formatTuningValue(liveValue, decimals)}{unit}</span>
         <span>{formatTuningValue(max, decimals)}</span>
         <button type="button" disabled={commandUi.disabled || !dirty} onPointerDown={event => event.stopPropagation()} onClick={apply}>{tuningUi.status}</button>
       </div>

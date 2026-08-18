@@ -43,6 +43,15 @@ export function passwordChangeError({ currentPassword, newPassword, confirmPassw
   return null
 }
 
+export function signupValidationError({ email, password, confirmPassword } = {}) {
+  const normalizedEmail = String(email || '').trim().toLowerCase()
+  if (!/^\S+@\S+\.\S+$/.test(normalizedEmail) || normalizedEmail.length > 120) return 'Enter a valid email address.'
+  if (typeof password !== 'string' || password.length < 10) return 'Password must contain at least 10 characters.'
+  if (password.length > 256) return 'Password must contain no more than 256 characters.'
+  if (typeof confirmPassword !== 'string' || confirmPassword !== password) return 'Password confirmation does not match.'
+  return null
+}
+
 export async function authenticateCredentials(email, password) {
   await connectMongo()
   const normalizedEmail = String(email || '').trim().toLowerCase()
@@ -58,7 +67,7 @@ export async function authenticateCredentials(email, password) {
     return { ok: false, configurationError: !auth.password }
   }
   let membership = bootstrap?.membership
-    || await WorkspaceMember.findOne({ userId: user.id, status: 'active' }).lean()
+    || await preferredWorkspaceMembership(user.id, user.preferredWorkspaceId)
   if (!membership && matchesBootstrap) {
     bootstrap = await bootstrapLocalOwner(auth)
     user = bootstrap.user
@@ -179,6 +188,60 @@ export async function requirePrincipal(req, res) {
   return principal
 }
 
+export async function listUserWorkspaces(userId, currentWorkspaceId) {
+  await connectMongo()
+  const memberships = await WorkspaceMember.find({ userId, status: 'active' }).sort({ createdAt: 1 }).lean()
+  if (!memberships.length) return []
+  const workspaces = await Workspace.find({ _id: { $in: memberships.map(item => item.workspaceId) } }).lean()
+  const workspaceById = new Map(workspaces.map(workspace => [String(workspace._id), workspace]))
+  return memberships
+    .map(membership => {
+      const workspace = workspaceById.get(String(membership.workspaceId))
+      if (!workspace) return null
+      return {
+        id: workspace._id,
+        name: workspace.name,
+        slug: workspace.slug,
+        role: membership.role,
+        current: String(workspace._id) === String(currentWorkspaceId),
+      }
+    })
+    .filter(Boolean)
+    .sort((left, right) => Number(right.current) - Number(left.current) || left.name.localeCompare(right.name))
+}
+
+export async function preferredWorkspaceMembership(userId, preferredWorkspaceId) {
+  await connectMongo()
+  const preferredId = String(preferredWorkspaceId || '').trim()
+  if (preferredId) {
+    const preferred = await WorkspaceMember.findOne({ userId, workspaceId: preferredId, status: 'active' }).lean()
+    if (preferred) return preferred
+  }
+  return WorkspaceMember.findOne({ userId, status: 'active' }).sort({ createdAt: 1 }).lean()
+}
+
+export async function switchSessionWorkspace(principal, workspaceId) {
+  await connectMongo()
+  const targetWorkspaceId = String(workspaceId || '').trim().slice(0, 100)
+  if (!targetWorkspaceId) return null
+  const membership = await WorkspaceMember.findOne({
+    workspaceId: targetWorkspaceId,
+    userId: principal.id,
+    status: 'active',
+  }).lean()
+  if (!membership) return null
+  if (targetWorkspaceId === String(principal.workspaceId)) return membership
+
+  const sessionUpdate = await AuthSession.updateOne(
+    { _id: principal.sessionId, userId: principal.id, revokedAt: null },
+    { $set: { workspaceId: targetWorkspaceId, lastSeenAt: new Date() } }
+  )
+  if (sessionUpdate.matchedCount !== 1) throw new Error('The current session is no longer active.')
+  await User.updateOne({ _id: principal.id, status: 'active' }, { $set: { preferredWorkspaceId: targetWorkspaceId } })
+  await revokeWorkspaceSessionChildren(principal.sessionId)
+  return membership
+}
+
 export function requireCsrf(req, res, principal) {
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return true
   const cookies = parseCookies(req.headers?.cookie || '')
@@ -230,6 +293,21 @@ export async function revokeSessionHierarchy(sessionIds, revokedAt = new Date())
     AuthSession.updateMany({ _id: { $in: ids }, revokedAt: null }, { $set: { revokedAt } }),
     RuntimeSession.updateMany({ authSessionId: { $in: ids }, revokedAt: null }, { $set: { revokedAt } }),
     ProjectUnlockSession.deleteMany({ authSessionId: { $in: ids } }),
+    runtimeIds.length
+      ? RuntimeStreamSession.updateMany({ runtimeSessionId: { $in: runtimeIds }, revokedAt: null }, { $set: { revokedAt } })
+      : Promise.resolve(),
+    runtimeIds.length
+      ? SimulationResponderLease.deleteMany({ runtimeSessionId: { $in: runtimeIds } })
+      : Promise.resolve(),
+  ])
+}
+
+async function revokeWorkspaceSessionChildren(authSessionId, revokedAt = new Date()) {
+  const runtimes = await RuntimeSession.find({ authSessionId, revokedAt: null }).select({ _id: 1 }).lean()
+  const runtimeIds = runtimes.map(runtime => runtime._id)
+  await Promise.all([
+    RuntimeSession.updateMany({ authSessionId, revokedAt: null }, { $set: { revokedAt } }),
+    ProjectUnlockSession.deleteMany({ authSessionId }),
     runtimeIds.length
       ? RuntimeStreamSession.updateMany({ runtimeSessionId: { $in: runtimeIds }, revokedAt: null }, { $set: { revokedAt } })
       : Promise.resolve(),

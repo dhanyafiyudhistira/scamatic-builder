@@ -5,6 +5,8 @@ import healthHandler    from '../api/_handlers/health.js'
 import settingsHandler  from '../api/_handlers/settings.js'
 import telemetryHandler from '../api/_handlers/telemetry.js'
 import authHandler      from '../api/_handlers/auth.js'
+import signupHandler    from '../api/_handlers/signup.js'
+import { callbackGoogleAuth, startGoogleAuth } from '../api/_handlers/google-auth.js'
 import projectsHandler  from '../api/_handlers/projects.js'
 import draftHandler     from '../api/_handlers/draft.js'
 import svgHandler       from '../api/_handlers/svg.js'
@@ -59,7 +61,10 @@ app.use((req, res, next) => {
 app.all('/api/health',    safe(healthHandler))
 app.all('/api/settings',  safe(settingsHandler))
 app.all('/api/telemetry', safe(telemetryHandler))
+app.all('/api/auth/google/start', safe(startGoogleAuth))
+app.all('/api/auth/callback/google', safe(callbackGoogleAuth))
 app.all('/api/auth',      safe(authHandler))
+app.all('/api/signup',    safe(signupHandler))
 app.all('/api/projects',  safe(projectsHandler))
 app.all('/api/draft',     safe(draftHandler))
 app.all('/api/svg',       safe(svgHandler))

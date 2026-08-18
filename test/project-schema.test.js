@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createProjectSchema, hasBlockingIssues, migrateProjectSchema, PROJECT_SCHEMA_VERSION, validateProjectSchema } from '../shared/project-schema.js'
+import { createComponentInstance } from '../shared/component-registry.js'
 import { publishedEnvironmentRef } from '../api/_handlers/publish.js'
 
 function validSchema() {
@@ -110,6 +111,45 @@ test('legacy tuning sliders migrate the former fast default to 0.1 percent of ra
   const migrated = migrateProjectSchema(legacy)
   assert.equal(migrated.schemaVersion, PROJECT_SCHEMA_VERSION)
   assert.equal(migrated.components.at(-1).properties.simulationRampPerSecond, 0.1)
+})
+
+test('legacy numeric component ranges migrate into canonical Tag engineering and command limits', () => {
+  const legacy = createProjectSchema({ id: 'numeric-migration', name: 'Numeric migration', slug: 'numeric-migration' })
+  legacy.schemaVersion = '1.5.0'
+  legacy.tags.push({ id: 'temperature', name: 'Temperature', path: 'temperature', dataType: 'number', access: 'read-write', sourceId: 'source_mock' })
+  const gauge = createComponentInstance('gauge', { id: 'temperature-gauge', canvas: legacy.project.canvas, tagId: 'temperature', index: 0 })
+  gauge.properties = { ...gauge.properties, rangeMode: undefined, min: -60, max: 60, suffix: ' °C', decimals: 1 }
+  const slider = createComponentInstance('tuning-slider', { id: 'temperature-slider', canvas: legacy.project.canvas, tagId: 'temperature', index: 1 })
+  slider.properties = { ...slider.properties, rangeMode: undefined, min: -20, max: 40, step: 5 }
+  legacy.components.push(gauge, slider)
+
+  const migrated = migrateProjectSchema(legacy)
+  assert.equal(migrated.schemaVersion, PROJECT_SCHEMA_VERSION)
+  assert.deepEqual(migrated.tags[0].engineering, { min: -60, max: 60, unit: ' °C', decimals: 1 })
+  assert.deepEqual(migrated.tags[0].writeConstraints, { min: -20, max: 40, step: 5 })
+  assert.equal(migrated.components[0].properties.rangeMode, 'inherit')
+  assert.equal(migrated.components[1].properties.rangeMode, 'inherit')
+  assert.equal(hasBlockingIssues(validateProjectSchema(migrated)), false)
+})
+
+test('numeric Tag validation blocks malformed engineering and writable limits', () => {
+  const schema = createProjectSchema({ id: 'numeric-validation', name: 'Numeric validation', slug: 'numeric-validation' })
+  schema.tags.push({
+    id: 'setpoint',
+    name: 'Setpoint',
+    path: 'setpoint',
+    dataType: 'number',
+    access: 'read-write',
+    sourceId: 'source_mock',
+    engineering: { min: 100, max: 0, unit: 42, decimals: 9 },
+    writeConstraints: { min: -10, max: 120, step: 0 },
+  })
+  const codes = new Set(validateProjectSchema(schema).map(issue => issue.code))
+  assert.equal(codes.has('tag.engineering.range'), true)
+  assert.equal(codes.has('tag.engineering.unit'), true)
+  assert.equal(codes.has('tag.engineering.decimals'), true)
+  assert.equal(codes.has('tag.writeConstraints.range'), true)
+  assert.equal(codes.has('tag.writeConstraints.step'), true)
 })
 
 test('Operation Shifter legacy panel geometry migrates to the compact dropdown trigger', () => {

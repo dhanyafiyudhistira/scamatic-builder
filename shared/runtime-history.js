@@ -55,12 +55,21 @@ export function normalizeTelemetrySample(sample) {
   if (!Number.isFinite(value)) return null
   const timestamp = parseTelemetryTimestamp(sample?.sourceTimestamp ?? sample?.timestamp ?? sample?.receivedAt)
   if (timestamp == null) return null
-  return {
+  const normalized = {
     timestamp,
     value,
     quality: typeof sample?.quality === 'string' ? sample.quality : 'good',
     sequence: Number.isFinite(Number(sample?.sequence)) ? Number(sample.sequence) : null,
   }
+  for (const field of ['first', 'last', 'min', 'max']) {
+    const fieldValue = Number(sample?.[field])
+    if (Number.isFinite(fieldValue)) normalized[field] = fieldValue
+  }
+  const count = Number(sample?.count)
+  const resolutionMs = Number(sample?.resolutionMs)
+  if (Number.isInteger(count) && count > 0) normalized.count = count
+  if (Number.isFinite(resolutionMs) && resolutionMs > 0) normalized.resolutionMs = resolutionMs
+  return normalized
 }
 
 function parseTelemetryTimestamp(value) {

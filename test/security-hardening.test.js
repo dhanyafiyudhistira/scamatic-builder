@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { isPrivateAddress, normalizeConnectorServerUrl } from '../api/_lib/connector-target.js'
-import { normalizeTelemetryEntries, normalizeTelemetryQuery } from '../api/_handlers/telemetry.js'
+import { normalizeTelemetryEntries, normalizeTelemetryQuery, telemetryReadRatePolicy } from '../api/_handlers/telemetry.js'
 import { clientAddress } from '../api/_lib/security.js'
 
 test('connector targets reject credential, query, and non-allowlisted production URLs', () => {
@@ -37,11 +37,20 @@ test('private and reserved connector addresses are classified conservatively', (
 test('telemetry validation enforces bounded project-scoped numeric samples', () => {
   const query = normalizeTelemetryQuery({ tags: 'level,temp,level', minutes: '15', limit: '250' })
   assert.deepEqual(query, { tags: ['level', 'temp'], minutes: 15, limit: 250 })
+  const historical = normalizeTelemetryQuery({ tags: 'level,temp', format: 'series', from: '2026-08-01T00:00:00.000Z', to: '2026-08-02T00:00:00.000Z', targetPoints: '900' })
+  assert.equal(historical.format, 'series')
+  assert.equal(historical.from.toISOString(), '2026-08-01T00:00:00.000Z')
+  assert.equal(historical.to.toISOString(), '2026-08-02T00:00:00.000Z')
+  assert.equal(historical.targetPoints, 900)
+  assert.deepEqual(telemetryReadRatePolicy(historical), { scope: 'telemetry-range-read', limit: 12, windowMs: 60_000 })
+  assert.deepEqual(telemetryReadRatePolicy(query), { scope: 'telemetry-read', limit: 120, windowMs: 60_000 })
   const points = normalizeTelemetryEntries([{ tag: 'level', value: '42.5', timestamp: 1_000_000 }], { workspaceId: 'w', projectId: 'p', now: 1_000_000 })
   assert.equal(points[0].workspaceId, 'w')
   assert.equal(points[0].projectId, 'p')
   assert.equal(points[0].value, 42.5)
   assert.throws(() => normalizeTelemetryQuery({ tags: 'bad tag', minutes: '60', limit: '400' }))
+  assert.throws(() => normalizeTelemetryQuery({ tags: 'level', format: 'series', from: '2025-01-01T00:00:00.000Z', to: '2026-08-02T00:00:00.000Z' }))
+  assert.throws(() => normalizeTelemetryQuery({ tags: Array.from({ length: 9 }, (_, index) => `tag-${index}`).join(','), format: 'series', from: '2026-08-01T00:00:00.000Z', to: '2026-08-02T00:00:00.000Z' }), /at most 8 tags/)
   assert.throws(() => normalizeTelemetryEntries([{ tag: 'level', value: 'NaN' }], { workspaceId: 'w', projectId: 'p' }))
 })
 

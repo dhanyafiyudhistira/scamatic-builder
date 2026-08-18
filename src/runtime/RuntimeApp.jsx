@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { RuntimeCanvas } from '../platform/RuntimeCanvas.jsx'
-import { apiRequest, login } from '../platform/api.js'
+import { apiRequest } from '../platform/api.js'
 import { ThemeToneToggle, useThemeTone } from '../platform/ThemeTone.jsx'
 import { useBoardTone } from '../platform/BoardTone.jsx'
 import { appendRuntimeHistory, seedRuntimeHistory } from '../../shared/runtime-history.js'
@@ -9,9 +9,13 @@ import { runtimeProfileMetadata } from '../../shared/runtime-profile.js'
 import { advanceSimulationValue, applySimulationRpc, simulationTelemetryBaseline, simulationTelemetryDelta } from '../../shared/simulation-bridge.js'
 import { initialSimulationBridgeHealth, simulationCommandConnectionAvailable, simulationStandbyRetryDelay, updateSimulationBridgeHealth, updateSimulationBridgeLease } from '../../shared/simulation-health.js'
 import { createSimulationTelemetryQueue } from '../../shared/simulation-telemetry-queue.js'
+import { createRuntimeHistoryArchiveQueue } from '../../shared/runtime-history-archive-queue.js'
 import { nextRuntimeResponderIdentity } from '../../shared/runtime-responder.js'
+import { createRuntimeCommandMetricsRecorder, runtimeCommandMetricsCsv, runtimeCommandMetricsStorageKey, runtimeCommandMetricsSummary } from '../../shared/runtime-command-metrics.js'
+import { numericEngineering, resolveNumericRange } from '../../shared/numeric-tag-config.js'
+import { AuthScreen } from '../platform/AuthScreen.jsx'
 
-export default function RuntimeApp({ slug }) {
+export default function RuntimeApp({ slug, metricsEnabled = false }) {
   const [session, setSession] = useState({ loading: true, user: null })
   const [runtime, setRuntime] = useState(null)
   const [runtimeSession, setRuntimeSession] = useState(null)
@@ -25,9 +29,12 @@ export default function RuntimeApp({ slug }) {
   const [histories, setHistories] = useState({})
   const [commandNotice, setCommandNotice] = useState(null)
   const [commandResults, setCommandResults] = useState({})
+  const [commandMetrics, setCommandMetrics] = useState(() => runtimeCommandMetricsSummary())
   const [simulationBridgeHealth, setSimulationBridgeHealth] = useState(() => initialSimulationBridgeHealth())
   const commandTimersRef = useRef(new Map())
   const commandResultsRef = useRef({})
+  const commandMetricsRecorderRef = useRef(null)
+  const commandMetricsRefreshTimerRef = useRef(null)
   const commandPushResultsRef = useRef(new Map())
   const commandPushWaitersRef = useRef(new Map())
   const simulationSequenceRunsRef = useRef(new Map())
@@ -36,17 +43,54 @@ export default function RuntimeApp({ slug }) {
   const pendingRpcRef = useRef(new Map())
   const publishedSimulationValuesRef = useRef({})
   const simulationTelemetryFlushRef = useRef(null)
+  const simulationHistoryArchiveRef = useRef(null)
   const simulationTargetsRef = useRef({})
   const simulationLeaseActiveRef = useRef(true)
   const simulationHeartbeatDueRef = useRef(true)
   const simulationHealthRef = useRef(initialSimulationBridgeHealth())
   const previousRuntimeStateRef = useRef(state)
+  if (!simulationHistoryArchiveRef.current) simulationHistoryArchiveRef.current = createRuntimeHistoryArchiveQueue()
   const [boardTone, setBoardTone] = useBoardTone()
   const profile = runtime?.profile || runtimeSession?.profile || runtimeProfileMetadata(runtime?.schema)
 
   useEffect(() => { valuesRef.current = values }, [values])
 
+  const scheduleCommandMetricsRefresh = useCallback(() => {
+    if (commandMetricsRefreshTimerRef.current) return
+    commandMetricsRefreshTimerRef.current = window.setTimeout(() => {
+      commandMetricsRefreshTimerRef.current = null
+      const recorder = commandMetricsRecorderRef.current
+      if (recorder) setCommandMetrics(recorder.summary())
+    }, 50)
+  }, [])
+
+  useEffect(() => {
+    if (!metricsEnabled) {
+      commandMetricsRecorderRef.current = null
+      setCommandMetrics(runtimeCommandMetricsSummary())
+      return undefined
+    }
+    if (!runtime?.projectId || !runtime?.versionId) return undefined
+    const recorder = createRuntimeCommandMetricsRecorder({
+      storage: runtimeSessionStorage(),
+      storageKey: runtimeCommandMetricsStorageKey(runtime.projectId, runtime.versionId),
+    })
+    commandMetricsRecorderRef.current = recorder
+    setCommandMetrics(recorder.summary())
+    const flush = () => recorder.flush()
+    window.addEventListener('pagehide', flush)
+    return () => {
+      window.removeEventListener('pagehide', flush)
+      recorder.flush()
+      if (commandMetricsRecorderRef.current === recorder) commandMetricsRecorderRef.current = null
+    }
+  }, [metricsEnabled, runtime?.projectId, runtime?.versionId])
+
   const rememberCommandResult = useCallback((component, result) => {
+    const incomingStatus = result?.status || 'unknown'
+    if (!isPendingCommandStatus(incomingStatus) && commandMetricsRecorderRef.current?.record({ ...result, status: incomingStatus, observedAt: new Date().toISOString() })) {
+      scheduleCommandMetricsRefresh()
+    }
     const current = commandResultsRef.current[component.id]
     if (!commandResultCanReplace(current, result)) return current
     const presentation = commandStatusPresentation(result.status)
@@ -78,7 +122,7 @@ export default function RuntimeApp({ slug }) {
       commandTimersRef.current.set(component.id, timer)
     }
     return entry
-  }, [])
+  }, [scheduleCommandMetricsRefresh])
 
   const receiveCommandPush = useCallback(result => {
     if (!result?.requestId || !result?.componentId) return
@@ -152,6 +196,16 @@ export default function RuntimeApp({ slug }) {
     return typeof flush === 'function' ? flush(changes, options) : false
   }, [])
 
+  const queueSimulationHistoryArchive = useCallback((valuesByTag, timestamp) => {
+    if (!runtime?.historyStorage?.enabled || !valuesByTag || typeof valuesByTag !== 'object') return 0
+    const entries = (runtime.schema?.tags || []).flatMap(tag => {
+      const value = valuesByTag[tag.id]
+      if (tag.dataType !== 'number' || !['read', 'read-write'].includes(tag.access) || !Number.isFinite(Number(value))) return []
+      return [{ tag: tag.id, value: Number(value), timestamp }]
+    })
+    return simulationHistoryArchiveRef.current.enqueue(entries).accepted
+  }, [runtime?.historyStorage?.enabled, runtime?.schema?.tags])
+
   const manageSimulationResponderLease = useCallback(async (action, { keepalive = false } = {}) => {
     const bridge = runtimeSession?.telemetry?.bridge
     if (runtimeSession?.telemetry?.mode !== 'simulation' || !bridge?.available || !runtime?.projectId || !runtimeSession?.token) return null
@@ -178,7 +232,22 @@ export default function RuntimeApp({ slug }) {
     })
   }, [])
 
+  const loadChartHistory = useCallback(({ tagIds, from, to, targetPoints, signal }) => {
+    if (!runtime?.projectId) throw new Error('Runtime project is unavailable.')
+    const query = new URLSearchParams({
+      projectId: runtime.projectId,
+      tags: [...new Set(tagIds || [])].join(','),
+      format: 'series',
+      from: new Date(from).toISOString(),
+      to: new Date(to).toISOString(),
+      targetPoints: String(targetPoints),
+    })
+    return apiRequest(`/api/telemetry?${query}`, { signal })
+  }, [runtime?.projectId])
+
   useEffect(() => () => {
+    if (commandMetricsRefreshTimerRef.current) window.clearTimeout(commandMetricsRefreshTimerRef.current)
+    commandMetricsRefreshTimerRef.current = null
     for (const timer of commandTimersRef.current.values()) window.clearTimeout(timer)
     commandTimersRef.current.clear()
     for (const waiters of commandPushWaitersRef.current.values()) {
@@ -355,8 +424,9 @@ export default function RuntimeApp({ slug }) {
       const targetTagId = component.properties?.feedbackTagId || component.binding?.tagId
       const tag = tagsById.get(targetTagId)
       if (!tag || tag.dataType !== 'number' || !['read', 'read-write'].includes(tag.access)) return []
-      const min = Number(component.properties?.min ?? 0)
-      const max = Number(component.properties?.max ?? 100)
+      const range = resolveNumericRange(tag, component.properties, 'write')
+      const min = range.min
+      const max = range.max
       const configuredRate = Number(component.properties?.simulationRampPerSecond)
       const defaultRate = Math.max(.001, Math.abs(max - min) * .001)
       const legacyDefaultRate = runtime.schema.schemaVersion === '1.4.0' && configuredRate === 5
@@ -364,7 +434,7 @@ export default function RuntimeApp({ slug }) {
         tag,
         targetTagId,
         ratePerSecond: Number.isFinite(configuredRate) && configuredRate > 0 && !legacyDefaultRate ? configuredRate : defaultRate,
-        decimals: Math.max(0, Math.min(8, Number(component.properties?.decimals ?? 0))),
+        decimals: Math.max(0, Math.min(8, Number(component.properties?.decimals ?? numericEngineering(tag).decimals))),
       }]
     })
     simulationTargetsRef.current = {
@@ -446,6 +516,7 @@ export default function RuntimeApp({ slug }) {
             simulationHeartbeatDueRef.current = false
             publishedSimulationValuesRef.current = { ...publishedSimulationValuesRef.current, ...delta }
             lastSuccessAt = Date.now()
+            queueSimulationHistoryArchive(delta, timestamp)
             updateSimulationHealth('telemetry', true)
           } catch (requestError) {
             queue.retry(job.id)
@@ -489,7 +560,43 @@ export default function RuntimeApp({ slug }) {
       queue.clear()
       if (simulationTelemetryFlushRef.current === requestFlush) simulationTelemetryFlushRef.current = null
     }
-  }, [runtime?.projectId, runtime?.schema, runtimeSession?.telemetry?.bridge, runtimeSession?.telemetry?.heartbeatIntervalMs, runtimeSession?.telemetry?.mode, runtimeSession?.telemetry?.publishIntervalMs, runtimeSession?.token, updateSimulationHealth, updateSimulationLease])
+  }, [queueSimulationHistoryArchive, runtime?.projectId, runtime?.schema, runtimeSession?.telemetry?.bridge, runtimeSession?.telemetry?.heartbeatIntervalMs, runtimeSession?.telemetry?.mode, runtimeSession?.telemetry?.publishIntervalMs, runtimeSession?.token, updateSimulationHealth, updateSimulationLease])
+
+  useEffect(() => {
+    const queue = simulationHistoryArchiveRef.current
+    if (runtimeSession?.telemetry?.mode !== 'simulation' || !runtime?.historyStorage?.enabled || !runtime?.projectId || !runtimeSession?.token) {
+      queue.clear()
+      return undefined
+    }
+    let flushing = false
+    const flush = async ({ keepalive = false } = {}) => {
+      if (flushing) return
+      const batch = queue.take(keepalive ? 200 : 1_000)
+      if (!batch) return
+      flushing = true
+      try {
+        await apiRequest('/api/telemetry', {
+          method: 'POST',
+          keepalive,
+          headers: { 'X-Runtime-Token': runtimeSession.token },
+          body: JSON.stringify({ projectId: runtime.projectId, source: 'runtime-simulation', entries: batch.entries }),
+        })
+        queue.acknowledge(batch.id)
+      } catch {
+        queue.retry(batch.id)
+      } finally {
+        flushing = false
+      }
+    }
+    const timer = window.setInterval(() => { void flush() }, 15_000)
+    const pagehide = () => { void flush({ keepalive: true }) }
+    window.addEventListener('pagehide', pagehide)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('pagehide', pagehide)
+      void flush({ keepalive: true })
+    }
+  }, [runtime?.historyStorage?.enabled, runtime?.projectId, runtimeSession?.telemetry?.mode, runtimeSession?.token])
 
   useEffect(() => {
     const bridge = runtimeSession?.telemetry?.bridge
@@ -511,6 +618,7 @@ export default function RuntimeApp({ slug }) {
       updateSimulationLease(true)
       if (body.action === 'acknowledge') {
         publishedSimulationValuesRef.current = { ...publishedSimulationValuesRef.current, ...body.values }
+        queueSimulationHistoryArchive(body.values, Number(body.timestamp) || Date.now())
       }
     }
     const loop = async () => {
@@ -592,7 +700,7 @@ export default function RuntimeApp({ slug }) {
     }
     void loop()
     return () => { active = false; controller.abort() }
-  }, [runtime?.projectId, runtime?.schema, runtimeSession?.telemetry?.bridge, runtimeSession?.telemetry?.mode, runtimeSession?.token, updateSimulationHealth, updateSimulationLease])
+  }, [queueSimulationHistoryArchive, runtime?.projectId, runtime?.schema, runtimeSession?.telemetry?.bridge, runtimeSession?.telemetry?.mode, runtimeSession?.token, updateSimulationHealth, updateSimulationLease])
 
   const cancelSimulationSequence = useCallback(operationComponentId => {
     const active = simulationSequenceRunsRef.current.get(operationComponentId)
@@ -624,21 +732,28 @@ export default function RuntimeApp({ slug }) {
         for (const step of plan.steps || []) {
           await waitForSimulationStep(step.delayMs, controller.signal)
           const requestId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`
-          const result = await apiRequest('/api/simulation-sequence', {
-            method: 'POST',
-            signal: controller.signal,
-            body: JSON.stringify({
-              action: 'step',
-              projectId: runtime.projectId,
-              runtimeToken: runtimeSession.token,
-              operationComponentId: operation.id,
-              operationRequestId,
-              enabledStepIds,
-              runId: plan.runId,
-              requestId,
-              stepId: step.id,
-            }),
-          })
+          if (commandMetricsRecorderRef.current?.start(requestId)) scheduleCommandMetricsRefresh()
+          let result
+          try {
+            result = await apiRequest('/api/simulation-sequence', {
+              method: 'POST',
+              signal: controller.signal,
+              body: JSON.stringify({
+                action: 'step',
+                projectId: runtime.projectId,
+                runtimeToken: runtimeSession.token,
+                operationComponentId: operation.id,
+                operationRequestId,
+                enabledStepIds,
+                runId: plan.runId,
+                requestId,
+                stepId: step.id,
+              }),
+            })
+          } catch (stepError) {
+            if (commandMetricsRecorderRef.current?.abandon(requestId)) scheduleCommandMetricsRefresh()
+            throw stepError
+          }
           if (controller.signal.aborted) return
           const changes = result.changes && typeof result.changes === 'object' ? result.changes : {}
           if (Object.keys(changes).length) {
@@ -650,6 +765,7 @@ export default function RuntimeApp({ slug }) {
           }
           const target = (runtime.schema.components || []).find(component => component.id === result.componentId)
           if (target) rememberCommandResult(target, result)
+          else if (commandMetricsRecorderRef.current?.abandon(requestId)) scheduleCommandMetricsRefresh()
         }
         if (simulationSequenceRunsRef.current.get(operation.id) !== activeRun) return
         rememberCommandResult(operation, {
@@ -676,7 +792,7 @@ export default function RuntimeApp({ slug }) {
       }
     })()
     return plan
-  }, [cancelSimulationSequence, rememberCommandResult, requestSimulationTelemetryFlush, runtime?.projectId, runtime?.schema?.components, runtimeSession?.token])
+  }, [cancelSimulationSequence, rememberCommandResult, requestSimulationTelemetryFlush, runtime?.projectId, runtime?.schema?.components, runtimeSession?.token, scheduleCommandMetricsRefresh])
 
   useEffect(() => {
     if (!runtime?.projectId || !runtimeSession?.token || !runtime?.schema?.components) return
@@ -724,13 +840,15 @@ export default function RuntimeApp({ slug }) {
   }, [rememberCommandResult, runtime?.projectId, runtime?.schema?.components, runtimeSession?.stream?.url, runtimeSession?.token, waitForCommandPush])
 
   const runCommand = async (component, tag, requestedValue) => {
+    const clientStartedAt = Date.now()
+    const commandRequestId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`
+    if (commandMetricsRecorderRef.current?.start(commandRequestId, { startedAt: clientStartedAt })) scheduleCommandMetricsRefresh()
     if (profile.id === 'simulation' && component.type === 'operation-shifter') cancelSimulationSequence(component.id)
     const requestedMode = component.type === 'operation-shifter' ? String(requestedValue?.mode || '').toLowerCase() : ''
     if (profile.id === 'simulation' && ['manual', 'reset'].includes(requestedMode)) {
       await manageSimulationResponderLease('takeover').catch(() => null)
     }
     const commandDeadlineAt = Date.now() + commandCompletionBudgetMs(component.properties?.ackTimeoutMs)
-    const commandRequestId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`
     rememberCommandResult(component, {
       ok: false,
       requestId: commandRequestId,
@@ -743,7 +861,7 @@ export default function RuntimeApp({ slug }) {
     try {
       let result
       try {
-        result = await apiRequest('/api/commands', { method: 'POST', body: JSON.stringify({ projectId: runtime.projectId, runtimeToken: runtimeSession.token, requestId: commandRequestId, componentId: component.id, confirmed: true, value: requestedValue }) })
+        result = await apiRequest('/api/commands', { method: 'POST', body: JSON.stringify({ projectId: runtime.projectId, runtimeToken: runtimeSession.token, requestId: commandRequestId, componentId: component.id, confirmed: true, value: requestedValue, includeMetrics: metricsEnabled }) })
       } catch (requestError) {
         if (!requestError.result?.status) throw requestError
         result = requestError.result
@@ -823,15 +941,31 @@ export default function RuntimeApp({ slug }) {
     }
   }
 
+  const resetCommandMetrics = () => {
+    const recorder = commandMetricsRecorderRef.current
+    if (recorder) setCommandMetrics(recorder.reset())
+  }
+
+  const exportCommandMetrics = () => {
+    const recorder = commandMetricsRecorderRef.current
+    if (!recorder) return
+    const samples = recorder.samples()
+    if (!samples.length) return
+    const projectLabel = String(runtime?.schema?.project?.name || runtime?.projectId || 'runtime').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'runtime'
+    downloadTextFile(`rpc-metrics-${projectLabel}-${new Date().toISOString().replaceAll(':', '-').slice(0, 19)}.csv`, runtimeCommandMetricsCsv(samples), 'text/csv;charset=utf-8')
+  }
+
   const statusLabel = useMemo(() => state.replaceAll('-', ' ').toUpperCase(), [state])
   const profileStatusLabel = profile.id === 'monitor' ? 'MONITORING' : profile.id.toUpperCase()
   if (session.loading) return <RuntimeState title="Checking runtime access…" />
-  if (!session.user) return <RuntimeLogin onAuthenticated={checkSession} />
+  if (!session.user) return <AuthScreen onAuthenticated={checkSession} runtime allowSignup={false} />
   if (state === 'project-locked' && lockedProjectId) return <RuntimeProjectUnlock projectId={lockedProjectId} onUnlocked={() => setBootstrapAttempt(attempt => attempt + 1)} />
   if (error) return <RuntimeState title={error} detail={statusLabel} />
   if (!runtime) return <RuntimeState title="Preparing published runtime…" detail={statusLabel} />
   const runtimeConnecting = !runtimeSession || ['connecting', 'reconnecting'].includes(state)
   const runtimeRecovering = runtimeConnecting || ['degraded', 'standby', 'synchronizing', 'disconnected'].includes(state)
+  const simulationBridge = runtimeSession?.telemetry?.bridge
+  const localSimulationOnly = profile.id === 'simulation' && simulationBridge?.available === false
   const commandConnectionAvailable = Boolean(runtimeSession?.token)
     && simulationCommandConnectionAvailable(profile.id, state)
     && !runtimeConnecting
@@ -843,15 +977,16 @@ export default function RuntimeApp({ slug }) {
           <strong>{runtime.schema.project.name}</strong>
           <span>Published v{runtime.version} · {runtime.environment.toUpperCase()}</span>
         </div>
-        <div className={`sb-runtime-state state-${state}`}>{statusLabel} / {profileStatusLabel}</div>
+        <div className={`sb-runtime-state state-${localSimulationOnly ? 'degraded' : state}`}>{localSimulationOnly ? 'LOCAL ONLY' : statusLabel} / {profileStatusLabel}</div>
         <div className="sb-runtime-toolbar-actions">
+          {metricsEnabled && <RuntimeMetricsPanel summary={commandMetrics} profile={profile.id} onReset={resetCommandMetrics} onExport={exportCommandMetrics} />}
           <RuntimeViewMenu boardTone={boardTone} onBoardToneChange={setBoardTone} />
           <a href="/">Builder</a>
         </div>
       </div>
       {(runtimeRecovering || showRuntimeReady) && <RuntimeConnectionNotice state={showRuntimeReady && !runtimeRecovering ? 'ready' : state} profile={profile.id} bridgeHealth={simulationBridgeHealth} />}
-      {commandNotice && <CommandNotice result={commandNotice} profile={profile.id} bridgeAvailable={runtimeSession?.telemetry?.bridge?.available === true} bridgeHealth={simulationBridgeHealth} onDismiss={() => setCommandNotice(null)} />}
-      <RuntimeCanvas schema={runtime.schema} svg={runtime.svg} designAssets={runtime.designAssets} values={values} qualities={qualities} histories={histories} historyStorage={runtime.historyStorage} boardTone={boardTone} actorRole={session.user.role} onCommand={runtimeSession?.token && profile.commandEnabled ? runCommand : undefined} commandResults={commandResults} commandConnectionAvailable={commandConnectionAvailable} />
+      {commandNotice && <CommandNotice result={commandNotice} profile={profile.id} metricsEnabled={metricsEnabled} bridge={simulationBridge} bridgeHealth={simulationBridgeHealth} onDismiss={() => setCommandNotice(null)} />}
+      <RuntimeCanvas schema={runtime.schema} svg={runtime.svg} designAssets={runtime.designAssets} values={values} qualities={qualities} histories={histories} historyStorage={runtime.historyStorage} onLoadChartHistory={loadChartHistory} boardTone={boardTone} actorRole={session.user.role} onCommand={runtimeSession?.token && profile.commandEnabled ? runCommand : undefined} commandResults={commandResults} commandConnectionAvailable={commandConnectionAvailable} />
     </div>
   )
 }
@@ -889,9 +1024,9 @@ function RuntimeConnectionNotice({ state, profile, bridgeHealth }) {
   )
 }
 
-function CommandNotice({ result, profile, bridgeAvailable, bridgeHealth, onDismiss }) {
+function CommandNotice({ result, profile, metricsEnabled, bridge, bridgeHealth, onDismiss }) {
   const simulationAcknowledged = profile === 'simulation' && result.presentation.state === 'acknowledged'
-  const bridgeLabel = !bridgeAvailable
+  const bridgeLabel = !bridge?.available
     ? 'local only'
     : bridgeHealth?.status === 'online'
       ? 'online'
@@ -910,13 +1045,21 @@ function CommandNotice({ result, profile, bridgeAvailable, bridgeHealth, onDismi
                 <div><dt>Correlation</dt><dd>{result.correlationId || 'pending'}</dd></div>
                 <div><dt>Observed</dt><dd>{new Date(result.observedAt).toLocaleTimeString()}</dd></div>
                 {profile === 'simulation' && <div><dt>Bridge</dt><dd>{bridgeLabel}</dd></div>}
-                {result.timing?.mode && <div><dt>{result.timing.mode === 'simulation' ? 'Execution' : 'ACK mode'}</dt><dd>{result.timing.mode}</dd></div>}
-                {result.timing?.apiAuthorizationMs != null && <div><dt>API</dt><dd>{formatRpcDuration(result.timing.apiAuthorizationMs)}</dd></div>}
-                {result.timing?.workerQueueMs != null && <div><dt>{result.timing.mode === 'simulation' ? 'Dispatch wait' : 'Worker queue'}</dt><dd>{formatRpcDuration(result.timing.workerQueueMs)}</dd></div>}
-                {result.timing?.gatewayRpcMs != null && <div><dt>Gateway RPC</dt><dd>{formatRpcDuration(result.timing.gatewayRpcMs)}</dd></div>}
-                {result.timing?.upstreamRoundTripMs != null && <div><dt>Upstream</dt><dd>{formatRpcDuration(result.timing.upstreamRoundTripMs)}</dd></div>}
-                {result.timing?.feedbackWaitMs != null && <div><dt>Feedback wait</dt><dd>{formatRpcDuration(result.timing.feedbackWaitMs)}</dd></div>}
-                {result.timing?.serverTotalMs != null && <div><dt>Server total</dt><dd>{formatRpcDuration(result.timing.serverTotalMs)}</dd></div>}
+                {profile === 'simulation' && !bridge?.available && bridge?.reason && <div><dt>Bridge reason</dt><dd>{bridge.reason}</dd></div>}
+                {metricsEnabled && <>
+                  {result.timing?.mode && <div><dt>{result.timing.mode === 'simulation' ? 'Execution' : 'ACK mode'}</dt><dd>{result.timing.mode}</dd></div>}
+                  {result.timing?.apiAuthorizationMs != null && <div><dt>API</dt><dd>{formatRpcDuration(result.timing.apiAuthorizationMs)}</dd></div>}
+                  {result.timing?.workerQueueMs != null && <div><dt>{result.timing.mode === 'simulation' ? 'Dispatch wait' : 'Worker queue'}</dt><dd>{formatRpcDuration(result.timing.workerQueueMs)}</dd></div>}
+                  {result.timing?.gatewayRpcMs != null && <div><dt>Gateway RPC</dt><dd>{formatRpcDuration(result.timing.gatewayRpcMs)}</dd></div>}
+                  {result.timing?.upstreamRoundTripMs != null && <div><dt>Upstream</dt><dd>{formatRpcDuration(result.timing.upstreamRoundTripMs)}</dd></div>}
+                  {result.timing?.feedbackWaitMs != null && <div><dt>Feedback wait</dt><dd>{formatRpcDuration(result.timing.feedbackWaitMs)}</dd></div>}
+                  {result.timing?.serverTotalMs != null && <div><dt>Server total</dt><dd>{formatRpcDuration(result.timing.serverTotalMs)}</dd></div>}
+                  {result.timing?.admissionTotalMs != null && <div><dt>Admission total</dt><dd>{formatRpcDuration(result.timing.admissionTotalMs)}</dd></div>}
+                  {result.timing?.commandPersistenceMs != null && <div><dt>Command persistence</dt><dd>{formatRpcDuration(result.timing.commandPersistenceMs)}</dd></div>}
+                  {result.timing?.auditPersistenceMs != null && <div><dt>Audit persistence</dt><dd>{formatRpcDuration(result.timing.auditPersistenceMs)}</dd></div>}
+                  {result.timing?.terminalPersistMs != null && <div><dt>Terminal persistence</dt><dd>{formatRpcDuration(result.timing.terminalPersistMs)}</dd></div>}
+                  {result.timing?.serverResponseReadyMs != null && <div><dt>Response ready</dt><dd>{formatRpcDuration(result.timing.serverResponseReadyMs)}</dd></div>}
+                </>}
               </dl>
             </div>
           </details>
@@ -985,6 +1128,105 @@ function waitForSimulationStep(delayMs, signal) {
 function formatRpcDuration(value) {
   const milliseconds = Math.max(0, Number(value) || 0)
   return milliseconds >= 1000 ? `${(milliseconds / 1000).toFixed(2)} s` : `${Math.round(milliseconds)} ms`
+}
+
+function RuntimeMetricsPanel({ summary, profile, onReset, onExport }) {
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef(null)
+  const triggerRef = useRef(null)
+  const metrics = summary?.metrics || {}
+  const metricRows = profile === 'simulation'
+    ? [
+        ['API (legacy)', metrics.apiAuthorizationMs],
+        ['Admission total', metrics.admissionTotalMs],
+        ['Admission reads', metrics.admissionReadsMs],
+        ['Simulation state', metrics.simulationStateReadsMs],
+        ['Command create', metrics.commandCreateMs],
+        ['Authorization save', metrics.authorizationPersistMs],
+        ['Authorization audit', metrics.authorizationAuditMs],
+        ['Dispatch save', metrics.dispatchPersistMs],
+        ['Terminal save', metrics.terminalPersistMs],
+        ['Terminal audit', metrics.terminalAuditMs],
+        ['Response ready', metrics.serverResponseReadyMs],
+        ['Client E2E', metrics.clientEndToEndMs],
+      ]
+    : [
+        ['API', metrics.apiAuthorizationMs],
+        ['Worker queue', metrics.workerQueueMs],
+        ['Server total', metrics.serverTotalMs],
+        ['Client E2E', metrics.clientEndToEndMs],
+      ]
+
+  useEffect(() => {
+    if (!open) return undefined
+    const closeOnOutsidePress = event => { if (!rootRef.current?.contains(event.target)) setOpen(false) }
+    const closeOnEscape = event => {
+      if (event.key !== 'Escape') return
+      setOpen(false)
+      triggerRef.current?.focus()
+    }
+    window.addEventListener('pointerdown', closeOnOutsidePress)
+    window.addEventListener('keydown', closeOnEscape)
+    return () => {
+      window.removeEventListener('pointerdown', closeOnOutsidePress)
+      window.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [open])
+
+  return (
+    <div className={`sb-runtime-metrics ${open ? 'is-open' : ''}`} ref={rootRef}>
+      <button ref={triggerRef} type="button" className="sb-runtime-metrics-trigger" aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen(value => !value)}>
+        Metrics <strong>{summary?.count || 0}</strong>
+      </button>
+      {open && (
+        <section className="sb-runtime-metrics-popover" role="dialog" aria-label="Runtime RPC session metrics">
+          <header><span>SESSION RPC METRICS</span><strong>{summary.count} / {summary.capacity}</strong></header>
+          {summary.count ? (
+            <>
+              <div className="sb-runtime-metrics-status">
+                <div><span>Acknowledged</span><strong>{summary.statuses.acknowledged} · {formatPercentage(summary.acknowledgedRate)}</strong></div>
+                <div><span>Unverified</span><strong>{summary.unverified} · {formatPercentage(summary.unverifiedRate)}</strong></div>
+                <div><span>Rejected / failed</span><strong>{summary.statuses.rejected + summary.statuses.failed}</strong></div>
+                <div><span>In flight / peak</span><strong>{summary.inFlight} / {summary.maxInFlight}</strong></div>
+              </div>
+              <table>
+                <thead><tr><th>Phase</th><th>p50</th><th>p95</th><th>Max</th></tr></thead>
+                <tbody>{metricRows.map(([label, values]) => (
+                  <tr key={label}><th>{label}</th><td>{formatMetricDuration(values?.p50)}</td><td>{formatMetricDuration(values?.p95)}</td><td>{formatMetricDuration(values?.max)}</td></tr>
+                ))}</tbody>
+              </table>
+            </>
+          ) : <p>RPC yang dimulai dari tab ini akan direkam otomatis.</p>}
+          <footer>
+            <button type="button" onClick={onReset} disabled={!summary.count && !summary.inFlight}>Reset</button>
+            <button type="button" onClick={onExport} disabled={!summary.count}>Export CSV</button>
+          </footer>
+          <small>Session-only · bounded · no command payloads</small>
+        </section>
+      )}
+    </div>
+  )
+}
+
+function formatMetricDuration(value) {
+  return value == null ? '—' : formatRpcDuration(value)
+}
+
+function formatPercentage(value) {
+  return `${Math.max(0, Number(value) || 0).toFixed(2).replace(/\.00$/, '')}%`
+}
+
+function runtimeSessionStorage() {
+  try { return window.sessionStorage } catch { return null }
+}
+
+function downloadTextFile(fileName, content, type) {
+  const url = URL.createObjectURL(new Blob([content], { type }))
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = fileName
+  anchor.click()
+  window.setTimeout(() => URL.revokeObjectURL(url), 0)
 }
 
 function commandDeadlineFrom(createdAt, acknowledgmentTimeoutMs) {
@@ -1060,12 +1302,6 @@ function RuntimeViewMenu({ boardTone, onBoardToneChange }) {
       )}
     </div>
   )
-}
-
-function RuntimeLogin({ onAuthenticated }) {
-  const [email, setEmail] = useState('admin@scada.local'); const [password, setPassword] = useState(''); const [error, setError] = useState(''); const [busy, setBusy] = useState(false)
-  const submit = async event => { event.preventDefault(); setBusy(true); setError(''); try { await login(email, password); await onAuthenticated() } catch (requestError) { setError(requestError.message) } finally { setBusy(false) } }
-  return <div className="sb-runtime-login"><form className="sb-login-card" onSubmit={submit}><div className="sb-login-card-head"><div className="sb-login-mark">SC</div><ThemeToneToggle /></div><p className="eyebrow">PRIVATE SCADA RUNTIME</p><h1>Runtime access</h1><p>Sign in with an account assigned to this project.</p><label>Email<input type="email" value={email} onChange={event => setEmail(event.target.value)} required /></label><label>Password<input type="password" value={password} onChange={event => setPassword(event.target.value)} required autoFocus /></label>{error && <div className="sb-form-error">{error}</div>}<button type="submit" className="primary" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button></form></div>
 }
 
 function RuntimeProjectUnlock({ projectId, onUnlocked }) {

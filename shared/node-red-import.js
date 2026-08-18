@@ -1,5 +1,7 @@
 import { COMPONENT_REGISTRY, createComponentInstance } from './component-registry.js'
 import { NODE_RED_EXPORT_MARKER } from './node-red-export.js'
+import { DEFAULT_ENGINEERING, DEFAULT_WRITE_CONSTRAINTS } from './numeric-tag-config.js'
+import { numericAlarmRule } from './alarm.js'
 
 export const NODE_RED_IMPORT_LIMITS = Object.freeze({ maxBytes: 2 * 1024 * 1024, maxNodes: 5000, maxFunctionLength: 100_000 })
 
@@ -11,8 +13,8 @@ const DASHBOARD_TYPES = Object.freeze({
   ui_slider: { dataType: 'number', access: 'read-write', componentType: 'tuning-slider' },
   'ui-slider': { dataType: 'number', access: 'read-write', componentType: 'tuning-slider' },
   ui_numeric: { dataType: 'number', access: 'read-write', componentType: 'tuning-slider' },
-  ui_gauge: { dataType: 'number', access: 'read', componentType: 'value-span' },
-  'ui-gauge': { dataType: 'number', access: 'read', componentType: 'value-span' },
+  ui_gauge: { dataType: 'number', access: 'read', componentType: 'gauge' },
+  'ui-gauge': { dataType: 'number', access: 'read', componentType: 'gauge' },
   ui_chart: { dataType: 'number', access: 'read', componentType: 'value-span' },
   'ui-chart': { dataType: 'number', access: 'read', componentType: 'value-span' },
   ui_text: { dataType: 'string', access: 'read', componentType: 'value-span' },
@@ -108,6 +110,8 @@ export function parseNodeRedFlow(input) {
     if (!mapping) continue
     const path = safeText(node.topic || node.label || node.name, 255)
     if (!path || /^\{\{.*\}\}$/.test(path)) continue
+    const engineering = mapping.dataType === 'number' ? safeDashboardEngineering(node) : null
+    const writeConstraints = mapping.componentType === 'tuning-slider' ? safeDashboardWriteConstraints(node, engineering) : null
     mergeCandidate(candidateMap, {
       importKey: `dashboard:${safeText(node.id, 200) || path}`,
       name: humanizeName(node.label || node.name || path),
@@ -116,6 +120,9 @@ export function parseNodeRedFlow(input) {
       rpcMethod: null,
       originNodeIds: [safeText(node.id, 200)].filter(Boolean),
       plcAddress: null,
+      ...(engineering ? { engineering } : {}),
+      ...(writeConstraints ? { writeConstraints } : {}),
+      ...(mapping.componentType === 'gauge' && engineering ? { componentProperties: safeDashboardGaugeProperties(node, engineering) } : {}),
       evidence: ['dashboard node'],
     })
   }
@@ -182,6 +189,12 @@ export function createNodeRedImportPlan(analysis, schema, options = {}) {
       freshnessMode: candidate.access === 'write' ? 'event-driven' : 'periodic',
       adaptiveFreshness: candidate.access !== 'write',
       staleAfterMs: 10_000,
+      ...(candidate.dataType === 'number' ? {
+        numberFormat: candidate.numberFormat || safeImportedNumberFormat(null, candidate.engineering),
+        engineering: candidate.engineering || { ...DEFAULT_ENGINEERING },
+        ...(candidate.alarmRule ? { alarmRule: candidate.alarmRule } : {}),
+        ...(candidate.access !== 'read' ? { writeConstraints: candidate.writeConstraints || { min: candidate.engineering?.min ?? 0, max: candidate.engineering?.max ?? 100, step: 1 } } : {}),
+      } : {}),
       metadata: importMetadata(analysis, candidate),
     }
     tags.push(tag)
@@ -299,6 +312,10 @@ function embeddedScamaticExport(nodes) {
       const access = ['read', 'write', 'read-write'].includes(tag?.access) ? tag.access : null
       if (!id || !path || !dataType || !access) return null
       const componentType = COMPONENT_REGISTRY[tag.componentType] ? tag.componentType : null
+      const engineering = dataType === 'number' ? safeImportedEngineering(tag.engineering) : null
+      const numberFormat = dataType === 'number' ? safeImportedNumberFormat(tag.numberFormat, engineering) : null
+      const writeConstraints = dataType === 'number' ? safeImportedWriteConstraints(tag.writeConstraints, tag.engineering) : null
+      const alarmRule = dataType === 'number' ? safeImportedNumericAlarmRule(tag.alarmRule, engineering) : null
       return {
         importKey: `scamatic:${id}`,
         name: safeText(tag.name, 255) || humanizeName(path),
@@ -308,6 +325,7 @@ function embeddedScamaticExport(nodes) {
         rpcMethod: /^[a-zA-Z0-9_.:-]{1,100}$/.test(tag.rpcMethod || '') ? tag.rpcMethod : null,
         componentType,
         componentProperties: safeImportedComponentProperties(componentType, tag.componentProperties),
+        ...(dataType === 'number' ? { numberFormat, engineering, writeConstraints, ...(alarmRule ? { alarmRule } : {}) } : {}),
         originNodeIds: originNodeId ? [originNodeId] : [],
         plcAddress: safeText(tag.plcAddress, 100) || null,
         evidence: ['Scamatic Builder metadata'],
@@ -324,7 +342,8 @@ function safeImportedComponentProperties(type, value) {
   const result = {}
   const label = safeText(value.label, 255)
   if (label) result.label = label
-  if (['tuning-slider', 'value-span'].includes(type)) {
+  if (['gauge', 'tuning-slider'].includes(type) && ['inherit', 'custom'].includes(value.rangeMode)) result.rangeMode = value.rangeMode
+  if (['tuning-slider', 'value-span', 'gauge'].includes(type)) {
     const min = Number(value.min)
     const max = Number(value.max)
     if (Number.isFinite(min) && Number.isFinite(max) && min < max) {
@@ -338,12 +357,129 @@ function safeImportedComponentProperties(type, value) {
     const suffix = safeText(value.suffix, 40)
     if (suffix) result.suffix = suffix
   }
+  if (type === 'gauge') {
+    if (['inherit', 'custom'].includes(value.unitMode)) result.unitMode = value.unitMode
+    const min = Number(value.min)
+    const max = Number(value.max)
+    const lowZoneEnd = Number(value.lowZoneEnd)
+    const highZoneStart = Number(value.highZoneStart)
+    if (Number.isFinite(min) && Number.isFinite(max) && min < max
+      && Number.isFinite(lowZoneEnd) && Number.isFinite(highZoneStart)
+      && lowZoneEnd >= min && lowZoneEnd <= highZoneStart && highZoneStart <= max) {
+      result.lowZoneEnd = lowZoneEnd
+      result.highZoneStart = highZoneStart
+    }
+    for (const key of ['scale', 'offset']) if (Number.isFinite(Number(value[key]))) result[key] = Number(value[key])
+    const tickCount = Number(value.tickCount)
+    if (Number.isInteger(tickCount) && tickCount >= 4 && tickCount <= 12) result.tickCount = tickCount
+    for (const key of ['lowColor', 'normalColor', 'highColor', 'needleColor', 'faceColor', 'textColor']) {
+      const color = safeHexColor(value[key])
+      if (color) result[key] = color
+    }
+    if (typeof value.fallback === 'string') result.fallback = safeText(value.fallback, 40)
+    if (typeof value.showDigital === 'boolean') result.showDigital = value.showDigital
+  }
+  if (type === 'alarm') {
+    if (['lamp', 'buzzer'].includes(value.presentation)) result.presentation = value.presentation
+    if (['inherit', 'custom'].includes(value.ruleMode)) result.ruleMode = value.ruleMode
+    const rule = safeImportedRule(value.rule)
+    if (rule) result.rule = rule
+    for (const key of ['activeColor', 'idleColor']) {
+      const color = safeHexColor(value[key])
+      if (color) result[key] = color
+    }
+    if (typeof value.flash === 'boolean') result.flash = value.flash
+    if (typeof value.soundEnabled === 'boolean') result.soundEnabled = value.soundEnabled
+    const frequencyHz = Number(value.frequencyHz)
+    if (Number.isFinite(frequencyHz) && frequencyHz >= 100 && frequencyHz <= 4000) result.frequencyHz = frequencyHz
+    const volume = Number(value.volume)
+    if (Number.isFinite(volume) && volume >= 0 && volume <= 0.5) result.volume = volume
+    const pulseMs = Number(value.pulseMs)
+    if (Number.isInteger(pulseMs) && pulseMs >= 100 && pulseMs <= 5000) result.pulseMs = pulseMs
+  }
   if (type === 'control-button') {
     const action = safeText(value.action, 40)
     if (/^(?:toggle-boolean|set-value|pulse)$/.test(action)) result.action = action
     if (['boolean', 'number', 'string'].includes(typeof value.payload)) result.payload = value.payload
   }
   return result
+}
+
+function safeImportedRule(value) {
+  const operators = new Set(['truthy', 'eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'between', 'outside', 'contains'])
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !operators.has(value.operator)) return null
+  const rule = { operator: value.operator }
+  if (['eq', 'neq', 'contains'].includes(value.operator) && ['boolean', 'number', 'string'].includes(typeof value.value)) rule.value = value.value
+  if (['gt', 'gte', 'lt', 'lte'].includes(value.operator) && Number.isFinite(Number(value.value))) rule.value = Number(value.value)
+  if (['between', 'outside'].includes(value.operator) && Number.isFinite(Number(value.min)) && Number.isFinite(Number(value.max)) && Number(value.min) <= Number(value.max)) {
+    rule.min = Number(value.min)
+    rule.max = Number(value.max)
+  }
+  return rule
+}
+
+function safeImportedEngineering(value) {
+  const min = Number(value?.min)
+  const max = Number(value?.max)
+  const decimals = Number(value?.decimals)
+  if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) return { ...DEFAULT_ENGINEERING }
+  return {
+    min,
+    max,
+    unit: safeText(value?.unit, 40),
+    decimals: Number.isInteger(decimals) && decimals >= 0 && decimals <= 8 ? decimals : DEFAULT_ENGINEERING.decimals,
+  }
+}
+
+function safeImportedNumberFormat(value, engineering) {
+  if (['number', 'percentage'].includes(value)) return value
+  return String(engineering?.unit || '').trim() === '%' ? 'percentage' : 'number'
+}
+
+function safeImportedNumericAlarmRule(value, engineering) {
+  return numericAlarmRule({ dataType: 'number', engineering, alarmRule: value })
+}
+
+function safeImportedWriteConstraints(value, engineeringValue) {
+  const engineering = safeImportedEngineering(engineeringValue)
+  const min = Number(value?.min)
+  const max = Number(value?.max)
+  const step = Number(value?.step)
+  if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min || min < engineering.min || max > engineering.max || !Number.isFinite(step) || step <= 0 || step > max - min) {
+    return { min: engineering.min, max: engineering.max, step: Math.min(DEFAULT_WRITE_CONSTRAINTS.step, engineering.max - engineering.min) }
+  }
+  return { min, max, step }
+}
+
+function safeDashboardEngineering(node) {
+  const min = Number(node?.min)
+  const max = Number(node?.max)
+  return Number.isFinite(min) && Number.isFinite(max) && max > min
+    ? { min, max, unit: dashboardUnit(node?.format), decimals: DEFAULT_ENGINEERING.decimals }
+    : { ...DEFAULT_ENGINEERING }
+}
+
+function safeDashboardWriteConstraints(node, engineering) {
+  return safeImportedWriteConstraints({ min: node?.min, max: node?.max, step: node?.step }, engineering)
+}
+
+function safeDashboardGaugeProperties(node, engineering) {
+  const colors = Array.isArray(node?.colors) ? node.colors.map(safeHexColor) : []
+  const lowZoneEnd = Number(node?.seg1)
+  const highZoneStart = Number(node?.seg2)
+  return {
+    rangeMode: 'inherit',
+    min: engineering.min,
+    max: engineering.max,
+    ...(Number.isFinite(lowZoneEnd) && Number.isFinite(highZoneStart) && lowZoneEnd >= engineering.min && lowZoneEnd <= highZoneStart && highZoneStart <= engineering.max ? { lowZoneEnd, highZoneStart } : {}),
+    ...(colors[0] ? { lowColor: colors[0] } : {}),
+    ...(colors[1] ? { normalColor: colors[1] } : {}),
+    ...(colors[2] ? { highColor: colors[2] } : {}),
+  }
+}
+
+function dashboardUnit(format) {
+  return safeText(format, 100).replace(/^\{\{(?:value|msg\.payload)\}\}/, '').slice(0, 40)
 }
 
 function inboundNodeMap(nodes) {
@@ -496,6 +632,11 @@ function fingerprintNode(node) {
 
 function safeText(value, maxLength) {
   return typeof value === 'string' ? value.slice(0, maxLength) : ''
+}
+
+function safeHexColor(value) {
+  const text = safeText(value, 7)
+  return /^#[0-9a-f]{6}$/i.test(text) ? text : ''
 }
 
 function utf8Size(value) {

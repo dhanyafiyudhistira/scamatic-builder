@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { AuditEvent, User } from '../_lib/models.js'
-import { authenticateCredentials, clearSessionCookies, createSession, getPrincipal, hashPassword, passwordChangeError, requireAllowedOrigin, requireCsrf, revokeSession, rotateUserSessionsAfterPasswordChange, verifyPassword } from '../_lib/auth.js'
+import { authenticateCredentials, clearSessionCookies, createSession, getPrincipal, hashPassword, listUserWorkspaces, passwordChangeError, requireAllowedOrigin, requireCsrf, revokeSession, rotateUserSessionsAfterPasswordChange, switchSessionWorkspace, verifyPassword } from '../_lib/auth.js'
 import { capabilitiesForRole } from '../_lib/authorization.js'
 import { enforceRateLimit, isDatabaseUnavailableError, publicError } from '../_lib/security.js'
 
@@ -20,7 +20,7 @@ async function handleRequest(req, res, correlationId) {
   if (req.method === 'GET') {
     const principal = await getPrincipal(req)
     if (!principal) return res.status(401).json({ error: 'Authentication required.' })
-    return res.status(200).json({ user: publicPrincipal(principal) })
+    return res.status(200).json({ user: await publicPrincipalWithWorkspaces(principal) })
   }
 
   if (req.method === 'POST') {
@@ -38,7 +38,8 @@ async function handleRequest(req, res, correlationId) {
     const session = await createSession(result.user, result.membership, req)
     res.setHeader('Set-Cookie', session.cookies)
     await AuditEvent.create({ workspaceId: result.membership.workspaceId, actorId: result.user.id, action: 'auth.login.succeeded', targetType: 'session', correlationId })
-    return res.status(200).json({ ok: true, user: publicPrincipal({ ...result.user, role: result.membership.role, workspaceId: result.membership.workspaceId }) })
+    const principal = { ...result.user, role: result.membership.role, workspaceId: result.membership.workspaceId }
+    return res.status(200).json({ ok: true, user: await publicPrincipalWithWorkspaces(principal) })
   }
 
   if (req.method === 'DELETE') {
@@ -79,11 +80,27 @@ async function handleRequest(req, res, correlationId) {
     return res.status(200).json({ ok: true, otherSessionsRevoked: true })
   }
 
-  res.setHeader('Allow', 'GET, POST, PATCH, DELETE')
+  if (req.method === 'PUT') {
+    const principal = await getPrincipal(req)
+    if (!principal) return res.status(401).json({ error: 'Authentication required.' })
+    if (!requireCsrf(req, res, principal)) return
+    const workspaceId = String(req.body?.workspaceId || '').trim().slice(0, 100)
+    if (!workspaceId) return res.status(400).json({ error: 'workspaceId is required.' })
+    const membership = await switchSessionWorkspace(principal, workspaceId)
+    if (!membership) return res.status(403).json({ error: 'That workspace is not available for this account.', code: 'WORKSPACE_UNAVAILABLE' })
+    const switchedPrincipal = { ...principal, workspaceId: membership.workspaceId, role: membership.role }
+    await AuditEvent.create({ workspaceId: membership.workspaceId, actorId: principal.id, action: 'auth.workspace.switched', targetType: 'workspace', targetId: membership.workspaceId, correlationId, metadata: { previousWorkspaceId: principal.workspaceId } })
+    return res.status(200).json({ ok: true, user: await publicPrincipalWithWorkspaces(switchedPrincipal) })
+  }
+
+  res.setHeader('Allow', 'GET, POST, PUT, PATCH, DELETE')
   return res.status(405).json({ error: `Method ${req.method} not allowed` })
 }
 
 function publicPrincipal(principal) {
   return { id: principal.id, email: principal.email, displayName: principal.displayName || '', workspaceId: principal.workspaceId, role: principal.role, capabilities: capabilitiesForRole(principal.role) }
+}
+async function publicPrincipalWithWorkspaces(principal) {
+  return { ...publicPrincipal(principal), workspaces: await listUserWorkspaces(principal.id, principal.workspaceId) }
 }
 function requestId(req) { return String(req.headers?.['x-request-id'] || randomUUID()).slice(0, 100) }

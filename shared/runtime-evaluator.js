@@ -1,6 +1,7 @@
 import { commandStatusPresentation, isPendingCommandStatus } from './command-lifecycle.js'
+import { resolveNumericRange } from './numeric-tag-config.js'
 
-export const RULE_OPERATORS = ['truthy', 'eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'between', 'contains']
+export const RULE_OPERATORS = ['truthy', 'eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'between', 'outside', 'contains']
 const BLOCKING_COMMAND_QUALITIES = new Set(['disconnected', 'stale', 'bad'])
 
 export function commandUiState({
@@ -67,6 +68,7 @@ export function evaluateRule(value, rule = { operator: 'truthy' }) {
     case 'lt': return Number(value) < Number(rule.value)
     case 'lte': return Number(value) <= Number(rule.value)
     case 'between': return Number(value) >= Number(rule.min) && Number(value) <= Number(rule.max)
+    case 'outside': return Number(value) < Number(rule.min) || Number(value) > Number(rule.max)
     case 'contains': return String(value ?? '').includes(String(rule.value ?? ''))
     default: return false
   }
@@ -117,9 +119,10 @@ export function executeMockCommand(component, tag, currentValue, requestedValue,
   if (component.type === 'tuning-slider') {
     if (tag.dataType !== 'number') return { ok: false, message: 'Tuning sliders require a numeric tag.', value: currentValue }
     const value = Number(requestedValue)
-    const min = Number(component.properties?.min ?? 0)
-    const max = Number(component.properties?.max ?? 100)
-    const step = Number(component.properties?.step ?? 1)
+    const range = resolveNumericRange(tag, component.properties, 'write')
+    const min = range.min
+    const max = range.max
+    const step = range.step
     if (!Number.isFinite(value)) return { ok: false, message: 'Tuning value must be a finite number.', value: currentValue }
     if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min || !Number.isFinite(step) || step <= 0) {
       return { ok: false, message: 'Tuning range configuration is invalid.', value: currentValue }

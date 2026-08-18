@@ -1,13 +1,18 @@
-import { Fragment, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { COMPONENT_REGISTRY, compatibleTags } from '../../shared/component-registry.js'
 import { initialMockValue, RULE_OPERATORS } from '../../shared/runtime-evaluator.js'
 import { CONTROL_POPUP_CHILD_TYPES, CONTROL_POPUP_MAX_CHILDREN, popupOwnerMap, rootRuntimeComponents } from '../../shared/control-popup.js'
 import { tagUsageCounts } from '../../shared/tag-bindings.js'
+import { numericEngineering, numericFormatMode, numericWriteConstraints, resolveGaugeZones, resolveNumericRange } from '../../shared/numeric-tag-config.js'
+import { describeAlarmRule, normalizeNumericAlarmRule, numericAlarmRule } from '../../shared/alarm.js'
 
 export function ComponentLibrary({ onAdd }) {
+  const definitions = Object.values(COMPONENT_REGISTRY).filter(definition => definition.library !== false)
+  const listRef = useItemCountViewport('.sb-library-item', 5, definitions.map(definition => definition.type).join('|'))
+
   return (
-    <div className="sb-component-library">
-      {Object.values(COMPONENT_REGISTRY).filter(definition => definition.library !== false).map(definition => (
+    <div ref={listRef} className="sb-component-library" role="region" aria-label="Available components" tabIndex={0}>
+      {definitions.map(definition => (
         <button type="button" className="sb-library-item" key={definition.type} onClick={() => onAdd(definition.type)}>
           <strong>{definition.label}</strong>
         </button>
@@ -25,6 +30,8 @@ export function TagManager({ schema, values, onSchemaChange, onValuesChange }) {
     const matchesQuery = !query || `${tag.name} ${tag.id}`.toLowerCase().includes(query.toLowerCase())
     return matchesQuery && (typeFilter === 'all' || tag.dataType === typeFilter)
   })
+  const tagListKey = `${visibleTags.length}:${visibleTags.slice(0, 2).map(tag => tag.id).join('|')}`
+  const tagListRef = useItemCountViewport('.sb-tag-card', 2, tagListKey)
 
   const addTag = event => {
     event.preventDefault()
@@ -45,6 +52,11 @@ export function TagManager({ schema, values, onSchemaChange, onValuesChange }) {
       freshnessMode: draftTag.access === 'write' ? 'event-driven' : 'periodic',
       adaptiveFreshness: draftTag.access !== 'write',
       staleAfterMs: 10000,
+      ...(draftTag.dataType === 'number' ? {
+        numberFormat: 'number',
+        engineering: { min: 0, max: 100, unit: '', decimals: 1 },
+        ...(draftTag.access !== 'read' ? { writeConstraints: { min: 0, max: 100, step: 1 } } : {}),
+      } : {}),
     }
     onSchemaChange(previous => ({ ...previous, tags: [...previous.tags, tag] }))
     onValuesChange(previous => ({ ...previous, [id]: initialMockValue(tag) }))
@@ -79,9 +91,14 @@ export function TagManager({ schema, values, onSchemaChange, onValuesChange }) {
         <button type="submit" className="sb-add-tag">+ Add tag</button>
       </form>
       <div className="sb-tag-filters"><input aria-label="Search tags" placeholder="Search tags…" value={query} onChange={event => setQuery(event.target.value)} /><select aria-label="Filter tag type" value={typeFilter} onChange={event => setTypeFilter(event.target.value)}><option value="all">All types</option><option value="boolean">Boolean</option><option value="number">Number</option><option value="string">String</option><option value="enum">Enum</option><option value="datetime">Datetime</option></select></div>
-      <div className="sb-tag-list">
+      <div ref={tagListRef} className="sb-tag-list" role="region" aria-label="Tags" tabIndex={0}>
         {visibleTags.map(tag => {
           const usageCount = usage.get(tag.id) || 0
+          const engineering = numericEngineering(tag)
+          const numberFormat = numericFormatMode(tag)
+          const writeConstraints = numericWriteConstraints(tag)
+          const alarmRuleEnabled = tag.alarmRule != null
+          const alarmRule = normalizeNumericAlarmRule(tag.alarmRule, tag)
           return (
             <article key={tag.id} className="sb-tag-card">
               <header className="sb-tag-card-head">
@@ -100,7 +117,13 @@ export function TagManager({ schema, values, onSchemaChange, onValuesChange }) {
                 </label>
                 <label>
                   <span>Access</span>
-                  <select aria-label={`${tag.name} access`} value={tag.access} onChange={event => updateTag(tag.id, { access: event.target.value })}>
+                  <select aria-label={`${tag.name} access`} value={tag.access} onChange={event => {
+                    const access = event.target.value
+                    updateTag(tag.id, {
+                      access,
+                      ...(tag.dataType === 'number' && access !== 'read' && !tag.writeConstraints ? { writeConstraints: { min: engineering.min, max: engineering.max, step: 1 } } : {}),
+                    })
+                  }}>
                     <option value="read">Read</option><option value="read-write">Read/write</option><option value="write">Write</option>
                   </select>
                 </label>
@@ -108,6 +131,34 @@ export function TagManager({ schema, values, onSchemaChange, onValuesChange }) {
                   <span>Path / telemetry key</span>
                   <input aria-label={`${tag.name} path`} value={tag.path} onChange={event => updateTag(tag.id, { path: event.target.value })} />
                 </label>
+                {tag.dataType === 'number' && <>
+                  <label><span>Number display</span><select aria-label={`${tag.name} number display`} value={numberFormat} onChange={event => {
+                    const nextFormat = event.target.value
+                    updateTag(tag.id, {
+                      numberFormat: nextFormat,
+                      engineering: { ...engineering, unit: nextFormat === 'percentage' ? '%' : engineering.unit === '%' ? '' : engineering.unit },
+                    })
+                  }}><option value="number">Normal number</option><option value="percentage">Percentage (%)</option></select></label>
+                  <label><span>Engineering min</span><input aria-label={`${tag.name} engineering minimum`} type="number" step="any" value={engineering.min} onChange={event => updateTag(tag.id, { engineering: { ...engineering, min: Number(event.target.value) } })} /></label>
+                  <label><span>Engineering max</span><input aria-label={`${tag.name} engineering maximum`} type="number" step="any" value={engineering.max} onChange={event => updateTag(tag.id, { engineering: { ...engineering, max: Number(event.target.value) } })} /></label>
+                  <label><span>Engineering unit</span><input aria-label={`${tag.name} engineering unit`} value={engineering.unit} placeholder="°C, bar, rpm" maxLength={40} disabled={numberFormat === 'percentage'} onChange={event => updateTag(tag.id, { engineering: { ...engineering, unit: event.target.value } })} /></label>
+                  <label><span>Engineering decimals</span><input aria-label={`${tag.name} engineering decimals`} type="number" min="0" max="8" step="1" value={engineering.decimals} onChange={event => updateTag(tag.id, { engineering: { ...engineering, decimals: Number(event.target.value) } })} /></label>
+                  {tag.access !== 'read' && <>
+                    <label><span>Command min</span><input aria-label={`${tag.name} command minimum`} type="number" min={engineering.min} max={engineering.max} step="any" value={writeConstraints.min} onChange={event => updateTag(tag.id, { writeConstraints: { ...writeConstraints, min: Number(event.target.value) } })} /></label>
+                    <label><span>Command max</span><input aria-label={`${tag.name} command maximum`} type="number" min={engineering.min} max={engineering.max} step="any" value={writeConstraints.max} onChange={event => updateTag(tag.id, { writeConstraints: { ...writeConstraints, max: Number(event.target.value) } })} /></label>
+                    <label><span>Command step</span><input aria-label={`${tag.name} command step`} type="number" min="0.000001" step="any" value={writeConstraints.step} onChange={event => updateTag(tag.id, { writeConstraints: { ...writeConstraints, step: Number(event.target.value) } })} /></label>
+                  </>}
+                  <fieldset className="sb-tag-alarm-setup">
+                    <legend>Alarm trigger</legend>
+                    <label><span>React when</span><select aria-label={`${tag.name} alarm condition`} value={alarmRuleEnabled ? alarmRule.operator : 'none'} onChange={event => updateTag(tag.id, { alarmRule: event.target.value === 'none' ? null : normalizeNumericAlarmRule({ operator: event.target.value }, tag) })}><option value="none">Not configured</option><option value="gte">At or above (≥)</option><option value="gt">Above (&gt;)</option><option value="lte">At or below (≤)</option><option value="lt">Below (&lt;)</option><option value="eq">Equal to (=)</option><option value="neq">Not equal to (≠)</option><option value="between">Inside range</option><option value="outside">Outside range</option></select></label>
+                    {alarmRuleEnabled && !['between', 'outside'].includes(alarmRule.operator) && <label><span>Trigger value</span><input aria-label={`${tag.name} alarm trigger value`} type="number" min={engineering.min} max={engineering.max} step="any" value={alarmRule.value} onChange={event => updateTag(tag.id, { alarmRule: { ...alarmRule, value: Number(event.target.value) } })} /></label>}
+                    {alarmRuleEnabled && ['between', 'outside'].includes(alarmRule.operator) && <>
+                      <label><span>Range minimum</span><input aria-label={`${tag.name} alarm range minimum`} type="number" min={engineering.min} max={engineering.max} step="any" value={alarmRule.min} onChange={event => updateTag(tag.id, { alarmRule: { ...alarmRule, min: Number(event.target.value) } })} /></label>
+                      <label><span>Range maximum</span><input aria-label={`${tag.name} alarm range maximum`} type="number" min={engineering.min} max={engineering.max} step="any" value={alarmRule.max} onChange={event => updateTag(tag.id, { alarmRule: { ...alarmRule, max: Number(event.target.value) } })} /></label>
+                    </>}
+                    <small>{alarmRuleEnabled ? `Alarm reacts at ${describeAlarmRule(alarmRule, engineering.unit)}.` : 'Alarm components may use their own custom rule.'}</small>
+                  </fieldset>
+                </>}
                 {schema.dataSources.find(source => source.id === tag.sourceId)?.type !== 'mock' && <>
                   <label>
                     <span>Freshness</span>
@@ -142,6 +193,40 @@ export function TagManager({ schema, values, onSchemaChange, onValuesChange }) {
   )
 }
 
+function useItemCountViewport(itemSelector, visibleItemCount, contentKey) {
+  const listRef = useRef(null)
+
+  useEffect(() => {
+    const list = listRef.current
+    if (!list) return undefined
+
+    const items = Array.from(list.children).filter(item => item.matches(itemSelector))
+    const measuredItems = items.slice(0, visibleItemCount)
+    const syncViewport = () => {
+      if (items.length <= visibleItemCount) {
+        list.style.setProperty('--sb-list-viewport-size', 'none')
+        return
+      }
+
+      const styles = getComputedStyle(list)
+      const gap = Number.parseFloat(styles.rowGap || styles.gap) || 0
+      const itemHeight = measuredItems.reduce((total, item) => total + item.getBoundingClientRect().height, 0)
+      if (itemHeight > 0) {
+        list.style.setProperty('--sb-list-viewport-size', `${Math.ceil(itemHeight + gap * (measuredItems.length - 1))}px`)
+      }
+    }
+
+    syncViewport()
+    if (typeof ResizeObserver === 'undefined') return undefined
+
+    const observer = new ResizeObserver(syncViewport)
+    measuredItems.forEach(item => observer.observe(item))
+    return () => observer.disconnect()
+  }, [contentKey, itemSelector, visibleItemCount])
+
+  return listRef
+}
+
 export function LayersPanel({ components, selectedIds, onSelect, onPatch, onReorder }) {
   const byId = new Map(components.map(component => [component.id, component]))
   const ordered = rootRuntimeComponents(components).sort((left, right) => (right.zIndex || 0) - (left.zIndex || 0))
@@ -172,10 +257,12 @@ export function LayersPanel({ components, selectedIds, onSelect, onPatch, onReor
 export function ComponentInspector({ component, components = [], tags, onChange, onDelete, onDuplicate, onAddPopupChild, onCreatePopupChild, onDetachPopupChild, onReorderPopupChild, onSelectChild }) {
   const setPosition = (key, value) => onChange({ position: { ...component.position, [key]: Number(value) } })
   const setProperty = (key, value) => onChange({ properties: { ...component.properties, [key]: value } })
+  const setProperties = patch => onChange({ properties: { ...component.properties, ...patch } })
   const compatible = compatibleTags(component.type, tags)
   const availableTags = ['control-button', 'tuning-slider', 'operation-shifter'].includes(component.type)
     ? compatible.filter(tag => ['write', 'read-write'].includes(tag.access))
     : compatible
+  const boundTag = tags.find(tag => tag.id === component.binding?.tagId)
   return (
     <div className="sb-inspector">
       <label>Name<input value={component.name} onChange={event => onChange({ name: event.target.value })} /></label>
@@ -192,9 +279,11 @@ export function ComponentInspector({ component, components = [], tags, onChange,
       <label className="sb-check"><input type="checkbox" checked={component.visible !== false} onChange={event => onChange({ visible: event.target.checked })} /> Visible</label>
       <label className="sb-check"><input type="checkbox" checked={Boolean(component.locked)} onChange={event => onChange({ locked: event.target.checked })} /> Locked</label>
       {component.type === 'indicator-lamp' && <LampProperties component={component} setProperty={setProperty} />}
-      {component.type === 'value-span' && <ValueProperties component={component} setProperty={setProperty} />}
+      {component.type === 'alarm' && <AlarmProperties component={component} tag={boundTag} setProperty={setProperty} />}
+      {component.type === 'value-span' && <ValueProperties component={component} tag={boundTag} setProperty={setProperty} />}
+      {component.type === 'gauge' && <GaugeProperties component={component} tag={boundTag} setProperty={setProperty} setProperties={setProperties} />}
       {component.type === 'control-button' && <ButtonProperties component={component} tags={tags} setProperty={setProperty} />}
-      {component.type === 'tuning-slider' && <TuningProperties component={component} tags={tags} setProperty={setProperty} />}
+      {component.type === 'tuning-slider' && <TuningProperties component={component} tag={boundTag} tags={tags} setProperty={setProperty} setProperties={setProperties} />}
       {component.type === 'operation-shifter' && <OperationShifterProperties component={component} components={components} tags={tags} setProperty={setProperty} />}
       {component.type === 'control-popup' && <PopupProperties component={component} components={components} setProperty={setProperty} onAddChild={onAddPopupChild} onCreateChild={onCreatePopupChild} onDetachChild={onDetachPopupChild} onReorderChild={onReorderPopupChild} onSelectChild={onSelectChild} />}
       {component.type === 'chart' && <ChartProperties component={component} tags={availableTags} setProperty={setProperty} onChange={onChange} />}
@@ -205,15 +294,23 @@ export function ComponentInspector({ component, components = [], tags, onChange,
   )
 }
 
+function InspectorGroup({ title, className = '', children }) {
+  return (
+    <details className={`sb-inspector-group ${className}`.trim()}>
+      <summary><span>{title}</span><i aria-hidden="true" /></summary>
+      <div className="sb-inspector-group-content">{children}</div>
+    </details>
+  )
+}
+
 function DesignImageProperties({ component, setProperty }) {
   return (
-    <fieldset>
-      <legend>Custom image</legend>
+    <InspectorGroup title="Custom image">
       <label>Source<input value={component.properties?.fileName || 'Uploaded image'} readOnly /></label>
       <label>Fit<select value={component.properties?.objectFit || 'contain'} onChange={event => setProperty('objectFit', event.target.value)}><option value="contain">Contain</option><option value="cover">Cover</option><option value="fill">Stretch</option></select></label>
       <label className="sb-check"><input type="checkbox" checked={component.properties?.lockAspectRatio !== false} onChange={event => setProperty('lockAspectRatio', event.target.checked)} /> Lock aspect ratio on corner resize</label>
       <label>Opacity<input type="range" min="0" max="1" step="0.05" value={component.properties?.opacity ?? 1} onChange={event => setProperty('opacity', Number(event.target.value))} /><small>{Math.round((component.properties?.opacity ?? 1) * 100)}%</small></label>
-    </fieldset>
+    </InspectorGroup>
   )
 }
 
@@ -230,8 +327,7 @@ function PopupProperties({ component, components, setProperty, onAddChild, onCre
     setCandidateId('')
   }
   return (
-    <fieldset className="sb-popup-properties">
-      <legend>Pop-up menu</legend>
+    <InspectorGroup title="Pop-up menu" className="sb-popup-properties">
       <label>Launcher label<input value={component.properties?.triggerLabel || ''} onChange={event => setProperty('triggerLabel', event.target.value)} /></label>
       <div className="sb-form-grid">
         <NumberField label="Columns" value={component.properties?.columns ?? 2} min={1} max={3} onChange={value => setProperty('columns', value)} />
@@ -261,7 +357,7 @@ function PopupProperties({ component, components, setProperty, onAddChild, onCre
         {children.length === 0 && <p className="sb-muted">No controls yet. Add an existing control or create one directly.</p>}
       </div>
       <small>{children.length}/{CONTROL_POPUP_MAX_CHILDREN} controls · Sliders span the full row at runtime.</small>
-    </fieldset>
+    </InspectorGroup>
   )
 }
 
@@ -274,8 +370,7 @@ function ChartProperties({ component, tags, setProperty, onChange }) {
     onChange({ binding: { tagId: null, tagIds: next } })
   }
   return (
-    <fieldset>
-      <legend>Telemetry series</legend>
+    <InspectorGroup title="Telemetry series">
       <div className="sb-chart-tag-options">
         {tags.map(tag => (
           <label className="sb-check" key={tag.id}>
@@ -291,30 +386,132 @@ function ChartProperties({ component, tags, setProperty, onChange }) {
         <NumberField label="Window (minutes)" value={component.properties?.windowMinutes ?? 60} min={1} max={1440} onChange={value => setProperty('windowMinutes', value)} />
       </div>
       <label className="sb-check"><input type="checkbox" checked={component.properties?.showLegend !== false} onChange={event => setProperty('showLegend', event.target.checked)} /> Show legend</label>
-    </fieldset>
+    </InspectorGroup>
   )
 }
 
 function LampProperties({ component, setProperty }) {
   const rule = component.properties?.rule || { operator: 'truthy' }
   const setRule = patch => setProperty('rule', { ...rule, ...patch })
-  return <fieldset><legend>Lamp state</legend><label>Shape<select value={component.properties?.shape || 'circle'} onChange={event => setProperty('shape', event.target.value)}><option value="circle">Circle</option><option value="square">Rounded square</option><option value="rectangle">Rectangle</option></select></label><label>Rule<select value={rule.operator} onChange={event => setRule({ operator: event.target.value })}>{RULE_OPERATORS.map(operator => <option value={operator} key={operator}>{operator}</option>)}</select></label>{!['truthy', 'between'].includes(rule.operator) && <label>Compare value<input value={rule.value ?? ''} onChange={event => setRule({ value: parseMaybeNumber(event.target.value) })} /></label>}{rule.operator === 'between' && <div className="sb-form-grid"><NumberField label="Minimum" value={rule.min ?? 0} onChange={value => setRule({ min: value })} /><NumberField label="Maximum" value={rule.max ?? 100} onChange={value => setRule({ max: value })} /></div>}<div className="sb-form-grid"><ColorField label="ON color" value={component.properties?.onColor || '#22c55e'} onChange={value => setProperty('onColor', value)} /><ColorField label="OFF color" value={component.properties?.offColor || '#64748b'} onChange={value => setProperty('offColor', value)} /></div><label className="sb-check"><input type="checkbox" checked={component.properties?.glow !== false} onChange={event => setProperty('glow', event.target.checked)} /> Glow when active</label></fieldset>
+  return <InspectorGroup title="Lamp state"><label>Shape<select value={component.properties?.shape || 'circle'} onChange={event => setProperty('shape', event.target.value)}><option value="circle">Circle</option><option value="square">Rounded square</option><option value="rectangle">Rectangle</option></select></label><label>Rule<select value={rule.operator} onChange={event => setRule({ operator: event.target.value })}>{RULE_OPERATORS.map(operator => <option value={operator} key={operator}>{operator}</option>)}</select></label>{!['truthy', 'between', 'outside'].includes(rule.operator) && <label>Compare value<input value={rule.value ?? ''} onChange={event => setRule({ value: parseMaybeNumber(event.target.value) })} /></label>}{['between', 'outside'].includes(rule.operator) && <div className="sb-form-grid"><NumberField label="Minimum" value={rule.min ?? 0} onChange={value => setRule({ min: value })} /><NumberField label="Maximum" value={rule.max ?? 100} onChange={value => setRule({ max: value })} /></div>}<div className="sb-form-grid"><ColorField label="ON color" value={component.properties?.onColor || '#22c55e'} onChange={value => setProperty('onColor', value)} /><ColorField label="OFF color" value={component.properties?.offColor || '#64748b'} onChange={value => setProperty('offColor', value)} /></div><label className="sb-check"><input type="checkbox" checked={component.properties?.glow !== false} onChange={event => setProperty('glow', event.target.checked)} /> Glow when active</label></InspectorGroup>
 }
 
-function ValueProperties({ component, setProperty }) {
+function AlarmProperties({ component, tag, setProperty }) {
   const properties = component.properties || {}
-  return <fieldset><legend>Value formatting</legend><div className="sb-form-grid"><label>Prefix<input value={properties.prefix || ''} onChange={event => setProperty('prefix', event.target.value)} /></label><label>Suffix<input value={properties.suffix || ''} onChange={event => setProperty('suffix', event.target.value)} /></label><NumberField label="Decimals" value={properties.decimals ?? 1} min={0} max={8} onChange={value => setProperty('decimals', value)} /><NumberField label="Scale" value={properties.scale ?? 1} step="0.1" onChange={value => setProperty('scale', value)} /><NumberField label="Offset" value={properties.offset ?? 0} step="0.1" onChange={value => setProperty('offset', value)} /><label>Fallback<input value={properties.fallback ?? '--'} onChange={event => setProperty('fallback', event.target.value)} /></label></div><div className="sb-form-grid"><NumberField label="Warning high" value={properties.warningHigh ?? ''} allowEmpty onChange={value => setProperty('warningHigh', value)} /><NumberField label="Critical high" value={properties.criticalHigh ?? ''} allowEmpty onChange={value => setProperty('criticalHigh', value)} /><ColorField label="Normal color" value={properties.textColor || '#d8f7fa'} onChange={value => setProperty('textColor', value)} /><ColorField label="Background" value={properties.backgroundColor || '#0a1117'} onChange={value => setProperty('backgroundColor', value)} /></div></fieldset>
+  const rule = properties.rule || { operator: 'truthy' }
+  const presentation = properties.presentation === 'buzzer' ? 'buzzer' : 'lamp'
+  const canInherit = tag?.dataType === 'number'
+  const ruleMode = canInherit && properties.ruleMode !== 'custom' ? 'inherit' : 'custom'
+  const inheritedRule = numericAlarmRule(tag)
+  const setRule = patch => setProperty('rule', { ...rule, ...patch })
+  return (
+    <InspectorGroup title="Alarm behavior">
+      <label>Alarm type<select value={presentation} onChange={event => setProperty('presentation', event.target.value)}><option value="lamp">Lamp</option><option value="buzzer">Buzzer</option></select></label>
+      {canInherit && <label>Trigger source<select value={ruleMode} onChange={event => setProperty('ruleMode', event.target.value)}><option value="inherit">Inherit from Tag</option><option value="custom">Custom for this Alarm</option></select></label>}
+      {ruleMode === 'inherit' && <small className="sb-muted">{inheritedRule ? `Using Tag trigger: ${describeAlarmRule(inheritedRule, numericEngineering(tag).unit)}.` : 'This Tag has no Alarm trigger yet. Configure it under Tags & simulation; the component rule remains the fallback.'}</small>}
+      {ruleMode === 'custom' && <>
+        <label>Trigger rule<select value={rule.operator} onChange={event => setRule({ operator: event.target.value })}>{RULE_OPERATORS.map(operator => <option value={operator} key={operator}>{operator}</option>)}</select></label>
+        {!['truthy', 'between', 'outside'].includes(rule.operator) && <label>Compare value<input value={rule.value ?? ''} onChange={event => setRule({ value: parseMaybeNumber(event.target.value) })} /></label>}
+        {['between', 'outside'].includes(rule.operator) && <div className="sb-form-grid"><NumberField label="Minimum" value={rule.min ?? 0} onChange={value => setRule({ min: value })} /><NumberField label="Maximum" value={rule.max ?? 100} onChange={value => setRule({ max: value })} /></div>}
+      </>}
+      <div className="sb-form-grid">
+        <ColorField label="Active color" value={properties.activeColor || '#ef4444'} onChange={value => setProperty('activeColor', value)} />
+        <ColorField label="Idle color" value={properties.idleColor || '#46545d'} onChange={value => setProperty('idleColor', value)} />
+      </div>
+      <label className="sb-check"><input type="checkbox" checked={properties.flash !== false} onChange={event => setProperty('flash', event.target.checked)} /> Flash when active</label>
+      {presentation === 'buzzer' && <>
+        <label className="sb-check"><input type="checkbox" checked={properties.soundEnabled !== false} onChange={event => setProperty('soundEnabled', event.target.checked)} /> Enable sound in runtime</label>
+        <div className="sb-form-grid">
+          <NumberField label="Frequency (Hz)" value={properties.frequencyHz ?? 880} min={100} max={4000} onChange={value => setProperty('frequencyHz', value)} />
+          <NumberField label="Volume (0–0.5)" value={properties.volume ?? 0.18} min={0} max={0.5} step="0.01" onChange={value => setProperty('volume', value)} />
+          <NumberField label="Pulse interval (ms)" value={properties.pulseMs ?? 650} min={100} max={5000} onChange={value => setProperty('pulseMs', value)} />
+        </div>
+        <small className="sb-muted">Sound is muted while editing. At runtime, operators can silence the current alarm occurrence.</small>
+      </>}
+    </InspectorGroup>
+  )
+}
+
+function ValueProperties({ component, tag, setProperty }) {
+  const properties = component.properties || {}
+  const engineering = numericEngineering(tag)
+  return <InspectorGroup title="Value formatting">{tag?.dataType === 'number' && <small className="sb-muted">Tag engineering range: {engineering.min} – {engineering.max}{engineering.unit ? ` ${engineering.unit}` : ''}. Value Span reports out-of-range telemetry without clamping it.</small>}<div className="sb-form-grid"><label>Prefix<input value={properties.prefix || ''} onChange={event => setProperty('prefix', event.target.value)} /></label><label>Suffix<input value={properties.suffix || ''} placeholder={engineering.unit || undefined} onChange={event => setProperty('suffix', event.target.value)} /></label><NumberField label="Decimals" value={properties.decimals ?? engineering.decimals} min={0} max={8} onChange={value => setProperty('decimals', value)} /><NumberField label="Scale" value={properties.scale ?? 1} step="0.1" onChange={value => setProperty('scale', value)} /><NumberField label="Offset" value={properties.offset ?? 0} step="0.1" onChange={value => setProperty('offset', value)} /><label>Fallback<input value={properties.fallback ?? '--'} onChange={event => setProperty('fallback', event.target.value)} /></label></div><div className="sb-form-grid"><NumberField label="Warning high" value={properties.warningHigh ?? ''} allowEmpty onChange={value => setProperty('warningHigh', value)} /><NumberField label="Critical high" value={properties.criticalHigh ?? ''} allowEmpty onChange={value => setProperty('criticalHigh', value)} /><ColorField label="Normal color" value={properties.textColor || '#d8f7fa'} onChange={value => setProperty('textColor', value)} /><ColorField label="Background" value={properties.backgroundColor || '#0a1117'} onChange={value => setProperty('backgroundColor', value)} /></div></InspectorGroup>
+}
+
+function GaugeProperties({ component, tag, setProperty, setProperties }) {
+  const properties = component.properties || {}
+  const engineering = numericEngineering(tag)
+  const range = resolveNumericRange(tag, properties, 'display')
+  const zones = resolveGaugeZones(range, properties)
+  const min = range.min
+  const max = range.max
+  const inherited = properties.rangeMode === 'inherit'
+  const inheritedUnit = properties.unitMode !== 'custom'
+  return (
+    <InspectorGroup title="Gauge scale and appearance">
+      <label>Scale range<select value={inherited ? 'inherit' : 'custom'} onChange={event => setProperties(event.target.value === 'inherit' ? { rangeMode: 'inherit' } : { rangeMode: 'custom', min, max })}><option value="inherit">Inherit from Tag</option><option value="custom">Custom display range</option></select></label>
+      {inherited && <small className="sb-muted">Using Tag range {min} – {max}.</small>}
+      <div className="sb-form-grid">
+        <NumberField label="Minimum" value={inherited ? min : properties.min ?? min} disabled={inherited} onChange={value => setProperty('min', value)} />
+        <NumberField label="Maximum" value={inherited ? max : properties.max ?? max} disabled={inherited} onChange={value => setProperty('max', value)} />
+        <NumberField label="Low zone ends" value={zones.lowZoneEnd} min={min} max={max} step="any" onChange={value => setProperty('lowZoneEnd', value)} />
+        <NumberField label="High zone starts" value={zones.highZoneStart} min={min} max={max} step="any" onChange={value => setProperty('highZoneStart', value)} />
+        <NumberField label="Tick intervals" value={properties.tickCount ?? 10} min={4} max={12} onChange={value => setProperty('tickCount', value)} />
+        <NumberField label="Decimals" value={properties.decimals ?? 1} min={0} max={8} onChange={value => setProperty('decimals', value)} />
+        <NumberField label="Scale" value={properties.scale ?? 1} step="0.1" onChange={value => setProperty('scale', value)} />
+        <NumberField label="Offset" value={properties.offset ?? 0} step="0.1" onChange={value => setProperty('offset', value)} />
+      </div>
+      <div className="sb-form-grid">
+        <label>Unit source<select value={inheritedUnit ? 'inherit' : 'custom'} onChange={event => setProperties(event.target.value === 'inherit' ? { unitMode: 'inherit' } : { unitMode: 'custom', suffix: properties.suffix || engineering.unit })}><option value="inherit">Inherit from Tag</option><option value="custom">Custom unit</option></select></label>
+        {inheritedUnit
+          ? <label>Engineering unit<input value={engineering.unit} placeholder="No unit configured" readOnly /></label>
+          : <label>Custom unit<input value={properties.suffix || ''} placeholder="°C, bar, rpm" maxLength={40} onChange={event => setProperty('suffix', event.target.value)} /></label>}
+        <label>Fallback<input value={properties.fallback ?? '--'} onChange={event => setProperty('fallback', event.target.value)} /></label>
+      </div>
+      <div className="sb-form-grid">
+        <ColorField label="Low zone" value={properties.lowColor || '#38bdf8'} onChange={value => setProperty('lowColor', value)} />
+        <ColorField label="Normal zone" value={properties.normalColor || '#a9bec7'} onChange={value => setProperty('normalColor', value)} />
+        <ColorField label="High zone" value={properties.highColor || '#fb7185'} onChange={value => setProperty('highColor', value)} />
+        <ColorField label="Needle" value={properties.needleColor || '#ff4b1f'} onChange={value => setProperty('needleColor', value)} />
+        <ColorField label="Gauge face" value={properties.faceColor || '#d8e4e8'} onChange={value => setProperty('faceColor', value)} />
+        <ColorField label="Gauge text" value={properties.textColor || '#263b45'} onChange={value => setProperty('textColor', value)} />
+      </div>
+      <label className="sb-check"><input type="checkbox" checked={properties.showDigital !== false} onChange={event => setProperty('showDigital', event.target.checked)} /> Show digital readout</label>
+    </InspectorGroup>
+  )
 }
 
 function ButtonProperties({ component, tags, setProperty }) {
   const properties = component.properties || {}
-  return <fieldset><legend>Command</legend><label>Action<select value={properties.action || 'toggle-boolean'} onChange={event => setProperty('action', event.target.value)}><option value="toggle-boolean">Toggle boolean</option><option value="set-value">Set value</option><option value="pulse">Pulse</option></select></label>{properties.action === 'set-value' && <label>Payload<input value={String(properties.payload ?? '')} onChange={event => setProperty('payload', parseMaybeNumber(event.target.value))} /></label>}{properties.action === 'pulse' && <NumberField label="Pulse duration (ms)" value={properties.pulseMs ?? 300} min={50} onChange={value => setProperty('pulseMs', value)} />}<label>RPC method<input value={properties.rpcMethod || ''} placeholder="setValue" onChange={event => setProperty('rpcMethod', event.target.value)} /></label><label>Feedback tag<select value={properties.feedbackTagId || ''} onChange={event => setProperty('feedbackTagId', event.target.value || null)}><option value="">Use two-way RPC</option>{tags.filter(tag => tag.access !== 'write').map(tag => <option value={tag.id} key={tag.id}>{tag.name}</option>)}</select></label>{properties.feedbackTagId && <label>Expected feedback<input value={String(properties.expectedFeedbackValue ?? '')} onChange={event => setProperty('expectedFeedbackValue', parseMaybeBoolean(event.target.value))} /></label>}<NumberField label="Ack timeout (ms)" value={properties.ackTimeoutMs ?? 5000} min={1000} max={30000} onChange={value => setProperty('ackTimeoutMs', value)} /><label>Confirmation<select value={properties.confirmation || 'single'} onChange={event => setProperty('confirmation', event.target.value)}><option value="none">None</option><option value="single">Single confirmation</option></select></label><ColorField label="Button color" value={properties.buttonColor || '#f6b73c'} onChange={value => setProperty('buttonColor', value)} /></fieldset>
+  return <InspectorGroup title="Command"><label>Action<select value={properties.action || 'toggle-boolean'} onChange={event => setProperty('action', event.target.value)}><option value="toggle-boolean">Toggle boolean</option><option value="set-value">Set value</option><option value="pulse">Pulse</option></select></label>{properties.action === 'set-value' && <label>Payload<input value={String(properties.payload ?? '')} onChange={event => setProperty('payload', parseMaybeNumber(event.target.value))} /></label>}{properties.action === 'pulse' && <NumberField label="Pulse duration (ms)" value={properties.pulseMs ?? 300} min={50} onChange={value => setProperty('pulseMs', value)} />}<label>RPC method<input value={properties.rpcMethod || ''} placeholder="setValue" onChange={event => setProperty('rpcMethod', event.target.value)} /></label><label>Feedback tag<select value={properties.feedbackTagId || ''} onChange={event => setProperty('feedbackTagId', event.target.value || null)}><option value="">Use two-way RPC</option>{tags.filter(tag => tag.access !== 'write').map(tag => <option value={tag.id} key={tag.id}>{tag.name}</option>)}</select></label>{properties.feedbackTagId && <label>Expected feedback<input value={String(properties.expectedFeedbackValue ?? '')} onChange={event => setProperty('expectedFeedbackValue', parseMaybeBoolean(event.target.value))} /></label>}<NumberField label="Ack timeout (ms)" value={properties.ackTimeoutMs ?? 5000} min={1000} max={30000} onChange={value => setProperty('ackTimeoutMs', value)} /><label>Confirmation<select value={properties.confirmation || 'single'} onChange={event => setProperty('confirmation', event.target.value)}><option value="none">None</option><option value="single">Single confirmation</option></select></label><ColorField label="Button color" value={properties.buttonColor || '#f6b73c'} onChange={value => setProperty('buttonColor', value)} /></InspectorGroup>
 }
 
-function TuningProperties({ component, tags, setProperty }) {
+function TuningProperties({ component, tag, tags, setProperty, setProperties }) {
   const properties = component.properties || {}
-  const defaultRamp = Math.max(.001, Math.abs(Number(properties.max ?? 100) - Number(properties.min ?? 0)) * .001)
-  return <fieldset><legend>Tuning command</legend><div className="sb-form-grid"><NumberField label="Minimum" value={properties.min ?? 0} onChange={value => setProperty('min', value)} /><NumberField label="Maximum" value={properties.max ?? 100} onChange={value => setProperty('max', value)} /><NumberField label="Step" value={properties.step ?? 1} min={0.000001} step="any" onChange={value => setProperty('step', value)} /><NumberField label="Decimals" value={properties.decimals ?? 0} min={0} max={8} onChange={value => setProperty('decimals', value)} /><NumberField label="Simulation ramp / sec" value={properties.simulationRampPerSecond ?? defaultRamp} min={0.001} step="any" onChange={value => setProperty('simulationRampPerSecond', value)} /><label>Unit / suffix<input value={properties.suffix || ''} placeholder="%" onChange={event => setProperty('suffix', event.target.value)} /></label><ColorField label="Accent color" value={properties.accentColor || '#20c4d9'} onChange={value => setProperty('accentColor', value)} /></div><label>RPC method<input value={properties.rpcMethod || ''} placeholder="setLevel_Air" onChange={event => setProperty('rpcMethod', event.target.value)} /></label><label>Feedback tag<select value={properties.feedbackTagId || ''} onChange={event => setProperty('feedbackTagId', event.target.value || null)}><option value="">Use two-way RPC</option>{tags.filter(tag => tag.access !== 'write' && tag.dataType === 'number').map(tag => <option value={tag.id} key={tag.id}>{tag.name}</option>)}</select></label><NumberField label="Ack timeout (ms)" value={properties.ackTimeoutMs ?? 5000} min={1000} max={30000} onChange={value => setProperty('ackTimeoutMs', value)} /><label>Confirmation<select value={properties.confirmation || 'single'} onChange={event => setProperty('confirmation', event.target.value)}><option value="none">None</option><option value="single">Single confirmation</option></select></label></fieldset>
+  const range = resolveNumericRange(tag, properties, 'write')
+  const tagLimits = numericWriteConstraints(tag)
+  const inherited = properties.rangeMode === 'inherit'
+  const defaultRamp = Math.max(.001, Math.abs(range.max - range.min) * .001)
+  const engineering = numericEngineering(tag)
+  return (
+    <InspectorGroup title="Tuning command">
+      <label>Command range<select value={inherited ? 'inherit' : 'custom'} onChange={event => setProperties(event.target.value === 'inherit' ? { rangeMode: 'inherit' } : { rangeMode: 'custom', min: range.min, max: range.max, step: range.step })}><option value="inherit">Inherit Tag limits</option><option value="custom">Custom narrower limits</option></select></label>
+      {inherited && <small className="sb-muted">Using Tag command limits {range.min} – {range.max}, step {range.step}.</small>}
+      <div className="sb-form-grid">
+        <NumberField label="Minimum" value={inherited ? range.min : properties.min ?? range.min} min={inherited ? undefined : tagLimits.min} max={inherited ? undefined : tagLimits.max} disabled={inherited} onChange={value => setProperty('min', value)} />
+        <NumberField label="Maximum" value={inherited ? range.max : properties.max ?? range.max} min={inherited ? undefined : tagLimits.min} max={inherited ? undefined : tagLimits.max} disabled={inherited} onChange={value => setProperty('max', value)} />
+        <NumberField label="Step" value={inherited ? range.step : properties.step ?? range.step} min={tagLimits.step} step="any" disabled={inherited} onChange={value => setProperty('step', value)} />
+        <NumberField label="Decimals" value={properties.decimals ?? engineering.decimals} min={0} max={8} onChange={value => setProperty('decimals', value)} />
+        <NumberField label="Simulation ramp / sec" value={properties.simulationRampPerSecond ?? defaultRamp} min={0.001} step="any" onChange={value => setProperty('simulationRampPerSecond', value)} />
+        <label>Unit / suffix<input value={properties.suffix || ''} placeholder={engineering.unit || 'Unit'} onChange={event => setProperty('suffix', event.target.value)} /></label>
+        <ColorField label="Accent color" value={properties.accentColor || '#20c4d9'} onChange={value => setProperty('accentColor', value)} />
+      </div>
+      <label>RPC method<input value={properties.rpcMethod || ''} placeholder="setLevel_Air" onChange={event => setProperty('rpcMethod', event.target.value)} /></label>
+      <label>Feedback tag<select value={properties.feedbackTagId || ''} onChange={event => setProperty('feedbackTagId', event.target.value || null)}><option value="">Use two-way RPC</option>{tags.filter(item => item.access !== 'write' && item.dataType === 'number').map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
+      <NumberField label="Ack timeout (ms)" value={properties.ackTimeoutMs ?? 5000} min={1000} max={30000} onChange={value => setProperty('ackTimeoutMs', value)} />
+      <label>Confirmation<select value={properties.confirmation || 'single'} onChange={event => setProperty('confirmation', event.target.value)}><option value="none">None</option><option value="single">Single confirmation</option></select></label>
+    </InspectorGroup>
+  )
 }
 
 function OperationShifterProperties({ component, components, tags, setProperty }) {
@@ -347,40 +544,35 @@ function OperationShifterProperties({ component, components, tags, setProperty }
   }
   return (
     <>
-      <fieldset>
-        <legend>Mode colors</legend>
+      <InspectorGroup title="Mode colors">
         <p className="sb-muted">Used by the active mode label and selected menu item.</p>
         <div className="sb-form-grid">
           <ColorField label="MANUAL" value={properties.manualColor || '#3b82f6'} onChange={value => setProperty('manualColor', value)} />
           <ColorField label="AUTO" value={properties.autoColor || '#22c55e'} onChange={value => setProperty('autoColor', value)} />
           <ColorField label="RESET" value={properties.resetColor || '#ef4444'} onChange={value => setProperty('resetColor', value)} />
         </div>
-      </fieldset>
-      <fieldset>
-        <legend>Dark board button</legend>
+      </InspectorGroup>
+      <InspectorGroup title="Dark board button">
         <div className="sb-form-grid">
           <ColorField label="Background" value={properties.darkButtonBackground || '#151719'} onChange={value => setProperty('darkButtonBackground', value)} />
           <ColorField label="Text" value={properties.darkButtonText || '#f0f3f4'} onChange={value => setProperty('darkButtonText', value)} />
           <ColorField label="Border" value={properties.darkButtonBorder || '#3d4246'} onChange={value => setProperty('darkButtonBorder', value)} />
         </div>
-      </fieldset>
-      <fieldset>
-        <legend>Light board button</legend>
+      </InspectorGroup>
+      <InspectorGroup title="Light board button">
         <div className="sb-form-grid">
           <ColorField label="Background" value={properties.lightButtonBackground || '#e9ece9'} onChange={value => setProperty('lightButtonBackground', value)} />
           <ColorField label="Text" value={properties.lightButtonText || '#172229'} onChange={value => setProperty('lightButtonText', value)} />
           <ColorField label="Border" value={properties.lightButtonBorder || '#747f85'} onChange={value => setProperty('lightButtonBorder', value)} />
         </div>
-      </fieldset>
-      <fieldset>
-        <legend>Operation command</legend>
+      </InspectorGroup>
+      <InspectorGroup title="Operation command">
         <label>RPC method<input value={properties.rpcMethod || ''} placeholder="setOperationMode" onChange={event => setProperty('rpcMethod', event.target.value)} /></label>
         <label>Mode feedback tag<select value={properties.feedbackTagId || ''} onChange={event => setProperty('feedbackTagId', event.target.value || null)}><option value="">Use two-way RPC</option>{tags.filter(tag => tag.access !== 'write' && ['string', 'enum'].includes(tag.dataType)).map(tag => <option value={tag.id} key={tag.id}>{tag.name}</option>)}</select></label>
         <NumberField label="Ack timeout (ms)" value={properties.ackTimeoutMs ?? 8000} min={1000} max={30000} onChange={value => setProperty('ackTimeoutMs', value)} />
         <label>Confirmation<select value={properties.confirmation || 'single'} onChange={event => setProperty('confirmation', event.target.value)}><option value="none">None</option><option value="single">Confirm mode changes</option></select></label>
-      </fieldset>
-      <fieldset>
-        <legend>Supervised controls</legend>
+      </InspectorGroup>
+      <InspectorGroup title="Supervised controls">
         <p className="sb-muted">MANUAL enables these controls. AUTO and RESET interlock them.</p>
         <div className="sb-operation-control-list">
           {controls.map(control => {
@@ -389,9 +581,8 @@ function OperationShifterProperties({ component, components, tags, setProperty }
           })}
           {!controls.length && <p className="sb-muted">Add Button or Slider components first.</p>}
         </div>
-      </fieldset>
-      <fieldset>
-        <legend>Auto sequence recipe</legend>
+      </InspectorGroup>
+      <InspectorGroup title="Auto sequence recipe">
         <p className="sb-muted">SIMULATION runs this recipe through the isolated simulation-sequence route. REAL PLC sends the complete recipe to Node-RED/PLC; browser timing is never used for real equipment.</p>
         <div className="sb-operation-sequence-list">
           {sequence.map((step, index) => (
@@ -424,14 +615,14 @@ function OperationShifterProperties({ component, components, tags, setProperty }
           {!sequence.length && <p className="sb-muted">No automatic steps configured.</p>}
         </div>
         <button type="button" onClick={addStep} disabled={!supervisedButtons.length || sequence.length >= 32}>+ Add sequence step</button>
-      </fieldset>
+      </InspectorGroup>
     </>
   )
 }
 
 function TextProperties({ component, setProperty }) {
   const properties = component.properties || {}
-  return <fieldset><legend>Text appearance</legend><label>Text<textarea rows="3" value={properties.text ?? ''} placeholder="Type text…" onChange={event => setProperty('text', event.target.value)} /></label><div className="sb-form-grid"><ColorField label="Text color" value={properties.textColor || '#dce8ef'} onChange={value => setProperty('textColor', value)} /><NumberField label="Font size" value={properties.fontSize ?? 32} min={6} max={300} onChange={value => setProperty('fontSize', value)} /><label>Weight<select value={properties.fontWeight ?? 700} onChange={event => setProperty('fontWeight', Number(event.target.value))}><option value="400">Regular</option><option value="600">Semi bold</option><option value="700">Bold</option><option value="900">Black</option></select></label><label>Style<select value={properties.fontStyle || 'normal'} onChange={event => setProperty('fontStyle', event.target.value)}><option value="normal">Normal</option><option value="italic">Italic</option></select></label><label>Font<select value={properties.fontFamily || 'sans-serif'} onChange={event => setProperty('fontFamily', event.target.value)}><option value="sans-serif">Sans serif</option><option value="serif">Serif</option><option value="monospace">Monospace</option></select></label><label>Alignment<select value={properties.textAlign || 'left'} onChange={event => setProperty('textAlign', event.target.value)}><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select></label><label>Vertical<select value={properties.verticalAlign || 'middle'} onChange={event => setProperty('verticalAlign', event.target.value)}><option value="top">Top</option><option value="middle">Middle</option><option value="bottom">Bottom</option></select></label></div><label className="sb-check"><input type="checkbox" checked={properties.transparentBackground !== false} onChange={event => setProperty('transparentBackground', event.target.checked)} /> Transparent background</label>{properties.transparentBackground === false && <ColorField label="Background color" value={properties.backgroundColor || '#101418'} onChange={value => setProperty('backgroundColor', value)} />}</fieldset>
+  return <InspectorGroup title="Text appearance"><label>Text<textarea rows="3" value={properties.text ?? ''} placeholder="Type text…" onChange={event => setProperty('text', event.target.value)} /></label><div className="sb-form-grid"><ColorField label="Text color" value={properties.textColor || '#dce8ef'} onChange={value => setProperty('textColor', value)} /><NumberField label="Font size" value={properties.fontSize ?? 32} min={6} max={300} onChange={value => setProperty('fontSize', value)} /><label>Weight<select value={properties.fontWeight ?? 700} onChange={event => setProperty('fontWeight', Number(event.target.value))}><option value="400">Regular</option><option value="600">Semi bold</option><option value="700">Bold</option><option value="900">Black</option></select></label><label>Style<select value={properties.fontStyle || 'normal'} onChange={event => setProperty('fontStyle', event.target.value)}><option value="normal">Normal</option><option value="italic">Italic</option></select></label><label>Font<select value={properties.fontFamily || 'sans-serif'} onChange={event => setProperty('fontFamily', event.target.value)}><option value="sans-serif">Sans serif</option><option value="serif">Serif</option><option value="monospace">Monospace</option></select></label><label>Alignment<select value={properties.textAlign || 'left'} onChange={event => setProperty('textAlign', event.target.value)}><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select></label><label>Vertical<select value={properties.verticalAlign || 'middle'} onChange={event => setProperty('verticalAlign', event.target.value)}><option value="top">Top</option><option value="middle">Middle</option><option value="bottom">Bottom</option></select></label></div><label className="sb-check"><input type="checkbox" checked={properties.transparentBackground !== false} onChange={event => setProperty('transparentBackground', event.target.checked)} /> Transparent background</label>{properties.transparentBackground === false && <ColorField label="Background color" value={properties.backgroundColor || '#101418'} onChange={value => setProperty('backgroundColor', value)} />}</InspectorGroup>
 }
 
 export function MockControls({ tags, values, onChange, message }) {
@@ -444,8 +635,8 @@ function MockValueInput({ tag, value, onChange, compact = false }) {
   return <input aria-label={`${tag.name} mock value`} className={compact ? 'compact' : ''} value={value ?? ''} onChange={event => onChange(event.target.value)} />
 }
 
-function NumberField({ label, value, onChange, min, max, step = 1, allowEmpty = false }) {
-  return <label>{label}<input type="number" min={min} max={max} step={step} value={value} onChange={event => onChange(allowEmpty && event.target.value === '' ? null : Number(event.target.value))} /></label>
+function NumberField({ label, value, onChange, min, max, step = 1, allowEmpty = false, disabled = false }) {
+  return <label>{label}<input type="number" min={min} max={max} step={step} value={value} disabled={disabled} onChange={event => onChange(allowEmpty && event.target.value === '' ? null : Number(event.target.value))} /></label>
 }
 function ColorField({ label, value, onChange }) { return <label>{label}<input type="color" value={value} onChange={event => onChange(event.target.value)} /></label> }
 function sourceOptionLabel(source) {

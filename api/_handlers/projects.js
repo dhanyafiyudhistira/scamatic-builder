@@ -18,13 +18,16 @@ export default async function handler(req, res) {
   try {
     await connectMongo()
     if (req.method === 'GET') {
-      if (!requireWorkspacePermission(principal, res, PERMISSIONS.BUILDER_READ)) return
       const { id } = req.query || {}
       if (id) {
+        if (!requireWorkspacePermission(principal, res, PERMISSIONS.BUILDER_READ)) return
         const project = await Project.findById(id).lean()
         if (!project || !(await requireProjectPermission(principal, res, project, PERMISSIONS.BUILDER_READ))) return
         return res.status(200).json({ project: toClientProject(project, true) })
       }
+      // The home directory serves both Builder users and runtime-only operators.
+      // ProjectMember assignments still constrain the query for OPERATOR/VIEWER.
+      if (!requireWorkspacePermission(principal, res, PERMISSIONS.RUNTIME_VIEW)) return
       const projects = await Project.find(await accessibleProjectFilter(principal)).sort({ updatedAt: -1 }).lean()
       const unlocked = await unlockedProjectIds(principal, projects)
       return res.status(200).json({ projects: projects.map(project => toClientProject(project, unlocked.has(String(project._id)))) })

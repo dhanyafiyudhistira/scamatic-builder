@@ -9,7 +9,7 @@ import { auditActionCategory, auditActionLabel } from '../shared/audit-display.j
 const canvas = { width: 1920, height: 1080 }
 
 test('component registry creates all MVP component types with logical positions', () => {
-  for (const type of ['indicator-lamp', 'value-span', 'control-button', 'tuning-slider', 'operation-shifter', 'control-popup', 'chart', 'text-label']) {
+  for (const type of ['indicator-lamp', 'alarm', 'value-span', 'gauge', 'control-button', 'tuning-slider', 'operation-shifter', 'control-popup', 'chart', 'text-label']) {
     const component = createComponentInstance(type, { id: `id-${type}`, canvas, index: 0 })
     assert.equal(component.type, type)
     assert.ok(component.position.width > 0)
@@ -26,7 +26,9 @@ test('registry filters compatible tags by component type', () => {
     { id: 'date', dataType: 'datetime' },
   ]
   assert.deepEqual(compatibleTags('indicator-lamp', tags).map(tag => tag.id), ['bool', 'number', 'mode'])
+  assert.deepEqual(compatibleTags('alarm', tags).map(tag => tag.id), ['bool', 'number', 'mode'])
   assert.deepEqual(compatibleTags('value-span', tags).map(tag => tag.id), ['number', 'mode', 'date'])
+  assert.deepEqual(compatibleTags('gauge', tags).map(tag => tag.id), ['number'])
   assert.deepEqual(compatibleTags('tuning-slider', tags).map(tag => tag.id), ['number'])
   assert.deepEqual(compatibleTags('operation-shifter', tags).map(tag => tag.id), ['mode'])
   assert.deepEqual(compatibleTags('chart', tags).map(tag => tag.id), ['number'])
@@ -73,6 +75,7 @@ test('Operation Shifter builds a bounded edge-executed recipe and reset payload'
 test('structured rules evaluate without arbitrary JavaScript', () => {
   assert.equal(evaluateRule(82, { operator: 'gte', value: 80 }), true)
   assert.equal(evaluateRule(7, { operator: 'between', min: 6, max: 8 }), true)
+  assert.equal(evaluateRule(9, { operator: 'outside', min: 6, max: 8 }), true)
   assert.equal(evaluateRule('RUNNING', { operator: 'contains', value: 'RUN' }), true)
   assert.equal(evaluateRule(false, { operator: 'truthy' }), false)
 })

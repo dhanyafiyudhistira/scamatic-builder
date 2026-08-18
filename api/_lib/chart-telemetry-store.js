@@ -1,6 +1,7 @@
 import { MongoClient } from 'mongodb'
 import { createHash } from 'node:crypto'
 import { chartStorageConfig } from '../../shared/chart-storage-config.js'
+import { adaptiveChartResolution, normalizeChartRange } from '../../shared/chart-time-range.js'
 
 const cache = globalThis.__chart_telemetry_stores__ ??= new Map()
 
@@ -95,6 +96,87 @@ export async function readChartTelemetryHistory({ workspaceId, projectId, tagIds
   ]))
 }
 
+export async function readChartTelemetryRange({ workspaceId, projectId, tagIds, from, to, targetPoints }, options = {}) {
+  const safeTagIds = [...new Set((tagIds || []).map(String).filter(Boolean))].slice(0, 50)
+  if (!workspaceId || !projectId || !safeTagIds.length) return emptyRange(from, to, targetPoints)
+  const range = normalizeChartRange({ from, to, targetPoints }, { now: options.now ?? Date.now() })
+  const resolution = adaptiveChartResolution(range.rangeMs, range.targetPoints)
+  const { collection } = await ensureChartTelemetryStore(options)
+  const rows = await collection.aggregate([
+    {
+      $match: {
+        'meta.workspaceId': String(workspaceId),
+        'meta.projectId': String(projectId),
+        'meta.tagId': { $in: safeTagIds },
+        timestamp: { $gte: range.from, $lte: range.to },
+      },
+    },
+    { $sort: { timestamp: 1 } },
+    {
+      $group: {
+        _id: {
+          tagId: '$meta.tagId',
+          bucket: {
+            $dateTrunc: {
+              date: '$timestamp',
+              unit: resolution.unit,
+              binSize: resolution.binSize,
+              timezone: 'UTC',
+            },
+          },
+        },
+        first: { $first: '$value' },
+        last: { $last: '$value' },
+        min: { $min: '$value' },
+        max: { $max: '$value' },
+        avg: { $avg: '$value' },
+        count: { $sum: 1 },
+        sequence: { $last: '$sequence' },
+      },
+    },
+    { $sort: { '_id.tagId': 1, '_id.bucket': 1 } },
+    {
+      $group: {
+        _id: '$_id.tagId',
+        points: {
+          $push: {
+            timestamp: '$_id.bucket',
+            value: '$avg',
+            first: '$first',
+            last: '$last',
+            min: '$min',
+            max: '$max',
+            count: '$count',
+            sequence: '$sequence',
+          },
+        },
+      },
+    },
+  ], { allowDiskUse: true, maxTimeMS: 8_000 }).toArray()
+
+  const history = Object.fromEntries(rows.map(row => [
+    row._id,
+    row.points.slice(-range.targetPoints).map(point => ({
+      timestamp: point.timestamp instanceof Date ? point.timestamp.toISOString() : point.timestamp,
+      value: point.value,
+      first: point.first,
+      last: point.last,
+      min: point.min,
+      max: point.max,
+      count: point.count,
+      quality: 'good',
+      sequence: point.sequence,
+      resolutionMs: resolution.bucketMs,
+    })),
+  ]))
+  return {
+    history,
+    range: { from: range.from.toISOString(), to: range.to.toISOString() },
+    resolutionMs: resolution.bucketMs,
+    targetPoints: range.targetPoints,
+  }
+}
+
 export async function deleteProjectChartTelemetry({ workspaceId, projectId }, options = {}) {
   const { collection } = await ensureChartTelemetryStore(options)
   return collection.deleteMany({ 'meta.workspaceId': String(workspaceId), 'meta.projectId': String(projectId) })
@@ -127,4 +209,15 @@ function boundedText(value, max) {
 
 function unavailableError(message, cause) {
   return Object.assign(new Error(message, cause ? { cause } : undefined), { code: 'CHART_STORAGE_UNAVAILABLE' })
+}
+
+function emptyRange(from, to, targetPoints) {
+  const range = normalizeChartRange({ from, to, targetPoints })
+  const resolution = adaptiveChartResolution(range.rangeMs, range.targetPoints)
+  return {
+    history: {},
+    range: { from: range.from.toISOString(), to: range.to.toISOString() },
+    resolutionMs: resolution.bucketMs,
+    targetPoints: range.targetPoints,
+  }
 }

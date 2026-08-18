@@ -12,6 +12,7 @@ import { withThingsBoardAccessToken } from '../_lib/thingsboard-auth.js'
 import { runtimeCommandExecutionPlan, runtimeProfile } from '../../shared/runtime-profile.js'
 import { previousSimulationCommandValue, simulationCommandReadScope } from '../../shared/simulation-command-state.js'
 import { commandTimingProjection } from '../../shared/command-lifecycle.js'
+import { createCommandPhaseTimer } from '../../shared/command-phase-timing.js'
 import { loadCommandAdmissionReads, loadLiveCommandReads } from '../_lib/command-read-context.js'
 import { createBoundedAsyncCache } from '../_lib/bounded-async-cache.js'
 
@@ -21,8 +22,9 @@ const publishedVersionCache = createBoundedAsyncCache({
 })
 
 export default async function handler(req, res) {
+  const phaseTimer = createCommandPhaseTimer({ enabled: req.method === 'POST' && req.body?.includeMetrics === true })
   const requestReceivedAt = new Date()
-  const principal = await requirePrincipal(req, res)
+  const principal = await phaseTimer.measure('principalAuthMs', () => requirePrincipal(req, res))
   if (!principal) return
   if (!['GET', 'POST'].includes(req.method)) {
     res.setHeader('Allow', 'GET, POST')
@@ -32,19 +34,29 @@ export default async function handler(req, res) {
   if (!requireCsrf(req, res, principal)) return
   const { projectId, runtimeToken, requestId, componentId, confirmed = false, value } = req.body || {}
   if (!projectId || !componentId || !/^[a-zA-Z0-9_-]{8,100}$/.test(String(requestId || '')) || !runtimeToken) return res.status(400).json({ error: 'projectId, componentId, runtimeToken, and requestId are required.' })
-  if (!(await enforceRateLimit(req, res, 'runtime-command', { limit: 30, windowMs: 60_000, identity: `${principal.id}:${projectId}` }))) return
+  const withinRateLimit = await phaseTimer.measure(
+    'rateLimitPersistMs',
+    () => enforceRateLimit(req, res, 'runtime-command', { limit: 30, windowMs: 60_000, identity: `${principal.id}:${projectId}` }),
+  )
+  if (!withinRateLimit) return
   const correlationId = correlationIdFor(req)
 
   await connectMongo()
   // These reads share no mutable state. Running them together removes two
   // MongoDB round-trips from the command admission path while preserving the
   // authorization and response decision order below.
-  const { project, runtimeSession, duplicate } = await loadCommandAdmissionReads({
-    loadProject: () => Project.findById(projectId),
-    loadRuntimeSession: () => RuntimeSession.findOne({ _id: digest(runtimeToken), authSessionId: principal.sessionId, userId: principal.id, projectId, revokedAt: null, expiresAt: { $gt: new Date() } }).lean(),
-    loadDuplicate: () => CommandEvent.findOne({ projectId, requestId }).lean(),
-  })
-  const authorization = project && await requireProjectPermission(principal, res, project, PERMISSIONS.COMMAND_EXECUTE)
+  const { project, runtimeSession, duplicate } = await phaseTimer.measure(
+    'admissionReadsMs',
+    () => loadCommandAdmissionReads({
+      loadProject: () => Project.findById(projectId),
+      loadRuntimeSession: () => RuntimeSession.findOne({ _id: digest(runtimeToken), authSessionId: principal.sessionId, userId: principal.id, projectId, revokedAt: null, expiresAt: { $gt: new Date() } }).lean(),
+      loadDuplicate: () => CommandEvent.findOne({ projectId, requestId }).lean(),
+    }),
+  )
+  const authorization = project && await phaseTimer.measure(
+    'authorizationPolicyMs',
+    () => requireProjectPermission(principal, res, project, PERMISSIONS.COMMAND_EXECUTE),
+  )
   if (!authorization) return
   if (!runtimeSession || runtimeSession.versionId !== project.activeVersionId || !runtimeSession.capabilities.includes(PERMISSIONS.COMMAND_EXECUTE)) return reject(res, principal, project, { requestId, componentId, correlationId, reason: 'Runtime session is invalid or stale.', code: 'RUNTIME_SESSION_INVALID' })
   if (duplicate) {
@@ -53,9 +65,12 @@ export default async function handler(req, res) {
   }
   // Published versions are immutable and activeVersionId changes on publish.
   // A short bounded cache avoids repeatedly deserializing the same large schema.
-  const version = await publishedVersionCache.get(
-    project.activeVersionId,
-    () => ProjectVersion.findById(project.activeVersionId).lean(),
+  const version = await phaseTimer.measure(
+    'versionLoadMs',
+    () => publishedVersionCache.get(
+      project.activeVersionId,
+      () => ProjectVersion.findById(project.activeVersionId).lean(),
+    ),
   )
   const component = version?.schema?.components?.find(item => item.id === componentId)
   const tag = component && version.schema.tags?.find(item => item.id === component.binding?.tagId)
@@ -82,22 +97,25 @@ export default async function handler(req, res) {
             : []),
         ]
       : null
-    const [recent, relevantCommands] = await Promise.all([
-      pendingCommandQuery(),
-      historyEffects
-        ? CommandEvent.find({
-            projectId,
-            versionId: version._id,
-            status: 'acknowledged',
-            executionMode: 'mock',
-            $or: historyEffects,
-          })
-            .sort({ createdAt: -1 })
-            .limit(1)
-            .select({ componentId: 1, tagId: 1, status: 1, executionMode: 1, resultSummary: 1, completedAt: 1, createdAt: 1, updatedAt: 1 })
-            .lean()
-        : Promise.resolve([]),
-    ])
+    const [recent, relevantCommands] = await phaseTimer.measure(
+      'simulationStateReadsMs',
+      () => Promise.all([
+        pendingCommandQuery(),
+        historyEffects
+          ? CommandEvent.find({
+              projectId,
+              versionId: version._id,
+              status: 'acknowledged',
+              executionMode: 'mock',
+              $or: historyEffects,
+            })
+              .sort({ createdAt: -1 })
+              .limit(1)
+              .select({ componentId: 1, tagId: 1, status: 1, executionMode: 1, resultSummary: 1, completedAt: 1, createdAt: 1, updatedAt: 1 })
+              .lean()
+          : Promise.resolve([]),
+      ]),
+    )
     if (recent) return res.status(409).json({ error: 'Command is already pending.', code: 'COMMAND_COOLDOWN', correlationId })
     simulationCommands = relevantCommands
   } else {
@@ -128,29 +146,35 @@ export default async function handler(req, res) {
   const serverlessExecution = executionPlan.executionMode === 'serverless'
   const initialLifecycleAt = new Date()
   const initiallyDispatched = executionPlan.initialStatus === 'dispatched'
-  const event = await CommandEvent.create({
-    requestId,
-    workspaceId: principal.workspaceId,
-    projectId,
-    versionId: version._id,
-    componentId,
-    tagId: tag.id,
-    actorId: principal.id,
-    executionMode: executionPlan.executionMode,
-    status: executionPlan.initialStatus,
-    action,
-    payloadSummary: { action, value: evaluated.value },
-    correlationId,
-    requestReceivedAt,
-    authorizedAt: initiallyDispatched ? initialLifecycleAt : null,
-    dispatchedAt: initiallyDispatched ? initialLifecycleAt : null,
-  })
+  const event = await phaseTimer.measure(
+    'commandCreateMs',
+    () => CommandEvent.create({
+      requestId,
+      workspaceId: principal.workspaceId,
+      projectId,
+      versionId: version._id,
+      componentId,
+      tagId: tag.id,
+      actorId: principal.id,
+      executionMode: executionPlan.executionMode,
+      status: executionPlan.initialStatus,
+      action,
+      payloadSummary: { action, value: evaluated.value },
+      correlationId,
+      requestReceivedAt,
+      authorizedAt: initiallyDispatched ? initialLifecycleAt : null,
+      dispatchedAt: initiallyDispatched ? initialLifecycleAt : null,
+    }),
+  )
   if (profile === 'simulation') {
     event.status = 'authorized'
     event.authorizedAt = new Date()
-    await event.save()
-    await auditCommandAuthorized({ principal, projectId, componentId, correlationId, requestId, tagId: tag.id, sourceId: source.id })
-    return executeMock(event, evaluated, principal, res)
+    await phaseTimer.measure('authorizationPersistMs', () => event.save())
+    await phaseTimer.measure(
+      'authorizationAuditMs',
+      () => auditCommandAuthorized({ principal, projectId, componentId, correlationId, requestId, tagId: tag.id, sourceId: source.id }),
+    )
+    return executeMock(event, evaluated, principal, res, phaseTimer)
   }
   if (process.env.CONNECTOR_PLATFORM_ENABLED !== 'true' || process.env.CONNECTOR_LIVE_COMMANDS_ENABLED !== 'true') return finishUnavailable(event, res, 'Live connector commands are disabled.', 'LIVE_COMMANDS_DISABLED')
   if (!connector || !environment) return finishUnavailable(event, res, 'Connector configuration is unavailable.', 'CONNECTOR_UNAVAILABLE')
@@ -194,13 +218,19 @@ async function commandStatus(req, res, principal) {
   return res.status(200).json(commandResponse(event, false))
 }
 
-async function executeMock(event, result, principal, res) {
-  event.status = 'dispatched'; event.dispatchedAt = new Date(); await event.save()
+async function executeMock(event, result, principal, res, phaseTimer) {
+  event.status = 'dispatched'
+  event.dispatchedAt = new Date()
+  await phaseTimer.measure('dispatchPersistMs', () => event.save())
   event.status = result.ok ? 'acknowledged' : 'failed'
   event.resultSummary = { ok: result.ok, message: result.message, value: result.value, resetAfterMs: result.resetAfterMs || null }
-  event.completedAt = new Date(); await event.save()
-  await AuditEvent.create({ workspaceId: principal.workspaceId, projectId: event.projectId, actorId: principal.id, action: result.ok ? 'command.acknowledged' : 'command.failed', targetType: 'component', targetId: event.componentId, correlationId: event.correlationId, metadata: { requestId: event.requestId, tagId: event.tagId, action: event.action, result: event.status } })
-  return res.status(result.ok ? 200 : 502).json(commandResponse(event.toObject(), false))
+  event.completedAt = new Date()
+  await phaseTimer.measure('terminalPersistMs', () => event.save())
+  await phaseTimer.measure(
+    'terminalAuditMs',
+    () => AuditEvent.create({ workspaceId: principal.workspaceId, projectId: event.projectId, actorId: principal.id, action: result.ok ? 'command.acknowledged' : 'command.failed', targetType: 'component', targetId: event.componentId, correlationId: event.correlationId, metadata: { requestId: event.requestId, tagId: event.tagId, action: event.action, result: event.status } }),
+  )
+  return res.status(result.ok ? 200 : 502).json(commandResponse(event.toObject(), false, phaseTimer.snapshot()))
 }
 
 async function executeServerlessCommand({ event, evaluated, principal, res, version, component, connector, environment }) {
@@ -406,6 +436,24 @@ async function reject(res, principal, project, details) {
   await AuditEvent.create({ workspaceId: principal.workspaceId, projectId: project?.id || null, actorId: principal.id, action: 'command.rejected', targetType: 'component', targetId: details.componentId || null, correlationId: details.correlationId, metadata: { requestId: details.requestId, tagId: details.tagId || null, reason: details.code } })
   return res.status(403).json({ error: details.reason, code: details.code, correlationId: details.correlationId })
 }
-function commandResponse(event, replayed) { return { ok: event.status === 'acknowledged', replayed, requestId: event.requestId, status: event.status, message: event.resultSummary?.message || event.status, code: event.resultSummary?.code || null, componentId: event.componentId, tagId: event.tagId, value: event.resultSummary?.value, resetAfterMs: event.resultSummary?.resetAfterMs || null, correlationId: event.correlationId, createdAt: event.createdAt || null, completedAt: event.completedAt || null, timing: commandTimingProjection(event) } }
+function commandResponse(event, replayed, phaseTiming = null) {
+  const lifecycleTiming = commandTimingProjection(event)
+  return {
+    ok: event.status === 'acknowledged',
+    replayed,
+    requestId: event.requestId,
+    status: event.status,
+    message: event.resultSummary?.message || event.status,
+    code: event.resultSummary?.code || null,
+    componentId: event.componentId,
+    tagId: event.tagId,
+    value: event.resultSummary?.value,
+    resetAfterMs: event.resultSummary?.resetAfterMs || null,
+    correlationId: event.correlationId,
+    createdAt: event.createdAt || null,
+    completedAt: event.completedAt || null,
+    timing: phaseTiming ? { ...(lifecycleTiming || {}), ...phaseTiming } : lifecycleTiming,
+  }
+}
 function digest(value) { return createHash('sha256').update(String(value)).digest('hex') }
 function delay(ms) { return new Promise(resolve => setTimeout(resolve, ms)) }

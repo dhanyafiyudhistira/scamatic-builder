@@ -1,14 +1,18 @@
+import { createHash } from 'node:crypto'
 import { connectMongo } from '../_lib/mongo.js'
-import { Project } from '../_lib/models.js'
+import { Project, ProjectVersion, RuntimeSession } from '../_lib/models.js'
 import { requireCsrf, requirePrincipal } from '../_lib/auth.js'
 import { PERMISSIONS, requireProjectPermission } from '../_lib/authorization.js'
 import { enforceRateLimit, requestId } from '../_lib/security.js'
-import { readChartTelemetryHistory, writeChartTelemetrySamples } from '../_lib/chart-telemetry-store.js'
+import { readChartTelemetryHistory, readChartTelemetryRange, writeChartTelemetrySamples } from '../_lib/chart-telemetry-store.js'
 import { loadWorkspaceChartStorage } from '../_lib/chart-storage-configuration.js'
+import { normalizeChartRange } from '../../shared/chart-time-range.js'
+import { runtimeProfile } from '../../shared/runtime-profile.js'
 
 const DEFAULT_TAGS = 'Level_mix,QI_102,Simulasi_OpeningV104'
 const TAG_PATTERN = /^[a-zA-Z0-9_.:-]{1,120}$/
 const MAX_ENTRIES = 1_000
+const MAX_SERIES_TAGS = 8
 
 export default async function handler(req, res) {
   const principal = await requirePrincipal(req, res)
@@ -19,7 +23,10 @@ export default async function handler(req, res) {
   try {
     await connectMongo()
     const project = await Project.findById(projectId)
-    const permission = req.method === 'POST' ? PERMISSIONS.SOURCE_CONFIGURE : PERMISSIONS.RUNTIME_VIEW
+    const runtimeArchive = req.method === 'POST' && req.body?.source === 'runtime-simulation'
+    const permission = req.method === 'POST'
+      ? runtimeArchive ? PERMISSIONS.COMMAND_EXECUTE : PERMISSIONS.SOURCE_CONFIGURE
+      : PERMISSIONS.RUNTIME_VIEW
     if (!project || !(await requireProjectPermission(principal, res, project, permission))) return
     const chartStorage = await loadWorkspaceChartStorage(principal.workspaceId)
     const chartConfig = chartStorage.config
@@ -27,26 +34,47 @@ export default async function handler(req, res) {
 
     if (req.method === 'POST') {
       if (!requireCsrf(req, res, principal)) return
-      if (!(await enforceRateLimit(req, res, 'telemetry-write', { limit: 60, windowMs: 60_000, identity: `${principal.id}:${projectId}` }))) return
+      if (!(await enforceRateLimit(req, res, runtimeArchive ? 'runtime-history-archive' : 'telemetry-write', { limit: runtimeArchive ? 8 : 60, windowMs: 60_000, identity: `${principal.id}:${projectId}` }))) return
       const docs = normalizeTelemetryEntries(req.body?.entries, { workspaceId: principal.workspaceId, projectId })
+      if (runtimeArchive) {
+        const version = await validateRuntimeSimulationArchive({ principal, project, runtimeToken: req.headers?.['x-runtime-token'] })
+        validateRuntimeChartTags(version.schema, docs.map(document => document.tag))
+      }
       if (!docs.length) return res.status(200).json({ ok: true, inserted: 0 })
       const result = await writeChartTelemetrySamples(docs.map((document, index) => ({
         workspaceId: document.workspaceId,
         projectId: document.projectId,
-        sourceId: 'legacy-client',
+        sourceId: runtimeArchive ? 'simulation-runtime' : 'legacy-client',
         tagId: document.tag,
         value: document.value,
         sourceTimestamp: document.timestamp,
         receivedAt: new Date(),
         quality: 'good',
-        sequence: index,
+        sequence: runtimeArchive ? document.timestamp.getTime() : index,
       })), { config: chartConfig })
       return res.status(200).json({ ok: true, inserted: result.inserted })
     }
 
     if (req.method === 'GET') {
-      if (!(await enforceRateLimit(req, res, 'telemetry-read', { limit: 120, windowMs: 60_000, identity: `${principal.id}:${projectId}` }))) return
-      const { tags, minutes, limit } = normalizeTelemetryQuery(req.query)
+      const query = normalizeTelemetryQuery(req.query)
+      const ratePolicy = telemetryReadRatePolicy(query)
+      if (!(await enforceRateLimit(req, res, ratePolicy.scope, { limit: ratePolicy.limit, windowMs: ratePolicy.windowMs, identity: `${principal.id}:${projectId}` }))) return
+      if (query.format === 'series') {
+        const version = project.activeVersionId && await ProjectVersion.findById(project.activeVersionId).select({ schema: 1 }).lean()
+        if (!version) return res.status(409).json({ error: 'Published runtime schema is unavailable.', code: 'VERSION_MISSING' })
+        validateRuntimeChartTags(version.schema, query.tags)
+        const result = await readChartTelemetryRange({
+          workspaceId: principal.workspaceId,
+          projectId,
+          tagIds: query.tags,
+          from: query.from,
+          to: query.to,
+          targetPoints: query.targetPoints,
+        }, { config: chartConfig })
+        res.setHeader('Cache-Control', 'private, no-store')
+        return res.status(200).json(result)
+      }
+      const { tags, minutes, limit } = query
       const since   = new Date(Date.now() - minutes * 60 * 1000)
 
       const history = await readChartTelemetryHistory({
@@ -91,12 +119,29 @@ export default async function handler(req, res) {
 
 export function normalizeTelemetryQuery(query = {}) {
   const tags = String(query.tags || DEFAULT_TAGS).split(',').map(value => value.trim()).filter(Boolean)
+  if (!tags.length || tags.length > 50 || tags.some(tag => !TAG_PATTERN.test(tag))) throw clientError('Telemetry tags are invalid.')
+  const uniqueTags = [...new Set(tags)]
+  if (query.format === 'series') {
+    if (uniqueTags.length > MAX_SERIES_TAGS) throw clientError(`Chart history accepts at most ${MAX_SERIES_TAGS} tags.`)
+    let range
+    try {
+      range = normalizeChartRange({ from: query.from, to: query.to, targetPoints: query.targetPoints })
+    } catch (error) {
+      throw clientError(error.message)
+    }
+    return { tags: uniqueTags, format: 'series', from: range.from, to: range.to, targetPoints: range.targetPoints }
+  }
   const minutes = Number.parseInt(String(query.minutes || '60'), 10)
   const limit = Number.parseInt(String(query.limit || '400'), 10)
-  if (!tags.length || tags.length > 50 || tags.some(tag => !TAG_PATTERN.test(tag))) throw clientError('Telemetry tags are invalid.')
   if (!Number.isInteger(minutes) || minutes < 1 || minutes > 10_080) throw clientError('minutes must be between 1 and 10080.')
   if (!Number.isInteger(limit) || limit < 1 || limit > 1_000) throw clientError('limit must be between 1 and 1000.')
-  return { tags: [...new Set(tags)], minutes, limit }
+  return { tags: uniqueTags, minutes, limit }
+}
+
+export function telemetryReadRatePolicy(query = {}) {
+  return query.format === 'series'
+    ? { scope: 'telemetry-range-read', limit: 12, windowMs: 60_000 }
+    : { scope: 'telemetry-read', limit: 120, windowMs: 60_000 }
 }
 
 export function normalizeTelemetryEntries(entries, { workspaceId, projectId, now = Date.now() } = {}) {
@@ -116,4 +161,38 @@ export function normalizeTelemetryEntries(entries, { workspaceId, projectId, now
 
 function clientError(message) {
   return Object.assign(new Error(message), { statusCode: 400 })
+}
+
+function validateRuntimeChartTags(schema, requestedTagIds) {
+  const tags = new Map((schema?.tags || []).map(tag => [tag.id, tag]))
+  const invalid = requestedTagIds.find(tagId => {
+    const tag = tags.get(tagId)
+    return tag?.dataType !== 'number' || !['read', 'read-write'].includes(tag?.access)
+  })
+  if (invalid) throw clientError(`Chart history tag is unavailable: ${invalid}.`)
+}
+
+async function validateRuntimeSimulationArchive({ principal, project, runtimeToken }) {
+  const token = String(runtimeToken || '')
+  if (!token) throw Object.assign(new Error('A runtime token is required for Simulation history archival.'), { statusCode: 403 })
+  const session = await RuntimeSession.findOne({
+    _id: digest(token),
+    authSessionId: principal.sessionId,
+    userId: principal.id,
+    projectId: project.id,
+    revokedAt: null,
+    expiresAt: { $gt: new Date() },
+  }).lean()
+  if (!session || session.versionId !== project.activeVersionId || !session.capabilities.includes(PERMISSIONS.COMMAND_EXECUTE)) {
+    throw Object.assign(new Error('Runtime session cannot archive Simulation history.'), { statusCode: 403 })
+  }
+  const version = await ProjectVersion.findById(project.activeVersionId).select({ schema: 1 }).lean()
+  if (!version || runtimeProfile(version.schema) !== 'simulation') {
+    throw Object.assign(new Error('Runtime history archival is available only for Simulation profile telemetry.'), { statusCode: 409 })
+  }
+  return version
+}
+
+function digest(value) {
+  return createHash('sha256').update(String(value)).digest('hex')
 }

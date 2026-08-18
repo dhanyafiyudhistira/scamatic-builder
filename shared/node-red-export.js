@@ -1,4 +1,7 @@
 import { COMPONENT_REGISTRY } from './component-registry.js'
+import { numericDisplayUnit, numericEngineering, numericFormatMode, numericWriteConstraints, resolveGaugeZones, resolveNumericRange } from './numeric-tag-config.js'
+import { migrateProjectSchema } from './project-schema.js'
+import { numericAlarmRule } from './alarm.js'
 
 export const NODE_RED_EXPORT_VERSION = 1
 export const NODE_RED_EXPORT_MARKER = 'SCAMATIC_BUILDER_EXPORT_V1'
@@ -6,11 +9,13 @@ export const NODE_RED_EXPORT_LIMITS = Object.freeze({ maxNodes: 5000, maxMetadat
 
 const DATA_TYPES = new Set(['boolean', 'number', 'string', 'enum', 'datetime'])
 const ACCESS_MODES = new Set(['read', 'write', 'read-write'])
-const DASHBOARD_COMPONENT_TYPES = new Set(['indicator-lamp', 'value-span', 'control-button', 'tuning-slider', 'operation-shifter', 'chart'])
+const DASHBOARD_COMPONENT_TYPES = new Set(['indicator-lamp', 'alarm', 'value-span', 'gauge', 'control-button', 'tuning-slider', 'operation-shifter', 'chart'])
 const IMPORTABLE_COMPONENT_TYPES = new Set(Object.keys(COMPONENT_REGISTRY).filter(type => !['text-label', 'design-image', 'control-popup'].includes(type)))
+const SAFE_RULE_OPERATORS = new Set(['truthy', 'eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'between', 'outside', 'contains'])
 
 export function createNodeRedExport(schema) {
   if (!schema || typeof schema !== 'object' || Array.isArray(schema)) throw new Error('A valid Builder project schema is required.')
+  schema = migrateProjectSchema(schema)
   const project = sanitizeProject({ ...schema.project, schemaVersion: schema.schemaVersion })
   const sourceTypes = new Map((Array.isArray(schema.dataSources) ? schema.dataSources : []).map(source => [safeText(source?.id, 200), safeSourceType(source?.type)]))
   const tags = (Array.isArray(schema.tags) ? schema.tags : []).map(tag => sanitizeTag(tag, sourceTypes)).filter(Boolean)
@@ -202,6 +207,10 @@ function sanitizeTag(tag, sourceTypes) {
   const path = safeText(tag?.path, 255)
   if (!id || !path || !DATA_TYPES.has(tag?.dataType) || !ACCESS_MODES.has(tag?.access)) return null
   const plcAddress = safePlcAddress(tag?.metadata?.plcAddress)
+  const engineering = tag.dataType === 'number' ? numericEngineering(tag) : null
+  const numberFormat = tag.dataType === 'number' ? numericFormatMode(tag) : null
+  const writeConstraints = tag.dataType === 'number' && tag.access !== 'read' ? numericWriteConstraints(tag) : null
+  const alarmRule = tag.dataType === 'number' ? numericAlarmRule(tag) : null
   return {
     id,
     name: safeText(tag.name, 255) || humanizeName(path),
@@ -209,6 +218,10 @@ function sanitizeTag(tag, sourceTypes) {
     dataType: tag.dataType,
     access: tag.access,
     sourceType: sourceTypes.get(safeText(tag.sourceId, 200)) || 'mock',
+    ...(engineering ? { engineering } : {}),
+    ...(numberFormat ? { numberFormat } : {}),
+    ...(writeConstraints ? { writeConstraints } : {}),
+    ...(alarmRule ? { alarmRule } : {}),
     ...(plcAddress ? { plcAddress } : {}),
   }
 }
@@ -243,7 +256,52 @@ function exportComponentProperties(component) {
   const action = safeText(properties.action, 40)
   if (action && /^[a-z0-9-]+$/i.test(action)) result.action = action
   if (['boolean', 'number', 'string'].includes(typeof properties.payload)) result.payload = properties.payload
+  if (['gauge', 'tuning-slider'].includes(component?.type) && ['inherit', 'custom'].includes(properties.rangeMode)) result.rangeMode = properties.rangeMode
+  if (component?.type === 'gauge') {
+    if (['inherit', 'custom'].includes(properties.unitMode)) result.unitMode = properties.unitMode
+    for (const key of ['lowZoneEnd', 'highZoneStart', 'scale', 'offset']) {
+      if (Number.isFinite(Number(properties[key]))) result[key] = Number(properties[key])
+    }
+    const tickCount = Number(properties.tickCount)
+    if (Number.isInteger(tickCount) && tickCount >= 4 && tickCount <= 12) result.tickCount = tickCount
+    for (const key of ['lowColor', 'normalColor', 'highColor', 'needleColor', 'faceColor', 'textColor']) {
+      const color = safeHexColor(properties[key])
+      if (color) result[key] = color
+    }
+    if (typeof properties.fallback === 'string') result.fallback = safeText(properties.fallback, 40)
+    if (typeof properties.showDigital === 'boolean') result.showDigital = properties.showDigital
+  }
+  if (component?.type === 'alarm') {
+    if (['lamp', 'buzzer'].includes(properties.presentation)) result.presentation = properties.presentation
+    if (['inherit', 'custom'].includes(properties.ruleMode)) result.ruleMode = properties.ruleMode
+    const rule = safeComponentRule(properties.rule)
+    if (rule) result.rule = rule
+    for (const key of ['activeColor', 'idleColor']) {
+      const color = safeHexColor(properties[key])
+      if (color) result[key] = color
+    }
+    if (typeof properties.flash === 'boolean') result.flash = properties.flash
+    if (typeof properties.soundEnabled === 'boolean') result.soundEnabled = properties.soundEnabled
+    const frequencyHz = Number(properties.frequencyHz)
+    if (Number.isFinite(frequencyHz) && frequencyHz >= 100 && frequencyHz <= 4000) result.frequencyHz = frequencyHz
+    const volume = Number(properties.volume)
+    if (Number.isFinite(volume) && volume >= 0 && volume <= 0.5) result.volume = volume
+    const pulseMs = Number(properties.pulseMs)
+    if (Number.isInteger(pulseMs) && pulseMs >= 100 && pulseMs <= 5000) result.pulseMs = pulseMs
+  }
   return result
+}
+
+function safeComponentRule(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !SAFE_RULE_OPERATORS.has(value.operator)) return null
+  const rule = { operator: value.operator }
+  if (['eq', 'neq', 'contains'].includes(value.operator) && ['boolean', 'number', 'string'].includes(typeof value.value)) rule.value = value.value
+  if (['gt', 'gte', 'lt', 'lte'].includes(value.operator) && Number.isFinite(Number(value.value))) rule.value = Number(value.value)
+  if (['between', 'outside'].includes(value.operator) && Number.isFinite(Number(value.min)) && Number.isFinite(Number(value.max)) && Number(value.min) <= Number(value.max)) {
+    rule.min = Number(value.min)
+    rule.max = Number(value.max)
+  }
+  return rule
 }
 
 function firstComponentByTag(components) {
@@ -311,6 +369,11 @@ function createDashboardNodes({ components, tagById, tabId, id }) {
 
 function dashboardNode(component, tags, context) {
   const tag = tags[0]
+  const engineering = numericEngineering(tag)
+  const displayRange = resolveNumericRange(tag, component.properties, 'display')
+  const gaugeZones = resolveGaugeZones(displayRange, component.properties)
+  const writeRange = resolveNumericRange(tag, component.properties, 'write')
+  const unit = component.type === 'gauge' ? numericDisplayUnit(tag, component.properties) : component.properties.suffix || engineering.unit || ''
   const common = {
     id: context.id,
     z: context.tabId,
@@ -327,13 +390,15 @@ function dashboardNode(component, tags, context) {
     wires: [[]],
   }
   if (component.type === 'indicator-lamp') return { ...common, type: 'ui_text', format: '{{msg.payload}}', layout: 'row-spread' }
+  if (component.type === 'alarm') return { ...common, type: 'ui_text', format: '{{msg.payload}}', layout: 'row-spread' }
   if (component.type === 'value-span') return tag.dataType === 'number'
-    ? { ...common, type: 'ui_gauge', gtype: 'gage', title: common.label, format: `{{value}}${component.properties.suffix || ''}`, min: component.properties.min ?? 0, max: component.properties.max ?? 100, colors: ['#00b500', '#e6e600', '#ca3838'], seg1: '', seg2: '' }
+    ? { ...common, type: 'ui_gauge', gtype: 'gage', title: common.label, format: `{{value}}${unit}`, min: engineering.min, max: engineering.max, colors: ['#00b500', '#e6e600', '#ca3838'], seg1: '', seg2: '' }
     : { ...common, type: 'ui_text', format: '{{msg.payload}}', layout: 'row-spread' }
+  if (component.type === 'gauge') return { ...common, type: 'ui_gauge', gtype: 'gage', title: common.label, format: `{{value}}${unit}`, min: displayRange.min, max: displayRange.max, colors: [component.properties.lowColor || '#38bdf8', component.properties.normalColor || '#a9bec7', component.properties.highColor || '#fb7185'], seg1: gaugeZones.lowZoneEnd, seg2: gaugeZones.highZoneStart }
   if (component.type === 'control-button') return tag.dataType === 'boolean' && tag.access !== 'write'
     ? { ...common, type: 'ui_switch', passthru: false, decouple: 'false', onvalue: 'true', onvalueType: 'bool', offvalue: 'false', offvalueType: 'bool', animate: false }
     : { ...common, type: 'ui_button', payload: String(component.properties.payload ?? true), payloadType: typeof component.properties.payload === 'number' ? 'num' : typeof component.properties.payload === 'boolean' ? 'bool' : 'str', color: '', bgcolor: '', icon: '' }
-  if (component.type === 'tuning-slider') return { ...common, type: 'ui_slider', passthru: false, outs: 'all', min: component.properties.min ?? 0, max: component.properties.max ?? 100, step: component.properties.step ?? 1, thumbLabel: true, showTicks: false }
+  if (component.type === 'tuning-slider') return { ...common, type: 'ui_slider', passthru: false, outs: 'all', min: writeRange.min, max: writeRange.max, step: writeRange.step, thumbLabel: true, showTicks: false }
   if (component.type === 'operation-shifter') return { ...common, type: 'ui_dropdown', place: 'Select mode', passthru: false, multiple: 'false', options: [{ label: 'MANUAL', value: 'MANUAL', type: 'str' }, { label: 'AUTO', value: 'AUTO', type: 'str' }, { label: 'RESET', value: 'RESET', type: 'str' }] }
   if (component.type === 'chart') return { ...common, type: 'ui_chart', height: 4, chartType: 'line', legend: 'false', xformat: 'HH:mm:ss', interpolate: 'linear', nodata: 'No data', dot: false, ymin: '', ymax: '', removeOlder: '1', removeOlderPoints: '', removeOlderUnit: '3600', cutout: 0, useOneColor: false, useUTC: false, colors: ['#1f77b4', '#aec7e8', '#ff7f0e', '#2ca02c', '#d62728'] }
   return null
@@ -499,6 +564,11 @@ function uniqueRpcMethod(method, seed, used) {
 function safeRpcMethod(value) {
   const text = safeText(value, 100)
   return /^[a-zA-Z0-9_.:-]{1,100}$/.test(text) ? text : ''
+}
+
+function safeHexColor(value) {
+  const text = safeText(value, 7)
+  return /^#[0-9a-f]{6}$/i.test(text) ? text : ''
 }
 
 function safePlcAddress(value) {

@@ -33,6 +33,10 @@ export function login(email, password) {
   return apiRequest('/api/auth', { method: 'POST', body: JSON.stringify({ email, password }) })
 }
 
+export function signup(account) {
+  return apiRequest('/api/signup', { method: 'POST', body: JSON.stringify(account) })
+}
+
 export function logout() {
   return apiRequest('/api/auth', { method: 'DELETE' })
 }

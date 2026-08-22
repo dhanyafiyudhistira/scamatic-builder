@@ -2114,7 +2114,23 @@ body.sb-is-resizing-sidebar * {
   min-width: 0;
   display: flex;
   align-items: center;
+  gap: 8px;
   padding: 2px 0 5px;
+}
+
+.sb-chart-export-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.sb-chart-export-actions>button {
+  min-height: 29px;
+  padding: 7px 10px !important;
 }
 
 .sb-chart-range-dropdown {
@@ -4176,10 +4192,16 @@ body.sb-is-resizing-sidebar * {
 }
 
 .sb-login-card-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: 64px;
+}
+
+.sb-login-card-head .sb-theme-tone {
+  position: absolute;
+  top: 0;
+  right: 0;
 }
 
 .sb-login-card h1 {
@@ -4290,15 +4312,10 @@ body.sb-is-resizing-sidebar * {
 }
 
 .sb-login-mark {
-  width: 54px;
-  height: 54px;
-  display: grid;
-  place-items: center;
-  color: var(--sb-accent-ink);
-  background: var(--sb-accent);
-  font-weight: 1000;
-  font-size: 20px;
-  clip-path: polygon(0 0, 78% 0, 100% 22%, 100% 100%, 22% 100%, 0 78%);
+  width: 64px;
+  height: 64px;
+  display: block;
+  object-fit: contain;
 }
 
 .sb-form-error {
@@ -4334,15 +4351,52 @@ body.sb-is-resizing-sidebar * {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 28px max(28px, calc((100vw - 1200px) / 2));
+  gap: 20px;
+  padding: 25px max(28px, calc((100vw - 1200px) / 2));
   border-bottom: 1px solid var(--sb-line);
   background: var(--sb-topbar);
+}
+
+.sb-home-brand {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: clamp(10px, 1.5vw, 18px);
+}
+
+.sb-home-brand-logo {
+  width: clamp(42px, 4vw, 54px);
+  height: clamp(42px, 4vw, 54px);
+  flex: 0 0 auto;
+  display: block;
+  object-fit: contain;
 }
 
 .sb-home-header h1 {
   margin: 5px 0 0;
   font-size: 25px;
   letter-spacing: -.03em;
+}
+
+@media (max-width: 560px) {
+  .sb-home-header {
+    gap: 12px;
+    padding: 18px 16px;
+  }
+
+  .sb-home-brand-logo {
+    width: 37px;
+    height: 37px;
+  }
+
+  .sb-home-brand .eyebrow {
+    font-size: 8px;
+    letter-spacing: .12em;
+  }
+
+  .sb-home-header h1 {
+    font-size: 20px;
+  }
 }
 
 .sb-user-chip {
@@ -4382,8 +4436,8 @@ body.sb-is-resizing-sidebar * {
   z-index: 100;
   top: calc(100% + 9px);
   right: 0;
-  width: 260px;
-  padding: 8px;
+  width: min(325px, calc(100vw - 32px));
+  padding: 10px;
   border: 1px solid var(--sb-line);
   border-radius: 9px;
   background: var(--sb-panel);
@@ -4439,6 +4493,8 @@ body.sb-is-resizing-sidebar * {
 
 .sb-settings-section .sb-theme-tone {
   width: 100%;
+  min-height: 40px;
+  padding: 8px 10px !important;
   justify-content: space-between;
 }
 
@@ -4468,24 +4524,31 @@ body.sb-is-resizing-sidebar * {
 
 .sb-settings-divider {
   height: 1px;
-  margin: 5px 0;
+  margin: 5px 8px;
   background: var(--sb-line);
 }
 
-.sb-settings-popover>button {
+.sb-settings-actions {
+  display: grid;
+  gap: 6px;
+  padding: 0 8px 8px;
+}
+
+.sb-settings-actions>button {
   width: 100%;
-  padding: 8px;
+  min-height: 40px;
+  padding: 8px 10px;
   border-color: transparent;
   background: transparent;
   text-align: left;
 }
 
-.sb-settings-popover>button:hover {
+.sb-settings-actions>button:hover {
   border-color: var(--sb-line);
   background: var(--sb-field);
 }
 
-.sb-settings-popover>button.danger {
+.sb-settings-actions>button.danger {
   color: var(--sb-danger);
 }
 
@@ -4801,15 +4864,18 @@ body.sb-is-resizing-sidebar * {
 }
 
 .sb-project-icon {
-  width: 36px;
-  height: 36px;
+  width: 42px;
+  height: 42px;
   display: grid;
   place-items: center;
-  background: var(--sb-accent-soft);
-  color: var(--sb-accent);
-  border: 1px solid var(--sb-accent-border);
-  font-weight: 900;
-  font-size: 12px;
+}
+
+.sb-project-icon img,
+.sb-project-assignment-icon img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
 }
 
 .sb-empty-projects {
@@ -5745,12 +5811,6 @@ body.sb-is-resizing-sidebar * {
   height: 30px;
   display: grid;
   place-items: center;
-  color: var(--sb-accent);
-  background: var(--sb-field);
-  border: 1px solid #000c;
-  border-radius: 5px;
-  font: 900 8px ui-monospace, monospace;
-  box-shadow: inset 0 1px 2px #0006;
 }
 
 .sb-project-assignment>span:nth-of-type(2) {

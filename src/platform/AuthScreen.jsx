@@ -61,7 +61,7 @@ export function AuthScreen({ onAuthenticated, runtime = false, allowSignup = tru
   return (
     <div className={runtime ? 'sb-runtime-login' : 'sb-login-page'}>
       <form className="sb-login-card" onSubmit={submit}>
-        <div className="sb-login-card-head"><div className="sb-login-mark">SC</div><ThemeToneToggle /></div>
+        <div className="sb-login-card-head"><img className="sb-login-mark" src="/logo-sb.png" alt="Scamatic Builder" /><ThemeToneToggle /></div>
         <p className="eyebrow">{runtime ? 'PRIVATE SCADA RUNTIME' : 'SCADA SCHEMATIC PLATFORM'}</p>
         <h1>{signingUp ? 'Create your account' : runtime ? 'Runtime access' : 'Welcome to Scamatic Builder'}</h1>
         <p>{signingUp ? 'Use your own email to create a private SCADA workspace.' : runtime ? 'Sign in with an account assigned to this project.' : 'Sign in securely with your own account.'}</p>

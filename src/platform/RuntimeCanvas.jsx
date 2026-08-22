@@ -9,6 +9,7 @@ import { seedRuntimeHistory } from '../../shared/runtime-history.js'
 import { GAUGE_START_ANGLE, GAUGE_SWEEP_ANGLE, gaugeAngleFor, gaugeArcPath, gaugePoint, gaugeTicks, gaugeValueState } from '../../shared/gauge.js'
 import { numericDisplayProperties, numericDisplayUnit, numericEngineering, numericValueOutOfRange, resolveGaugeZones, resolveNumericRange } from '../../shared/numeric-tag-config.js'
 import { evaluateAlarmState } from '../../shared/alarm.js'
+import { CHART_XLSX_MIME_TYPE, chartExportCsv, chartExportFileName, chartExportWorkbook, createChartExportData } from '../../shared/chart-export.js'
 
 export function RuntimeCanvas({
   schema,
@@ -908,20 +909,43 @@ function ExpandedChart({ component, tags, histories, historyStorage, onLoadHisto
 
   const preset = chartRangePreset(rangeId)
   const latestTimestamp = latestHistoryTimestamp(histories, tagIds)
-  const activeRange = preset && rangeBounds
+  const activeRange = useMemo(() => preset && rangeBounds
     ? {
         to: Math.max(rangeBounds.to, latestTimestamp || rangeBounds.to),
         from: Math.max(rangeBounds.from, Math.max(rangeBounds.to, latestTimestamp || rangeBounds.to) - preset.durationMs),
       }
-    : null
-  const displayHistories = loadedHistory?.history
+    : null, [latestTimestamp, preset, rangeBounds])
+  const displayHistories = useMemo(() => loadedHistory?.history
     ? mergeHistoricalWithLive(loadedHistory.history, histories, Date.parse(loadedHistory.range?.to), loadedHistory.resolutionMs)
-    : histories
-  const chartProperties = activeRange
+    : histories, [histories, loadedHistory])
+  const chartProperties = useMemo(() => activeRange
     ? { ...component.properties, historyLimit: 2000, range: activeRange }
-    : component.properties
+    : component.properties, [activeRange, component.properties])
+  const chartTitle = component.properties?.label || component.name || 'Telemetry Chart'
   const archiveAvailable = historyStorage?.enabled === true
   const activeRangeLabel = rangeId === 'live' ? 'LIVE' : preset?.label || rangeId
+  const exportData = useMemo(() => createChartExportData({
+    title: chartTitle,
+    rangeLabel: activeRangeLabel,
+    tags,
+    histories: displayHistories,
+    properties: chartProperties,
+    exportedAt: 0,
+  }), [activeRangeLabel, chartProperties, chartTitle, displayHistories, tags])
+  const downloadChart = format => {
+    const currentExport = { ...exportData, exportedAt: Date.now() }
+    if (format === 'xlsx') {
+      downloadBrowserFile(
+        chartExportFileName(currentExport, 'xlsx'),
+        new Blob([chartExportWorkbook(currentExport)], { type: CHART_XLSX_MIME_TYPE }),
+      )
+      return
+    }
+    downloadBrowserFile(
+      chartExportFileName(currentExport, 'csv'),
+      new Blob([chartExportCsv(currentExport)], { type: 'text/csv;charset=utf-8' }),
+    )
+  }
   const status = loading
     ? 'LOADING HISTORICAL DATA…'
     : historyError
@@ -1005,10 +1029,26 @@ function ExpandedChart({ component, tags, histories, historyStorage, onLoadHisto
             </div>
           )}
         </div>
+        <div className="sb-chart-export-actions" aria-label="Download chart data">
+          <button type="button" disabled={loading || exportData.rows.length === 0} onClick={() => downloadChart('csv')}>Download CSV</button>
+          <button type="button" disabled={loading || exportData.rows.length === 0} onClick={() => downloadChart('xlsx')}>Download Excel</button>
+        </div>
       </div>
       <TelemetryChart tags={tags} histories={displayHistories} properties={chartProperties} />
     </section>
   )
+}
+
+function downloadBrowserFile(fileName, blob) {
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = fileName
+  anchor.rel = 'noopener'
+  document.body.append(anchor)
+  anchor.click()
+  anchor.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
 function historyStorageLabel(storage) {

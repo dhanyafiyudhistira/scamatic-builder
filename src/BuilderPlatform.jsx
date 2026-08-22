@@ -1082,7 +1082,7 @@ function ProjectHome({ user, projects, busy, onOpen, onCreated, onProjectsChange
 
   return (
     <div className="sb-home">
-      <header className="sb-home-header"><div><span className="eyebrow">SCADA SCHEMATIC PLATFORM</span><h1>Scamatic<span>.Builder</span></h1></div><div className="sb-user-chip"><UserSettingsMenu user={user} onManageUsers={() => setShowMembers(true)} onChangePassword={() => setShowPassword(true)} onSwitchWorkspace={onSwitchWorkspace} onLogout={onLogout} /></div></header>
+      <header className="sb-home-header"><div className="sb-home-brand"><img className="sb-home-brand-logo" src="/logo-sb.png" alt="" aria-hidden="true" /><div><span className="eyebrow">SCADA SCHEMATIC PLATFORM</span><h1>Scamatic<span>.Builder</span></h1></div></div><div className="sb-user-chip"><UserSettingsMenu user={user} onManageUsers={() => setShowMembers(true)} onChangePassword={() => setShowPassword(true)} onSwitchWorkspace={onSwitchWorkspace} onLogout={onLogout} /></div></header>
       <main>
         <div className="sb-home-lead">
           <div><h2>{runtimeOnly ? 'Assigned runtimes' : 'Projects'}</h2><p>{runtimeOnly ? `Operator access in ${activeWorkspace?.name || 'the active workspace'}. Open a published project to start the runtime.` : 'Build schema-driven SCADA screens from sanitized SVG assets.'}</p></div>
@@ -1172,9 +1172,11 @@ function UserSettingsMenu({ user, onManageUsers, onChangePassword, onSwitchWorks
         {user.workspaces?.length > 1 && <div className="sb-settings-section sb-workspace-switcher"><small>Active workspace</small><select aria-label="Active workspace" value={user.workspaceId} onChange={switchWorkspace} disabled={switching}>{user.workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.name} · {workspace.role}</option>)}</select>{switching && <span>Switching workspace…</span>}</div>}
         <div className="sb-settings-section"><small>Appearance</small><ThemeToneToggle /></div>
         <div className="sb-settings-divider" role="separator" />
-        {user.capabilities?.includes('members.manage') && <button type="button" role="menuitem" onClick={() => act(onManageUsers)}>Manage users</button>}
-        <button type="button" role="menuitem" onClick={() => act(onChangePassword)}>Change password</button>
-        <button type="button" role="menuitem" className="danger" onClick={() => act(onLogout)}>Logout</button>
+        <div className="sb-settings-actions">
+          {user.capabilities?.includes('members.manage') && <button type="button" role="menuitem" onClick={() => act(onManageUsers)}>Manage users</button>}
+          <button type="button" role="menuitem" onClick={() => act(onChangePassword)}>Change password</button>
+          <button type="button" role="menuitem" className="danger" onClick={() => act(onLogout)}>Logout</button>
+        </div>
       </div>}
     </div>
   )
@@ -1198,7 +1200,7 @@ function ProjectCard({ project, runtimeOnly = false, disabled, canManage, canDel
   return (
     <article className={`sb-project-card ${project.hiddenAt ? 'is-hidden' : ''}`} ref={rootRef}>
       <button type="button" className="sb-project-card-open" onClick={() => onOpen(project)} disabled={disabled || (runtimeOnly && !project.activeVersionId)}>
-        <span className="sb-project-icon">SC</span>
+        <span className="sb-project-icon" aria-hidden="true"><img src="/logo-sb.png" alt="" /></span>
         <strong>{project.name}</strong>
         <code>/{project.slug}</code>
         <span>{project.canvas.width} × {project.canvas.height}</span>
@@ -1408,7 +1410,7 @@ function MemberAdminModal({ projects, onClose }) {
             <div className="sb-project-assignment-list">{projects.map(project => {
               const projectId = String(project.id)
               const selected = editingMember.projectIds.includes(projectId)
-              return <label className={`sb-project-assignment ${selected ? 'is-selected' : ''}`} key={project.id}><input type="checkbox" checked={selected} onChange={() => toggleEditedProject(projectId)} disabled={editBusy} /><span className="sb-project-assignment-icon">SC</span><span><strong>{project.name}</strong><small>/{project.slug}</small></span><i>{selected ? '✓' : '+'}</i></label>
+              return <label className={`sb-project-assignment ${selected ? 'is-selected' : ''}`} key={project.id}><input type="checkbox" checked={selected} onChange={() => toggleEditedProject(projectId)} disabled={editBusy} /><span className="sb-project-assignment-icon" aria-hidden="true"><img src="/logo-sb.png" alt="" /></span><span><strong>{project.name}</strong><small>/{project.slug}</small></span><i>{selected ? '✓' : '+'}</i></label>
             })}{projects.length === 0 && <p className="sb-member-empty">Create a project before assigning runtime access.</p>}</div>
             {editError && <div className="sb-form-error" role="alert">{editError}</div>}
             <footer className="sb-member-access-editor-footer"><p>Saving replaces the current assignment and closes the member's active sessions, so removed access cannot remain open.</p><button type="submit" className="primary" disabled={editBusy}>{editBusy ? 'Saving…' : 'Save project access'}</button></footer>
@@ -1430,7 +1432,7 @@ function MemberAdminModal({ projects, onClose }) {
 
             <div className="sb-member-scope">
               <div className="sb-scope-head"><div><span className="eyebrow">PROJECT SCOPE</span><h4>{['OPERATOR', 'VIEWER'].includes(form.role) ? 'Assigned projects' : 'Workspace coverage'}</h4></div>{['OPERATOR', 'VIEWER'].includes(form.role) && <span>{form.projectIds.length}/{projects.length}</span>}</div>
-              {['OPERATOR', 'VIEWER'].includes(form.role) ? <div className="sb-project-assignment-list">{projects.map(project => <label className={`sb-project-assignment ${form.projectIds.includes(project.id) ? 'is-selected' : ''}`} key={project.id}><input type="checkbox" checked={form.projectIds.includes(project.id)} onChange={() => toggleProject(project.id)} /><span className="sb-project-assignment-icon">SC</span><span><strong>{project.name}</strong><small>/{project.slug}</small></span><i>{form.projectIds.includes(project.id) ? '✓' : '+'}</i></label>)}{projects.length === 0 && <p className="sb-member-empty">Create a project before assigning runtime access.</p>}</div> : <div className="sb-global-scope"><span aria-hidden="true">◇</span><strong>No project selection required</strong><p>{selectedRole.label} receives access to every project in this workspace according to its capability set.</p></div>}
+              {['OPERATOR', 'VIEWER'].includes(form.role) ? <div className="sb-project-assignment-list">{projects.map(project => <label className={`sb-project-assignment ${form.projectIds.includes(project.id) ? 'is-selected' : ''}`} key={project.id}><input type="checkbox" checked={form.projectIds.includes(project.id)} onChange={() => toggleProject(project.id)} /><span className="sb-project-assignment-icon" aria-hidden="true"><img src="/logo-sb.png" alt="" /></span><span><strong>{project.name}</strong><small>/{project.slug}</small></span><i>{form.projectIds.includes(project.id) ? '✓' : '+'}</i></label>)}{projects.length === 0 && <p className="sb-member-empty">Create a project before assigning runtime access.</p>}</div> : <div className="sb-global-scope"><span aria-hidden="true">◇</span><strong>No project selection required</strong><p>{selectedRole.label} receives access to every project in this workspace according to its capability set.</p></div>}
             </div>
           </div>
           {success && <div className="sb-notice success" role="status">{success}</div>}

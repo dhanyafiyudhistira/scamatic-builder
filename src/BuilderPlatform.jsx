@@ -687,7 +687,7 @@ export default function BuilderPlatform() {
             {selected ? <ComponentInspector component={selected} components={draft.components} tags={draft.tags} onChange={patch => updateComponent(selected.id, patch)} onDelete={deleteSelected} onDuplicate={duplicateSelected} onAddPopupChild={addExistingPopupControl} onCreatePopupChild={createPopupControl} onDetachPopupChild={detachPopupControl} onReorderPopupChild={movePopupControl} onSelectChild={childId => selectComponent(childId)} /> : selectedIds.length > 1 ? <MultiSelectionActions count={selectedIds.length} onArrange={arrangeSelected} onDuplicate={duplicateSelected} onDelete={deleteSelected} onLock={() => batchPatch(selectedIds, { locked: true }, changeDraft)} onHide={() => batchPatch(selectedIds, { visible: false }, changeDraft)} /> : <p className="sb-muted">Select a component on the canvas or Layers panel.</p>}
           </Panel>
           <Panel title="Project schema"><dl className="sb-metadata"><div><dt>Version</dt><dd>{draft.schemaVersion}</dd></div><div><dt>Profile</dt><dd>{profile.label}</dd></div><div><dt>Components</dt><dd>{draft.components.length}</dd></div><div><dt>Tags</dt><dd>{draft.tags.length}</dd></div><div><dt>Asset</dt><dd>{draft.project.svgAssetId ? 'Sanitized' : 'Missing'}</dd></div><div><dt>History</dt><dd>{editor.canUndo ? 'Available' : 'Clean'}</dd></div></dl></Panel>
-          <Panel title="Published history" description={`${versions.length} snapshots · Publish and restore history`} collapsible defaultOpen={false} storageKey={`scamatic.panel.versions.${currentProject.id}`}><VersionList versions={versions} activeVersionId={currentProject.activeVersionId} canRestore={session.user.capabilities?.includes('project.publish')} onRestore={restoreVersion} /></Panel>
+          <Panel title="Published history" titleInfo="Published history is immutable. Restoring creates the next numbered snapshot and preserves its source." description={`${versions.length} snapshots · Publish and restore history`} collapsible defaultOpen={false} storageKey={`scamatic.panel.versions.${currentProject.id}`}><VersionList versions={versions} activeVersionId={currentProject.activeVersionId} canRestore={session.user.capabilities?.includes('project.publish')} busy={busy} onRestore={restoreVersion} /></Panel>
           {session.user.capabilities?.includes('audit.read') && <Panel title="Recent audit" description={`${auditEvents.length} events · Security and command activity`} collapsible defaultOpen={false} storageKey={`scamatic.panel.audit.${currentProject.id}`}><AuditList events={auditEvents} /></Panel>}
           <Panel title="Shortcuts"><div className="sb-shortcuts"><span><kbd>Arrow</kbd> Nudge 1 px</span><span><kbd>Shift + Arrow</kbd> Nudge by grid</span><span><kbd>Shift + click</kbd> Multi-select</span><span><kbd>Ctrl Z/Y</kbd> Undo/redo</span><span><kbd>Ctrl C/V</kbd> Copy/paste</span><span><kbd>Ctrl D</kbd> Duplicate</span><span><kbd>Delete</kbd> Remove</span></div></Panel>
         </aside>
@@ -1569,12 +1569,41 @@ function MultiSelectionActions({ count, onArrange, onDuplicate, onDelete, onLock
   ]
   return <div className="sb-multi-actions"><p>{count} components selected. Drag one selected component to move the whole group.</p><div className="sb-arrange-grid">{controls.map(([action, icon, label]) => <button key={action} type="button" title={label} aria-label={label} disabled={action.startsWith('distribute') && count < 3} onClick={() => onArrange(action)}>{icon}</button>)}</div><button type="button" onClick={onDuplicate}>Duplicate selection</button><button type="button" onClick={onLock}>Lock selection</button><button type="button" onClick={onHide}>Hide selection</button><button type="button" className="danger" onClick={onDelete}>Delete selection</button></div>
 }
-function VersionList({ versions, activeVersionId, canRestore, onRestore }) {
+function VersionList({ versions, activeVersionId, canRestore, busy = false, onRestore }) {
+  const [openVersionId, setOpenVersionId] = useState(null)
   const nextVersion = nextVersionNumber(versions)
-  return <div className="sb-version-list"><p className="sb-version-help">Published history is immutable. Restoring creates the next numbered snapshot and preserves its source.</p>{versions.map(version => {
+  useEffect(() => {
+    if (openVersionId && !versions.some(version => version.id === openVersionId)) setOpenVersionId(null)
+  }, [openVersionId, versions])
+  return <div className="sb-version-list" onKeyDown={event => {
+    if (event.key !== 'Escape' || !openVersionId) return
+    event.stopPropagation()
+    setOpenVersionId(null)
+  }}>{versions.map((version, index) => {
     const description = describeVersion(version, versions)
     const active = version.id === activeVersionId
-    return <div key={version.id} className={`${active ? 'is-active' : ''} ${description.kind === 'restore' ? 'is-restore' : ''}`}><div className="sb-version-info"><div className="sb-version-heading"><strong>v{version.version}</strong>{description.kind === 'restore' && <b>RESTORED</b>}</div><small><strong>{description.label}</strong><time>{version.createdAt ? new Date(version.createdAt).toLocaleString() : 'Legacy snapshot'}</time></small></div>{active ? <em>ACTIVE</em> : canRestore && <button type="button" title={`Create v${nextVersion} from v${version.version} and make it active`} onClick={() => onRestore(version)}>Restore → v{nextVersion}</button>}</div>
+    const open = openVersionId === version.id
+    const detailsId = `sb-version-details-${index}`
+    const createdAt = version.createdAt ? new Date(version.createdAt) : null
+    const publishedAt = createdAt && Number.isFinite(createdAt.getTime()) ? createdAt : null
+    return <div key={version.id} className={`sb-version-card ${active ? 'is-active' : ''} ${description.kind === 'restore' ? 'is-restore' : ''}`}>
+      <div className="sb-version-card-summary">
+        <div className="sb-version-heading"><strong>v{version.version}</strong>{description.kind === 'restore' && <b>RESTORED</b>}</div>
+        <div className="sb-version-card-actions">
+          {active && <span className="sb-version-active-mark" role="img" aria-label="Active version" title="Active version" />}
+          <button type="button" className="sb-version-details-trigger" aria-label={`${open ? 'Hide' : 'Show'} information for version ${version.version}`} aria-expanded={open} aria-controls={detailsId} title={`${open ? 'Hide' : 'Show'} version information`} onClick={() => setOpenVersionId(current => current === version.id ? null : version.id)}><span aria-hidden="true">i</span></button>
+        </div>
+      </div>
+      {open && <div className="sb-version-details" id={detailsId} role="region" aria-label={`Version ${version.version} information`}>
+        <dl>
+          <div><dt>Snapshot</dt><dd>{description.label}</dd></div>
+          <div><dt>Published</dt><dd><time dateTime={publishedAt?.toISOString()}>{publishedAt ? publishedAt.toLocaleString() : 'Legacy snapshot'}</time></dd></div>
+        </dl>
+        {active
+          ? <span className="sb-version-active-note">This snapshot is currently active.</span>
+          : canRestore && <button type="button" className="sb-version-restore" disabled={busy} title={`Create v${nextVersion} from v${version.version} and make it active`} onClick={() => { setOpenVersionId(null); onRestore(version) }}>Restore → v{nextVersion}</button>}
+      </div>}
+    </div>
   })}{versions.length === 0 && <p className="sb-muted">No published versions.</p>}</div>
 }
 function AuditList({ events }) {
@@ -1586,7 +1615,7 @@ function ValidationPanel({ issues, onReview }) {
   const preview = [...issues].sort((left, right) => (left.severity === 'error' ? 0 : 1) - (right.severity === 'error' ? 0 : 1)).slice(0, 3)
   return <div className="sb-validation-panel-summary">
     <div className={`sb-validation-panel-result ${summary.errors ? 'error' : summary.warnings ? 'warning' : 'ok'}`}>
-      <span aria-hidden="true">{summary.errors ? '!' : summary.warnings ? '△' : '✓'}</span>
+      <span className={!summary.errors && !summary.warnings ? 'sb-validation-ok-mark' : ''} aria-hidden="true">{summary.errors ? '!' : summary.warnings ? '△' : ''}</span>
       <div><strong>{summary.errors ? 'Publish blocked' : summary.warnings ? 'Ready with warnings' : 'Ready to publish'}</strong><small>{summary.errors} errors · {summary.warnings} warnings</small></div>
     </div>
     {preview.length > 0 && <ul className="sb-issue-list">{preview.map((issue, index) => <li key={`${issue.code}-${issue.path}-${index}`} className={issue.severity}><span>{issue.message}</span>{issue.path && <code>{issue.path}</code>}</li>)}</ul>}
@@ -1595,7 +1624,7 @@ function ValidationPanel({ issues, onReview }) {
   </div>
 }
 
-function Panel({ title, description, children, collapsible = false, expandable = false, defaultOpen = true, storageKey }) {
+function Panel({ title, titleInfo = '', description, children, collapsible = false, expandable = false, defaultOpen = true, storageKey }) {
   const [open, setOpen] = useState(() => {
     if (!collapsible) return true
     try {
@@ -1606,6 +1635,7 @@ function Panel({ title, description, children, collapsible = false, expandable =
     }
   })
   const [expanded, setExpanded] = useState(false)
+  const [titleInfoOpen, setTitleInfoOpen] = useState(false)
 
   useEffect(() => {
     if (!collapsible || !storageKey) return
@@ -1615,13 +1645,20 @@ function Panel({ title, description, children, collapsible = false, expandable =
   if (!collapsible) return <section className="sb-panel"><h3>{title}</h3>{children}</section>
   const toggleOpen = () => {
     if (open) setExpanded(false)
+    setTitleInfoOpen(false)
     setOpen(value => !value)
   }
   return <section className={`sb-panel sb-collapsible-panel ${open ? 'is-open' : 'is-closed'} ${expandable ? 'is-expandable' : ''} ${expanded ? 'is-floating' : ''}`}>
-    <div className="sb-panel-heading">
-      <button type="button" className="sb-panel-toggle" aria-expanded={open} onClick={toggleOpen}><span><strong>{title}</strong>{description && <small>{description}</small>}</span><i aria-hidden="true" /></button>
+    <div className={`sb-panel-heading ${titleInfo ? 'has-title-info' : ''}`} onClick={titleInfo ? event => {
+      if (event.target.closest?.('.sb-panel-title-info-trigger, .sb-panel-expand')) return
+      toggleOpen()
+    } : undefined}>
+      {titleInfo
+        ? <><div className="sb-panel-heading-copy"><div className="sb-panel-title-line"><button type="button" className="sb-panel-title-toggle" aria-expanded={open}><strong>{title}</strong></button><button type="button" className="sb-panel-title-info-trigger" aria-label={`${titleInfoOpen ? 'Hide' : 'Show'} information about ${title}`} aria-expanded={titleInfoOpen} title={`${titleInfoOpen ? 'Hide' : 'Show'} information`} onClick={() => setTitleInfoOpen(value => !value)}><span aria-hidden="true">i</span></button></div>{description && <small>{description}</small>}</div><i className="sb-panel-chevron" aria-hidden="true" /></>
+        : <button type="button" className="sb-panel-toggle" aria-expanded={open} onClick={toggleOpen}><span><strong>{title}</strong>{description && <small>{description}</small>}</span><i aria-hidden="true" /></button>}
       {expandable && open && <button type="button" className="sb-panel-expand" aria-label={expanded ? `Return ${title} to sidebar` : `Expand ${title} into floating window`} aria-pressed={expanded} title={expanded ? 'Return to sidebar' : 'Expand into floating window'} onClick={() => setExpanded(value => !value)}><span className="sb-panel-expand-icon" aria-hidden="true" /></button>}
     </div>
+    {titleInfo && titleInfoOpen && <div className="sb-panel-title-info" role="note">{titleInfo}</div>}
     <div className="sb-panel-body" hidden={!open}>{children}</div>
   </section>
 }

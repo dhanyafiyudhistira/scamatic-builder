@@ -1,11 +1,15 @@
 export const MAX_RUNTIME_HISTORY_POINTS = 2000
+const runtimeHistoryStates = new WeakMap()
 
 export function seedRuntimeHistory(snapshots = {}, persisted = {}) {
   const history = {}
   for (const [tagId, points] of Object.entries(persisted)) {
     if (!Array.isArray(points)) continue
     const normalized = points.map(normalizeTelemetrySample).filter(Boolean).sort((left, right) => left.timestamp - right.timestamp)
-    if (normalized.length) history[tagId] = normalized.slice(-MAX_RUNTIME_HISTORY_POINTS)
+    if (normalized.length) {
+      history[tagId] = normalized.slice(-MAX_RUNTIME_HISTORY_POINTS)
+      rememberRuntimeHistoryState(history[tagId], inspectRuntimeHistory(history[tagId]))
+    }
   }
   for (const [tagId, snapshot] of Object.entries(snapshots)) {
     const sample = normalizeTelemetrySample(snapshot)
@@ -20,6 +24,7 @@ export function seedRuntimeHistory(snapshots = {}, persisted = {}) {
     else current.push(sample)
     current.sort((left, right) => left.timestamp - right.timestamp)
     history[tagId] = current.slice(-MAX_RUNTIME_HISTORY_POINTS)
+    rememberRuntimeHistoryState(history[tagId], inspectRuntimeHistory(history[tagId]))
   }
   return history
 }
@@ -28,26 +33,86 @@ export function appendRuntimeHistory(previous = {}, events = [], limit = MAX_RUN
   const safeLimit = Math.max(1, Math.min(MAX_RUNTIME_HISTORY_POINTS, Math.trunc(Number(limit)) || MAX_RUNTIME_HISTORY_POINTS))
   let next = previous
   const touched = new Set()
+  const states = new Map()
 
   for (const event of events) {
     const tagId = typeof event?.tagId === 'string' ? event.tagId : ''
     const sample = normalizeTelemetrySample(event)
     if (!tagId || !sample) continue
     if (next === previous) next = { ...previous }
-    const current = touched.has(tagId) ? next[tagId] : [...(previous[tagId] || [])]
-    touched.add(tagId)
+    const source = previous[tagId] || []
+    const current = touched.has(tagId) ? next[tagId] : [...source]
+    if (!touched.has(tagId)) {
+      touched.add(tagId)
+      states.set(tagId, cachedRuntimeHistoryState(source) || inspectRuntimeHistory(current))
+    }
 
-    const duplicateIndex = current.findIndex(item =>
-      sample.sequence != null && item.sequence != null
-        ? item.sequence === sample.sequence
-        : item.timestamp === sample.timestamp
-    )
-    if (duplicateIndex >= 0) current[duplicateIndex] = sample
-    else current.push(sample)
-    current.sort((left, right) => left.timestamp - right.timestamp)
-    next[tagId] = current.slice(-safeLimit)
+    let state = states.get(tagId)
+    const latest = current.at(-1)
+    const sequenceIsNew = sample.sequence == null
+      || state.maximumSequence == null
+      || sample.sequence > state.maximumSequence
+    const canAppendInOrder = state.sorted
+      && (!latest || (sample.timestamp > latest.timestamp && sequenceIsNew))
+
+    if (canAppendInOrder) {
+      current.push(sample)
+      if (sample.sequence != null && (state.maximumSequence == null || sample.sequence > state.maximumSequence)) {
+        state.maximumSequence = sample.sequence
+      }
+    } else {
+      const duplicateIndex = current.findIndex(item =>
+        sample.sequence != null && item.sequence != null
+          ? item.sequence === sample.sequence
+          : item.timestamp === sample.timestamp
+      )
+      if (duplicateIndex >= 0) current[duplicateIndex] = sample
+      else current.push(sample)
+      current.sort((left, right) => left.timestamp - right.timestamp)
+      state = inspectRuntimeHistory(current)
+      states.set(tagId, state)
+    }
+    const output = current.length > safeLimit ? current.slice(-safeLimit) : current
+    next[tagId] = output
+    rememberRuntimeHistoryState(output, state)
   }
   return next
+}
+
+function inspectRuntimeHistory(points) {
+  let sorted = true
+  let previousTimestamp = -Infinity
+  let maximumSequence = null
+  for (const point of points) {
+    const timestamp = Number(point?.timestamp)
+    if (!Number.isFinite(timestamp) || timestamp < previousTimestamp) sorted = false
+    if (Number.isFinite(timestamp)) previousTimestamp = timestamp
+    const sequence = Number(point?.sequence)
+    if (point?.sequence != null && Number.isFinite(sequence) && (maximumSequence == null || sequence > maximumSequence)) {
+      maximumSequence = sequence
+    }
+  }
+  return { sorted, maximumSequence }
+}
+
+function cachedRuntimeHistoryState(points) {
+  if (!Array.isArray(points)) return null
+  const cached = runtimeHistoryStates.get(points)
+  if (!cached
+    || cached.length !== points.length
+    || cached.firstTimestamp !== points[0]?.timestamp
+    || cached.lastTimestamp !== points.at(-1)?.timestamp) return null
+  return { sorted: cached.sorted, maximumSequence: cached.maximumSequence }
+}
+
+function rememberRuntimeHistoryState(points, state) {
+  runtimeHistoryStates.set(points, {
+    sorted: state.sorted,
+    maximumSequence: state.maximumSequence,
+    length: points.length,
+    firstTimestamp: points[0]?.timestamp,
+    lastTimestamp: points.at(-1)?.timestamp,
+  })
 }
 
 export function normalizeTelemetrySample(sample) {

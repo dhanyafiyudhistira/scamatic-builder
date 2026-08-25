@@ -8,6 +8,7 @@
     "dev:frontend": "vite",
     "dev:server":   "node server/index.js",
     "dev:worker":   "node server/connector-worker.js",
+    "start":        "node server/index.js",
     "build":        "vite build",
     "preview":      "vite preview",
     "test":         "node --test",
@@ -21,6 +22,7 @@
   },
   "dependencies": {
     "body-parser": "^1.20.6",
+    "compression": "^1.8.1",
     "cors":      "^2.8.5",
     "dotenv":    "^16.4.5",
     "express":   "^4.21.0",

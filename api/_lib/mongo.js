@@ -30,6 +30,12 @@ export async function connectMongo() {
   return cache.conn
 }
 
+export async function disconnectMongo() {
+  cache.conn = null
+  cache.promise = null
+  if (mongoose.connection?.readyState !== 0) await mongoose.disconnect()
+}
+
 export function mongoConnectionStatus() {
   const readyState = Number(mongoose.connection?.readyState ?? 0)
   const labels = ['disconnected', 'connected', 'connecting', 'disconnecting']

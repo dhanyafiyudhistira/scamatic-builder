@@ -1,4 +1,9 @@
 import 'dotenv/config'
+import { existsSync } from 'node:fs'
+import { createServer } from 'node:http'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import compression from 'compression'
 import express from 'express'
 import cors from 'cors'
 import healthHandler    from '../api/_handlers/health.js'
@@ -24,18 +29,26 @@ import chartStorageHandler from '../api/_handlers/chart-storage.js'
 import simulatorHandler from '../api/_handlers/simulator.js'
 import simulationSequenceHandler from '../api/_handlers/simulation-sequence.js'
 import { isDatabaseUnavailableError, requestId } from '../api/_lib/security.js'
-import { connectMongo } from '../api/_lib/mongo.js'
+import { connectMongo, disconnectMongo } from '../api/_lib/mongo.js'
 import { warmApiMongo } from './api-mongo-warmup.js'
+import { RuntimeStreamHub } from './connectors/runtime-stream-hub.js'
+import { ManagedConnectorWorker } from './connectors/managed-connector-worker.js'
 
 const app = express()
 const safe = handler => (req, res, next) => Promise.resolve(handler(req, res)).catch(next)
 const production = process.env.NODE_ENV === 'production'
+const connectorPlatformEnabled = process.env.CONNECTOR_PLATFORM_ENABLED === 'true'
+const embeddedConnectorStream = connectorPlatformEnabled && process.env.CONNECTOR_STREAM_MODE === 'embedded'
+const distDirectory = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist')
+let managedConnectorWorker = null
+let runtimeStreamHub = null
 app.disable('x-powered-by')
 app.set('trust proxy', 1)
 
 // CORS only matters for local dev (vite:5173 → express:3001).
 // In production, frontend + /api live on one Vercel origin → no CORS needed.
 app.use(cors({ origin: production ? false : localCorsOrigins(), credentials: !production }))
+app.use(compression())
 app.use(express.json({ limit: '6mb' }))
 app.use((req, res, next) => {
   const correlationId = requestId(req)
@@ -82,6 +95,28 @@ app.all('/api/chart-storage', safe(chartStorageHandler))
 app.all('/api/simulator', safe(simulatorHandler))
 app.all('/api/simulation-sequence', safe(simulationSequenceHandler))
 
+app.get(['/health/data-plane/live', '/health/data-plane/ready'], (req, res) => {
+  const kind = req.path.endsWith('/ready') ? 'readiness' : 'liveness'
+  const health = managedConnectorWorker?.health(kind) || {
+    ok: false,
+    status: embeddedConnectorStream ? 'starting' : 'disabled',
+    mode: embeddedConnectorStream ? 'node-ipc' : 'standalone',
+  }
+  return res.status(kind === 'liveness' || health.ok ? 200 : 503).json({ ...health, check: kind, ts: Date.now() })
+})
+app.get('/runtime-stream', (req, res) => res.status(426).json({ error: 'WebSocket upgrade required.' }))
+
+if (shouldServeFrontend()) {
+  const assetsDirectory = join(distDirectory, 'assets')
+  app.use('/assets', express.static(assetsDirectory, { immutable: true, maxAge: '1y', fallthrough: false }))
+  app.use(express.static(distDirectory, { etag: true, maxAge: 0, index: false }))
+  app.get('*', (req, res, next) => {
+    if (isServicePath(req.path)) return next()
+    res.setHeader('Cache-Control', 'no-cache')
+    return res.sendFile(join(distDirectory, 'index.html'))
+  })
+}
+
 app.use((error, req, res, next) => {
   const correlationId = req.correlationId || requestId(req)
   console.error(JSON.stringify({
@@ -95,13 +130,21 @@ app.use((error, req, res, next) => {
   }))
   if (res.headersSent) return next(error)
   if (isDatabaseUnavailableError(error)) return res.status(503).json({ error: 'Database is temporarily unavailable.', code: 'DATABASE_UNAVAILABLE', correlationId })
-  if (error?.statusCode) return res.status(error.statusCode).json({ error: error.message })
+  const statusCode = Number(error?.statusCode || error?.status)
+  if (Number.isInteger(statusCode) && statusCode >= 400 && statusCode < 500) return res.status(statusCode).json({ error: statusCode === 404 ? 'Not found.' : error.message })
   return res.status(500).json({ error: 'Internal server error.', correlationId })
 })
 
 const PORT = process.env.PORT || 3001
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[Server] Local dev API on http://localhost:${PORT}`)
+const httpServer = createServer(app)
+if (embeddedConnectorStream) {
+  runtimeStreamHub = new RuntimeStreamHub({ httpServer })
+  managedConnectorWorker = new ManagedConnectorWorker({ hub: runtimeStreamHub })
+}
+
+httpServer.listen(PORT, '0.0.0.0', () => {
+  console.log(`[Server] Express listening on http://localhost:${PORT}${shouldServeFrontend() ? ' with frontend assets' : ''}`)
+  if (managedConnectorWorker) managedConnectorWorker.start()
   void warmApiMongo({
     connect: connectMongo,
     shouldRetry: isDatabaseUnavailableError,
@@ -124,9 +167,42 @@ app.listen(PORT, '0.0.0.0', () => {
   })
 })
 
+let shuttingDown = false
+const shutdown = async signal => {
+  if (shuttingDown) return
+  shuttingDown = true
+  console.log(`[Server] ${signal} received; stopping the self-hosted runtime.`)
+  await managedConnectorWorker?.close()
+  await runtimeStreamHub?.close()
+  if (httpServer.listening) await new Promise(resolve => httpServer.close(resolve))
+  await disconnectMongo()
+  console.log('[Server] Self-hosted runtime stopped cleanly.')
+}
+const handleShutdown = signal => {
+  void shutdown(signal)
+    .then(() => process.exit(0))
+    .catch(error => {
+      console.error('[Server] Self-hosted shutdown failed', { code: String(error?.code || error?.name || 'SHUTDOWN_FAILED').slice(0, 80) })
+      process.exit(1)
+    })
+}
+process.once('SIGINT', () => handleShutdown('SIGINT'))
+process.once('SIGTERM', () => handleShutdown('SIGTERM'))
+
 function localCorsOrigins() {
   const configured = String(process.env.APP_ORIGIN || '').split(',').map(value => value.trim()).filter(Boolean)
   return [...new Set([...configured, 'http://localhost:5173', 'http://127.0.0.1:5173'])]
+}
+
+function shouldServeFrontend() {
+  const configured = String(process.env.SERVE_STATIC_FRONTEND || '').trim().toLowerCase()
+  if (configured === 'false') return false
+  if (configured !== 'true' && !production) return false
+  return existsSync(join(distDirectory, 'index.html'))
+}
+
+function isServicePath(path) {
+  return path === '/api' || path.startsWith('/api/') || path === '/health' || path.startsWith('/health/') || path === '/runtime-stream'
 }
 
 function contentSecurityPolicy() {

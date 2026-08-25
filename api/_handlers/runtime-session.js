@@ -98,16 +98,30 @@ function digest(value) { return createHash('sha256').update(String(value)).diges
 
 export function resolveRuntimeStreamUrl() {
   const configured = String(process.env.CONNECTOR_STREAM_PUBLIC_URL || '').trim()
-  if (!configured) {
-    if (process.env.NODE_ENV === 'production') throw Object.assign(new Error('CONNECTOR_STREAM_PUBLIC_URL is required in production.'), { statusCode: 503 })
-    return `ws://localhost:${process.env.CONNECTOR_STREAM_PORT || 3002}/runtime-stream`
-  }
+  if (!configured && process.env.CONNECTOR_STREAM_MODE === 'embedded') return embeddedRuntimeStreamUrl()
+  if (!configured && process.env.NODE_ENV === 'production') throw Object.assign(new Error('CONNECTOR_STREAM_PUBLIC_URL is required in production.'), { statusCode: 503 })
+  if (!configured) return `ws://localhost:${process.env.CONNECTOR_STREAM_PORT || 3002}/runtime-stream`
   let url
   try { url = new URL(configured) } catch { throw Object.assign(new Error('CONNECTOR_STREAM_PUBLIC_URL is invalid.'), { statusCode: 503 }) }
   const validProtocol = process.env.NODE_ENV === 'production' ? url.protocol === 'wss:' : ['ws:', 'wss:'].includes(url.protocol)
   if (!validProtocol || url.username || url.password || url.search || url.hash) throw Object.assign(new Error('CONNECTOR_STREAM_PUBLIC_URL must be a clean WebSocket URL.'), { statusCode: 503 })
   if (url.pathname === '/') url.pathname = '/runtime-stream'
   return url.toString().replace(/\/$/, '')
+}
+
+function embeddedRuntimeStreamUrl() {
+  const configuredOrigin = String(process.env.APP_ORIGIN || '').split(',').map(value => value.trim()).find(Boolean)
+  if (!configuredOrigin) {
+    if (process.env.NODE_ENV === 'production') throw Object.assign(new Error('APP_ORIGIN is required for the embedded runtime stream in production.'), { statusCode: 503 })
+    return `ws://localhost:${process.env.PORT || 3001}/runtime-stream`
+  }
+  let url
+  try { url = new URL(configuredOrigin) } catch { throw Object.assign(new Error('APP_ORIGIN is invalid.'), { statusCode: 503 }) }
+  const validProtocol = process.env.NODE_ENV === 'production' ? url.protocol === 'https:' : ['http:', 'https:'].includes(url.protocol)
+  if (!validProtocol || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw Object.assign(new Error('APP_ORIGIN must be a clean HTTP origin.'), { statusCode: 503 })
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+  url.pathname = '/runtime-stream'
+  return url.toString()
 }
 
 export function runtimeSessionPolicy() {

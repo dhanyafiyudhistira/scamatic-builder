@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createServer } from 'node:http'
 import { RuntimeStreamHub } from '../server/connectors/runtime-stream-hub.js'
 
 test('worker exposes distinct liveness and readiness on the stream port', async t => {
@@ -65,4 +66,25 @@ test('command status push is isolated to the matching actor, project, version, a
   assert.equal(JSON.stringify(messages.actor[0]).includes('must-not-leak'), false)
   assert.equal(messages.other.length, 0)
   assert.equal(messages.viewer.length, 0)
+})
+
+test('runtime stream can share the Express HTTP server without owning its lifecycle', async t => {
+  const httpServer = createServer((request, response) => {
+    response.writeHead(200, { 'Content-Type': 'text/plain' })
+    response.end('express')
+  })
+  const hub = new RuntimeStreamHub({ httpServer })
+  t.after(async () => {
+    if (httpServer.listening) await new Promise(resolve => httpServer.close(resolve))
+  })
+  await new Promise((resolve, reject) => {
+    httpServer.once('error', reject)
+    httpServer.listen(0, '127.0.0.1', resolve)
+  })
+  await hub.ready()
+  const { port } = httpServer.address()
+  assert.equal(await (await fetch(`http://127.0.0.1:${port}/`)).text(), 'express')
+
+  await hub.close()
+  assert.equal(httpServer.listening, true)
 })

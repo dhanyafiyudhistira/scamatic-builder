@@ -46,9 +46,11 @@ test('auth sessions enforce absolute and idle expiry', () => {
 })
 
 test('runtime stream URLs cannot rely on Host headers or insecure production protocols', () => {
-  const previous = snapshotEnvironment(['NODE_ENV', 'CONNECTOR_STREAM_PUBLIC_URL', 'CONNECTOR_STREAM_PORT'])
+  const previous = snapshotEnvironment(['NODE_ENV', 'APP_ORIGIN', 'PORT', 'CONNECTOR_STREAM_MODE', 'CONNECTOR_STREAM_PUBLIC_URL', 'CONNECTOR_STREAM_PORT'])
   try {
     delete process.env.NODE_ENV
+    delete process.env.APP_ORIGIN
+    delete process.env.CONNECTOR_STREAM_MODE
     delete process.env.CONNECTOR_STREAM_PUBLIC_URL
     process.env.CONNECTOR_STREAM_PORT = '3456'
     assert.equal(resolveRuntimeStreamUrl(), 'ws://localhost:3456/runtime-stream')
@@ -59,6 +61,18 @@ test('runtime stream URLs cannot rely on Host headers or insecure production pro
     assert.throws(() => resolveRuntimeStreamUrl(), /clean WebSocket URL/)
     process.env.CONNECTOR_STREAM_PUBLIC_URL = 'wss://stream.example/runtime-stream'
     assert.equal(resolveRuntimeStreamUrl(), 'wss://stream.example/runtime-stream')
+
+    delete process.env.CONNECTOR_STREAM_PUBLIC_URL
+    process.env.CONNECTOR_STREAM_MODE = 'embedded'
+    process.env.APP_ORIGIN = 'https://scada.example'
+    assert.equal(resolveRuntimeStreamUrl(), 'wss://scada.example/runtime-stream')
+    process.env.APP_ORIGIN = 'http://scada.example'
+    assert.throws(() => resolveRuntimeStreamUrl(), /clean HTTP origin/)
+
+    delete process.env.NODE_ENV
+    delete process.env.APP_ORIGIN
+    process.env.PORT = '4567'
+    assert.equal(resolveRuntimeStreamUrl(), 'ws://localhost:4567/runtime-stream')
   } finally {
     restoreEnvironment(previous)
   }

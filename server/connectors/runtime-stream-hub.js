@@ -8,10 +8,11 @@ import { runtimeCommandProjection } from '../../shared/command-lifecycle.js'
 const COMMAND_EXECUTE = 'command.execute'
 
 export class RuntimeStreamHub {
-  constructor({ port = 3002, path = '/runtime-stream', flushMs = 100, revalidateMs = 5_000, allowedOriginList = allowedOrigins(), healthProvider = defaultHealth } = {}) {
+  constructor({ port = 3002, host = '0.0.0.0', httpServer = null, path = '/runtime-stream', flushMs = 100, revalidateMs = 5_000, allowedOriginList = allowedOrigins(), healthProvider = defaultHealth } = {}) {
     this.allowedOriginList = allowedOriginList
     this.healthProvider = healthProvider
-    this.httpServer = createServer((request, response) => this.#handleHttp(request, response))
+    this.ownsHttpServer = !httpServer
+    this.httpServer = httpServer || createServer((request, response) => this.#handleHttp(request, response))
     this.server = new WebSocketServer({
       server: this.httpServer,
       path,
@@ -21,13 +22,15 @@ export class RuntimeStreamHub {
     this.flushMs = flushMs
     this.revalidateMs = revalidateMs
     this.server.on('connection', (socket, request) => this.#authenticate(socket, request))
-    this.listening = new Promise((resolve, reject) => {
-      const onError = error => { this.httpServer.off('listening', onListening); reject(error) }
-      const onListening = () => { this.httpServer.off('error', onError); resolve() }
-      this.httpServer.once('error', onError)
-      this.httpServer.once('listening', onListening)
-      this.httpServer.listen(port, '0.0.0.0')
-    })
+    this.listening = this.ownsHttpServer
+      ? new Promise((resolve, reject) => {
+          const onError = error => { this.httpServer.off('listening', onListening); reject(error) }
+          const onListening = () => { this.httpServer.off('error', onError); resolve() }
+          this.httpServer.once('error', onError)
+          this.httpServer.once('listening', onListening)
+          this.httpServer.listen(port, host)
+        })
+      : Promise.resolve()
   }
 
   ready() {
@@ -132,7 +135,7 @@ export class RuntimeStreamHub {
   async close() {
     for (const client of this.clients) client.socket.terminate()
     await new Promise(resolve => this.server.close(resolve))
-    if (this.httpServer.listening) await new Promise(resolve => this.httpServer.close(resolve))
+    if (this.ownsHttpServer && this.httpServer.listening) await new Promise(resolve => this.httpServer.close(resolve))
   }
 }
 

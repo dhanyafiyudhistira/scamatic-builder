@@ -120,26 +120,42 @@ Frontend: `http://localhost:5173`
 
 Local API: `http://localhost:3001`
 
-### Local Caddy gateway
+### Self-hosted single-origin runtime
 
-After building the frontend, `Caddyfile` exposes the combined local application
-at `http://127.0.0.1:8088`. Requests under `/api/*` retain their prefix and are
-proxied to Express on `127.0.0.1:3001`. Requests under `/api-fast/*` have that
-prefix removed and are proxied to Axum, which defaults to
-`127.0.0.1:3003`. All other paths serve `dist`, with `/index.html` as the SPA
-fallback for nested routes.
+The recommended self-hosted path exposes the frontend, REST API, and runtime
+WebSocket from Express on one port. In `embedded` mode Express also supervises
+the existing Node connector worker over private process IPC, so neither the
+worker nor a future Rust data-plane needs a browser-facing port.
 
 ```powershell
 npm run build
-caddy validate --config .\Caddyfile
-caddy run --config .\Caddyfile
+$env:APP_ORIGIN = 'http://127.0.0.1:3001'
+$env:CONNECTOR_PLATFORM_ENABLED = 'true'
+$env:CONNECTOR_EXECUTION_MODE = 'worker'
+$env:CONNECTOR_STREAM_MODE = 'embedded'
+$env:SERVE_STATIC_FRONTEND = 'true'
+npm run start
 ```
 
-Port `3002` remains reserved for the connector runtime stream. To use a
-different Axum address, set it before starting Caddy:
+The application is then available at `http://127.0.0.1:3001`, including
+`/api/*` and `/runtime-stream`. Do not start `npm run dev:worker` in embedded
+mode because Express already owns and supervises that child process. Existing
+deployments can retain `CONNECTOR_STREAM_MODE=standalone`, port `3002`, and an
+explicit `CONNECTOR_STREAM_PUBLIC_URL` while migrating.
+
+This first hybrid foundation still executes connector telemetry and RPC in the
+existing Node worker. The private IPC boundary is the compatibility seam for a
+future prebuilt Rust/Tokio worker; enabling embedded mode does not change
+command ownership or acknowledgment semantics.
+
+### Optional Caddy edge
+
+Caddy is no longer required for local or LAN use. It remains useful for public
+TLS and certificate management; the included `Caddyfile` simply forwards the
+single Express origin, including WebSocket upgrades:
 
 ```powershell
-$env:AXUM_UPSTREAM = '127.0.0.1:4000'
+caddy validate --config .\Caddyfile
 caddy run --config .\Caddyfile
 ```
 
@@ -156,8 +172,10 @@ unrelated query timeout.
 
 Use `GET /api/health` as the API liveness probe and
 `GET /api/health?check=readiness` as the database-backed readiness probe. The
-connector worker exposes `GET /health/live` and `GET /health/ready` on
-`CONNECTOR_STREAM_PORT`. The worker retries transient MongoDB startup failures
+embedded connector worker exposes `GET /health/data-plane/live` and
+`GET /health/data-plane/ready` through Express. Standalone mode retains
+`GET /health/live` and `GET /health/ready` on `CONNECTOR_STREAM_PORT`. The
+worker retries transient MongoDB startup failures
 with bounded exponential backoff; tune it with
 `CONNECTOR_MONGO_STARTUP_MAX_ATTEMPTS`, `CONNECTOR_MONGO_RETRY_INITIAL_MS`, and
 `CONNECTOR_MONGO_RETRY_MAX_MS`. A max-attempt value of `0` keeps retrying while

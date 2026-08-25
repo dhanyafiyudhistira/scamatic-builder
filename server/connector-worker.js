@@ -6,6 +6,7 @@ import { ConnectorRuntime } from './connectors/connector-runtime.js'
 import { createConnectorDriver } from './connectors/driver-registry.js'
 import { selectConnectorRuntimeSchema } from './connectors/runtime-schema-selection.js'
 import { RuntimeStreamHub } from './connectors/runtime-stream-hub.js'
+import { IpcRuntimeEventSink } from './connectors/runtime-ipc.js'
 import { chartStorageConfig, publicChartStorageConfig } from '../shared/chart-storage-config.js'
 import { ensureChartTelemetryStore, writeChartTelemetrySamples } from '../api/_lib/chart-telemetry-store.js'
 import { TelemetryBatchWriter } from './connectors/telemetry-batch-writer.js'
@@ -34,10 +35,14 @@ async function main() {
   const environmentRef = process.env.CONNECTOR_ENVIRONMENT || 'staging'
   const startedAt = Date.now()
   const startup = { initialized: false, phase: 'starting', attempts: 0 }
-  const hub = new RuntimeStreamHub({
-    port: Number(process.env.CONNECTOR_STREAM_PORT || 3002),
-    healthProvider: kind => workerHealth(kind, startup, startedAt, environmentRef),
-  })
+  const ipcTransport = process.env.CONNECTOR_STREAM_TRANSPORT === 'ipc' && typeof process.send === 'function'
+  const healthProvider = kind => workerHealth(kind, startup, startedAt, environmentRef)
+  const hub = ipcTransport
+    ? new IpcRuntimeEventSink({ healthProvider })
+    : new RuntimeStreamHub({
+        port: Number(process.env.CONNECTOR_STREAM_PORT || 3002),
+        healthProvider,
+      })
   await hub.ready()
   try {
     startup.phase = 'connecting-mongodb'
@@ -331,7 +336,9 @@ async function main() {
   }
   process.once('SIGINT', shutdown)
   process.once('SIGTERM', shutdown)
-  console.log(`[ConnectorWorker] listening on :${process.env.CONNECTOR_STREAM_PORT || 3002} for ${environmentRef}`)
+  console.log(ipcTransport
+    ? `[ConnectorWorker] connected to the Express runtime stream over private IPC for ${environmentRef}`
+    : `[ConnectorWorker] listening on :${process.env.CONNECTOR_STREAM_PORT || 3002} for ${environmentRef}`)
 }
 
 async function migrateLegacyCommandHealth(environmentRef) {

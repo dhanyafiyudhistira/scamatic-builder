@@ -125,7 +125,7 @@ Local API: `http://localhost:3001`
 The recommended self-hosted path exposes the frontend, REST API, and runtime
 WebSocket from Express on one port. In `embedded` mode Express also supervises
 the existing Node connector worker over private process IPC, so neither the
-worker nor a future Rust data-plane needs a browser-facing port.
+worker nor the Rust shadow data-plane needs a browser-facing port.
 
 ```powershell
 npm run build
@@ -143,10 +143,33 @@ mode because Express already owns and supervises that child process. Existing
 deployments can retain `CONNECTOR_STREAM_MODE=standalone`, port `3002`, and an
 explicit `CONNECTOR_STREAM_PUBLIC_URL` while migrating.
 
-This first hybrid foundation still executes connector telemetry and RPC in the
-existing Node worker. The private IPC boundary is the compatibility seam for a
-future prebuilt Rust/Tokio worker; enabling embedded mode does not change
-command ownership or acknowledgment semantics.
+The Node worker remains the sole active connector telemetry and RPC executor.
+The private IPC boundary can additionally mirror sanitized events into the
+Rust/Tokio/Axum shadow worker without changing command ownership or
+acknowledgment semantics.
+
+### Rust shadow data-plane (Phase 2)
+
+Phase 2 compiles a real Rust worker that validates mirrored telemetry and
+operator-safe command status, tracks counters, and exposes private Axum health
+and Prometheus metrics on a dynamic `127.0.0.1` port. It never receives MongoDB
+or connector credentials, never contacts ThingsBoard, and never performs an
+actuation.
+
+```powershell
+npm run rust:test
+npm run rust:build
+$env:SCADA_RUST_SHADOW_ENABLED = 'true'
+npm run start
+```
+
+Development automatically discovers `data-plane-rs/target/release` and then
+`target/debug`. A packaged deployment can set `SCADA_RUST_SHADOW_BINARY` to an
+absolute prebuilt binary path, so the eventual installer will not require a
+Rust toolchain. Shadow readiness is available through Express at
+`GET /health/data-plane/shadow`; the response also reports the private Axum
+health URL and observation counters. Set `SCADA_RUST_SHADOW_ENABLED=false` to
+roll back instantly to the Phase 1 Node-only behavior.
 
 ### Optional Caddy edge
 
@@ -175,6 +198,8 @@ Use `GET /api/health` as the API liveness probe and
 embedded connector worker exposes `GET /health/data-plane/live` and
 `GET /health/data-plane/ready` through Express. Standalone mode retains
 `GET /health/live` and `GET /health/ready` on `CONNECTOR_STREAM_PORT`. The
+optional Rust observer reports separately through
+`GET /health/data-plane/shadow` and never gates active worker readiness. The
 worker retries transient MongoDB startup failures
 with bounded exponential backoff; tune it with
 `CONNECTOR_MONGO_STARTUP_MAX_ATTEMPTS`, `CONNECTOR_MONGO_RETRY_INITIAL_MS`, and

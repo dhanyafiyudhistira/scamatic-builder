@@ -1,0 +1,18 @@
+[package]
+name = "scamatic-data-plane"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Private Rust shadow data-plane worker for SCAMATIC Builder"
+license = "MIT"
+
+[dependencies]
+axum = "0.8.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["io-std", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = true

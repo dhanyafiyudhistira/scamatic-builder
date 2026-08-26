@@ -31,17 +31,25 @@ test('managed worker IPC router rejects foreign frames and forwards valid batche
   const telemetry = []
   const commands = []
   const health = []
+  const mirroredTelemetry = []
+  const mirroredCommands = []
   const hub = {
     publish: event => telemetry.push(event),
     publishCommand: event => commands.push(event),
   }
   assert.equal(routeRuntimeIpcMessage({ type: RUNTIME_IPC_TYPES.telemetry }, hub), false)
-  assert.equal(routeRuntimeIpcMessage(runtimeIpcMessage(RUNTIME_IPC_TYPES.telemetry, { events: [telemetryEvent(3)] }), hub), true)
-  assert.equal(routeRuntimeIpcMessage(runtimeIpcMessage(RUNTIME_IPC_TYPES.command, { event: { requestId: 'request-2' } }), hub), true)
+  assert.equal(routeRuntimeIpcMessage(runtimeIpcMessage(RUNTIME_IPC_TYPES.telemetry, { events: [telemetryEvent(3)], dropped: 2 }), hub, { onTelemetryBatch: (events, dropped) => mirroredTelemetry.push({ events, dropped }) }), true)
+  assert.equal(routeRuntimeIpcMessage(runtimeIpcMessage(RUNTIME_IPC_TYPES.command, { event: { requestId: 'request-2' } }), hub, { onCommandStatus: event => mirroredCommands.push(event) }), true)
   assert.equal(routeRuntimeIpcMessage(runtimeIpcMessage(RUNTIME_IPC_TYPES.health, { readiness: { ok: true } }), hub, { onHealth: value => health.push(value) }), true)
   assert.equal(telemetry[0].value, 3)
   assert.equal(commands[0].requestId, 'request-2')
   assert.equal(health[0].readiness.ok, true)
+  assert.equal(mirroredTelemetry[0].events[0].value, 3)
+  assert.equal(mirroredTelemetry[0].dropped, 2)
+  assert.equal(mirroredCommands[0].requestId, 'request-2')
+
+  assert.doesNotThrow(() => routeRuntimeIpcMessage(runtimeIpcMessage(RUNTIME_IPC_TYPES.telemetry, { events: [telemetryEvent(4)] }), hub, { onTelemetryBatch: () => { throw new Error('shadow failed') } }))
+  assert.equal(telemetry.at(-1).value, 4)
 })
 
 test('managed worker reports readiness from a live private IPC heartbeat', async () => {

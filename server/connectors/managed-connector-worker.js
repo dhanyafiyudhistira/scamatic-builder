@@ -7,6 +7,7 @@ const DEFAULT_ENTRYPOINT = fileURLToPath(new URL('../connector-worker.js', impor
 export class ManagedConnectorWorker {
   constructor({
     hub,
+    observer = null,
     entrypoint = DEFAULT_ENTRYPOINT,
     forkImpl = fork,
     environment = process.env,
@@ -18,6 +19,7 @@ export class ManagedConnectorWorker {
   } = {}) {
     if (!hub) throw new Error('Managed connector worker requires a runtime stream hub.')
     this.hub = hub
+    this.observer = observer
     this.entrypoint = entrypoint
     this.forkImpl = forkImpl
     this.environment = environment
@@ -92,6 +94,8 @@ export class ManagedConnectorWorker {
           this.lastHeartbeatAt = Date.now()
           if (health?.readiness?.ok === true) this.restartAttempts = 0
         },
+        onTelemetryBatch: (events, dropped) => this.observer?.publishTelemetryBatch?.(events, dropped),
+        onCommandStatus: event => this.observer?.publishCommandStatus?.(event),
       })
     })
     child.once('error', error => {
@@ -119,7 +123,7 @@ export class ManagedConnectorWorker {
   }
 }
 
-export function routeRuntimeIpcMessage(message, hub, { onHello = () => {}, onHealth = () => {} } = {}) {
+export function routeRuntimeIpcMessage(message, hub, { onHello = () => {}, onHealth = () => {}, onTelemetryBatch = () => {}, onCommandStatus = () => {} } = {}) {
   if (!isRuntimeIpcMessage(message)) return false
   if (message.type === RUNTIME_IPC_TYPES.hello) {
     onHello(message.payload)
@@ -132,13 +136,24 @@ export function routeRuntimeIpcMessage(message, hub, { onHello = () => {}, onHea
   if (message.type === RUNTIME_IPC_TYPES.telemetry) {
     const events = Array.isArray(message.payload.events) ? message.payload.events.slice(0, 20_000) : []
     for (const event of events) if (event && typeof event === 'object') hub.publish(event)
+    safelyNotify(onTelemetryBatch, events, message.payload.dropped)
     return true
   }
   if (message.type === RUNTIME_IPC_TYPES.command) {
-    if (message.payload.event && typeof message.payload.event === 'object') hub.publishCommand(message.payload.event)
+    if (message.payload.event && typeof message.payload.event === 'object') {
+      hub.publishCommand(message.payload.event)
+      safelyNotify(onCommandStatus, message.payload.event)
+    }
     return true
   }
   return false
+}
+
+function safelyNotify(callback, ...values) {
+  try { callback(...values) } catch {
+    // Shadow observers are intentionally best-effort and cannot fail the
+    // active WebSocket or RPC status path.
+  }
 }
 
 function positiveInteger(value, fallback) {

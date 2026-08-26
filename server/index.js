@@ -33,15 +33,18 @@ import { connectMongo, disconnectMongo } from '../api/_lib/mongo.js'
 import { warmApiMongo } from './api-mongo-warmup.js'
 import { RuntimeStreamHub } from './connectors/runtime-stream-hub.js'
 import { ManagedConnectorWorker } from './connectors/managed-connector-worker.js'
+import { RustShadowWorker } from './connectors/rust-shadow-worker.js'
 
 const app = express()
 const safe = handler => (req, res, next) => Promise.resolve(handler(req, res)).catch(next)
 const production = process.env.NODE_ENV === 'production'
 const connectorPlatformEnabled = process.env.CONNECTOR_PLATFORM_ENABLED === 'true'
 const embeddedConnectorStream = connectorPlatformEnabled && process.env.CONNECTOR_STREAM_MODE === 'embedded'
+const rustShadowEnabled = embeddedConnectorStream && process.env.SCADA_RUST_SHADOW_ENABLED === 'true'
 const distDirectory = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist')
 let managedConnectorWorker = null
 let runtimeStreamHub = null
+let rustShadowWorker = null
 app.disable('x-powered-by')
 app.set('trust proxy', 1)
 
@@ -104,6 +107,15 @@ app.get(['/health/data-plane/live', '/health/data-plane/ready'], (req, res) => {
   }
   return res.status(kind === 'liveness' || health.ok ? 200 : 503).json({ ...health, check: kind, ts: Date.now() })
 })
+app.get('/health/data-plane/shadow', (req, res) => {
+  const health = rustShadowWorker?.health() || {
+    ok: false,
+    status: rustShadowEnabled ? 'starting' : 'disabled',
+    mode: 'rust-shadow',
+    active: false,
+  }
+  return res.status(!rustShadowEnabled || health.ok ? 200 : 503).json({ ...health, enabled: rustShadowEnabled, ts: Date.now() })
+})
 app.get('/runtime-stream', (req, res) => res.status(426).json({ error: 'WebSocket upgrade required.' }))
 
 if (shouldServeFrontend()) {
@@ -139,11 +151,13 @@ const PORT = process.env.PORT || 3001
 const httpServer = createServer(app)
 if (embeddedConnectorStream) {
   runtimeStreamHub = new RuntimeStreamHub({ httpServer })
-  managedConnectorWorker = new ManagedConnectorWorker({ hub: runtimeStreamHub })
+  rustShadowWorker = rustShadowEnabled ? new RustShadowWorker() : null
+  managedConnectorWorker = new ManagedConnectorWorker({ hub: runtimeStreamHub, observer: rustShadowWorker })
 }
 
 httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`[Server] Express listening on http://localhost:${PORT}${shouldServeFrontend() ? ' with frontend assets' : ''}`)
+  if (rustShadowWorker) rustShadowWorker.start()
   if (managedConnectorWorker) managedConnectorWorker.start()
   void warmApiMongo({
     connect: connectMongo,
@@ -173,6 +187,7 @@ const shutdown = async signal => {
   shuttingDown = true
   console.log(`[Server] ${signal} received; stopping the self-hosted runtime.`)
   await managedConnectorWorker?.close()
+  await rustShadowWorker?.close()
   await runtimeStreamHub?.close()
   if (httpServer.listening) await new Promise(resolve => httpServer.close(resolve))
   await disconnectMongo()

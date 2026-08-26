@@ -18,7 +18,11 @@
     "simulate:thingsboard": "node scripts/thingsboard-simulator.js",
     "verify:thingsboard-simulator": "node scripts/verify-thingsboard-simulator.js",
     "smoke:thingsboard-simulator": "node scripts/smoke-thingsboard-simulator.js",
-    "smoke:control-plane": "node scripts/smoke-control-plane.js"
+    "smoke:control-plane": "node scripts/smoke-control-plane.js",
+    "rust:fmt":    "cargo fmt --manifest-path data-plane-rs/Cargo.toml --check",
+    "rust:test":   "cargo test --manifest-path data-plane-rs/Cargo.toml",
+    "rust:build":  "cargo build --release --manifest-path data-plane-rs/Cargo.toml",
+    "smoke:rust-shadow": "node scripts/smoke-rust-shadow.js"
   },
   "dependencies": {
     "body-parser": "^1.20.6",

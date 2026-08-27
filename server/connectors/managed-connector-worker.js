@@ -1,6 +1,6 @@
 import { fork } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { isRuntimeIpcMessage, RUNTIME_IPC_TYPES } from './runtime-ipc.js'
+import { isRuntimeIpcMessage, runtimeControlMessage, RUNTIME_CONTROL_TYPES, RUNTIME_IPC_TYPES } from './runtime-ipc.js'
 
 const DEFAULT_ENTRYPOINT = fileURLToPath(new URL('../connector-worker.js', import.meta.url))
 
@@ -64,6 +64,17 @@ export class ManagedConnectorWorker {
         ...(workerReadiness?.checks || {}),
         worker: responsive ? 'connected' : this.child ? 'unresponsive' : this.stopping ? 'stopping' : 'restarting',
       },
+    }
+  }
+
+  requestCommandPoll() {
+    const child = this.child
+    if (this.stopping || !child || child.connected === false || typeof child.send !== 'function') return false
+    try {
+      return child.send(runtimeControlMessage(RUNTIME_CONTROL_TYPES.commandWake), () => {}) !== false
+    } catch {
+      // The durable polling path remains authoritative if IPC is unavailable.
+      return false
     }
   }
 

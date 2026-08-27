@@ -17,6 +17,7 @@ const event = {
   tagId: 'tag-a',
   status: 'dispatched',
   correlationId: 'correlation-1',
+  executionMode: 'worker',
 }
 
 test('terminal command is persisted and pushed before its deferred audit write', async () => {
@@ -25,7 +26,7 @@ test('terminal command is persisted and pushed before its deferred audit write',
   let releaseAudit
   let auditPromise
   const auditGate = new Promise(resolve => { releaseAudit = resolve })
-  const completed = { ...event, status: 'acknowledged', terminalAuditPending: true, resultSummary: { message: 'Command acknowledged.' } }
+  const completed = { ...event, status: 'acknowledged', terminalAuditPending: true, completedAt: new Date('2026-01-01T00:00:00.000Z'), resultSummary: { message: 'Command acknowledged.' } }
   const commandEvents = {
     findOneAndUpdate(filter, update) {
       order.push('terminal-persist')
@@ -60,6 +61,7 @@ test('terminal command is persisted and pushed before its deferred audit write',
     commandEvents,
     auditEvents,
     scheduleAudit: promise => { auditPromise = promise },
+    retentionPolicy: { enabled: true, acknowledgedDays: 90, failureDays: 90 },
   })
 
   assert.equal(result, completed)
@@ -74,6 +76,7 @@ test('terminal command is persisted and pushed before its deferred audit write',
   await auditPromise
   assert.deepEqual(order, ['terminal-persist', 'websocket-push', 'audit-start', 'audit-finish', 'audit-pending-cleared'])
   assert.equal(commandUpdates[1].update.$set.terminalAuditPending, false)
+  assert.equal(commandUpdates[1].update.$set.purgeAt.toISOString(), '2026-04-01T00:00:00.000Z')
 })
 
 test('a stale completion cannot overwrite an existing terminal command', async () => {

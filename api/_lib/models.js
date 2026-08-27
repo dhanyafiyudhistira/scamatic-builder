@@ -399,12 +399,22 @@ const commandEventSchema = new mongoose.Schema({
   upstreamCompletedAt: { type: Date, default: null },
   completedAt: { type: Date, default: null },
   terminalAuditPending: { type: Boolean, default: false },
+  // Intentionally not a Mongoose TTL index. The low-impact janitor deletes
+  // bounded batches only after every retention safety check has passed.
+  purgeAt: { type: Date, default: undefined },
 }, { timestamps: true })
 commandEventSchema.index({ projectId: 1, requestId: 1 }, { unique: true })
 commandEventSchema.index({ projectId: 1, createdAt: -1 })
 commandEventSchema.index({ status: 1, executionMode: 1, createdAt: 1 })
 commandEventSchema.index({ terminalAuditPending: 1, completedAt: 1 }, { partialFilterExpression: { terminalAuditPending: true } })
 export const CommandEvent = defineModel('ScadaCommandEvent', commandEventSchema)
+
+const commandRetentionLeaseSchema = new mongoose.Schema({
+  _id: { type: String, required: true },
+  ownerId: { type: String, required: true },
+  leaseUntil: { type: Date, required: true },
+}, { timestamps: true })
+export const CommandRetentionLease = defineModel('ScadaCommandRetentionLease', commandRetentionLeaseSchema)
 
 const requestLimitSchema = new mongoose.Schema({
   _id: { type: String, required: true },

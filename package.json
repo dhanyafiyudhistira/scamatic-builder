@@ -19,6 +19,8 @@
     "verify:thingsboard-simulator": "node scripts/verify-thingsboard-simulator.js",
     "smoke:thingsboard-simulator": "node scripts/smoke-thingsboard-simulator.js",
     "smoke:control-plane": "node scripts/smoke-control-plane.js",
+    "audit:rpc-retention": "node scripts/audit-rpc-retention.js",
+    "migrate:rpc-retention": "node scripts/migrate-rpc-retention.js",
     "rust:fmt":    "cargo fmt --manifest-path data-plane-rs/Cargo.toml --check",
     "rust:test":   "cargo test --manifest-path data-plane-rs/Cargo.toml",
     "rust:build":  "cargo build --release --manifest-path data-plane-rs/Cargo.toml",

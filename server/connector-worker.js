@@ -6,7 +6,7 @@ import { ConnectorRuntime } from './connectors/connector-runtime.js'
 import { createConnectorDriver } from './connectors/driver-registry.js'
 import { selectConnectorRuntimeSchema } from './connectors/runtime-schema-selection.js'
 import { RuntimeStreamHub } from './connectors/runtime-stream-hub.js'
-import { IpcRuntimeEventSink } from './connectors/runtime-ipc.js'
+import { IpcRuntimeEventSink, routeRuntimeControlMessage } from './connectors/runtime-ipc.js'
 import { chartStorageConfig, publicChartStorageConfig } from '../shared/chart-storage-config.js'
 import { ensureChartTelemetryStore, writeChartTelemetrySamples } from '../api/_lib/chart-telemetry-store.js'
 import { TelemetryBatchWriter } from './connectors/telemetry-batch-writer.js'
@@ -20,6 +20,7 @@ import { dispatchRuntimeEvent } from './connectors/runtime-event-dispatch.js'
 import { flushPendingTerminalCommandAudits, persistAndPublishTerminalCommand } from './connectors/command-completion.js'
 import { createAdaptiveRecoveryScheduler } from './connectors/adaptive-recovery-scheduler.js'
 import { createKeyedTaskQueue } from './connectors/keyed-task-queue.js'
+import { createWakeablePoller } from './connectors/wakeable-poller.js'
 
 if (process.env.CONNECTOR_PLATFORM_ENABLED !== 'true') {
   console.error('[ConnectorWorker] CONNECTOR_PLATFORM_ENABLED is not true; refusing to start.')
@@ -294,27 +295,29 @@ async function main() {
   startup.initialized = true
   startup.phase = 'ready'
   const reloadTimer = setInterval(() => reload().catch(error => console.error('[ConnectorWorker] reload failed', error.message)), 10_000)
-  let commandPollPromise = null
+  let lastCommandPollErrorAt = 0
+  const commandPoller = createWakeablePoller({
+    poll: () => dispatchCommands(runtimes, hub, commandHealthWriter, terminalAuditRecovery, commandQueue),
+    intervalMs: boundedInteger(process.env.CONNECTOR_COMMAND_POLL_MS, 50, 5_000, 250),
+    onError: error => {
+      const now = Date.now()
+      if (now - lastCommandPollErrorAt < 10_000) return
+      lastCommandPollErrorAt = now
+      console.error('[ConnectorWorker] command poll failed', { code: error?.code || error?.name || 'COMMAND_POLL_FAILED' })
+    },
+  })
+  const onControlMessage = message => routeRuntimeControlMessage(message, {
+    onCommandWake: () => commandPoller.request(),
+  })
+  if (ipcTransport) process.on('message', onControlMessage)
+  await commandPoller.start()
   let stopping = false
-  const pollCommands = () => {
-    if (stopping) return Promise.resolve(0)
-    if (commandPollPromise) return commandPollPromise
-    const poll = dispatchCommands(runtimes, hub, commandHealthWriter, terminalAuditRecovery, commandQueue)
-      .catch(error => {
-        console.error('[ConnectorWorker] command poll failed', error.message)
-        return 0
-      })
-    commandPollPromise = poll
-    void poll.finally(() => { if (commandPollPromise === poll) commandPollPromise = null })
-    return poll
-  }
-  await pollCommands()
-  const commandTimer = setInterval(() => { void pollCommands() }, 250)
   const shutdown = async () => {
     if (stopping) return
     stopping = true
-    clearInterval(reloadTimer); clearInterval(commandTimer)
-    if (commandPollPromise) await commandPollPromise
+    if (ipcTransport) process.off('message', onControlMessage)
+    clearInterval(reloadTimer)
+    await commandPoller.stop()
     const commandQueueStats = await commandQueue.close({
       timeoutMs: boundedInteger(process.env.CONNECTOR_COMMAND_SHUTDOWN_MS, 1_000, 120_000, 35_000),
       cancelPending: true,

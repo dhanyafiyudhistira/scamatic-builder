@@ -34,6 +34,7 @@ import { warmApiMongo } from './api-mongo-warmup.js'
 import { RuntimeStreamHub } from './connectors/runtime-stream-hub.js'
 import { ManagedConnectorWorker } from './connectors/managed-connector-worker.js'
 import { RustShadowWorker } from './connectors/rust-shadow-worker.js'
+import { CommandRetentionJanitor } from './connectors/command-retention-janitor.js'
 
 const app = express()
 const safe = handler => (req, res, next) => Promise.resolve(handler(req, res)).catch(next)
@@ -41,10 +42,12 @@ const production = process.env.NODE_ENV === 'production'
 const connectorPlatformEnabled = process.env.CONNECTOR_PLATFORM_ENABLED === 'true'
 const embeddedConnectorStream = connectorPlatformEnabled && process.env.CONNECTOR_STREAM_MODE === 'embedded'
 const rustShadowEnabled = embeddedConnectorStream && process.env.SCADA_RUST_SHADOW_ENABLED === 'true'
+const commandWakeEnabled = embeddedConnectorStream && process.env.CONNECTOR_COMMAND_WAKE_ENABLED !== 'false'
 const distDirectory = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist')
 let managedConnectorWorker = null
 let runtimeStreamHub = null
 let rustShadowWorker = null
+let commandRetentionJanitor = null
 app.disable('x-powered-by')
 app.set('trust proxy', 1)
 
@@ -89,7 +92,9 @@ app.all('/api/publish',   safe(publishHandler))
 app.all('/api/runtime',   safe(runtimeHandler))
 app.all('/api/runtime-session', safe(runtimeSessionHandler))
 app.all('/api/runtime-telemetry', safe(runtimeTelemetryHandler))
-app.all('/api/commands',  safe(commandsHandler))
+app.all('/api/commands',  safe((req, res) => commandsHandler(req, res, {
+  onWorkerCommandAuthorized: commandWakeEnabled ? () => managedConnectorWorker?.requestCommandPoll() : null,
+})))
 app.all('/api/versions',  safe(versionsHandler))
 app.all('/api/audit',     safe(auditHandler))
 app.all('/api/members',   safe(membersHandler))
@@ -154,11 +159,13 @@ if (embeddedConnectorStream) {
   rustShadowWorker = rustShadowEnabled ? new RustShadowWorker() : null
   managedConnectorWorker = new ManagedConnectorWorker({ hub: runtimeStreamHub, observer: rustShadowWorker })
 }
+commandRetentionJanitor = new CommandRetentionJanitor()
 
 httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`[Server] Express listening on http://localhost:${PORT}${shouldServeFrontend() ? ' with frontend assets' : ''}`)
   if (rustShadowWorker) rustShadowWorker.start()
   if (managedConnectorWorker) managedConnectorWorker.start()
+  commandRetentionJanitor.start()
   void warmApiMongo({
     connect: connectMongo,
     shouldRetry: isDatabaseUnavailableError,
@@ -186,6 +193,7 @@ const shutdown = async signal => {
   if (shuttingDown) return
   shuttingDown = true
   console.log(`[Server] ${signal} received; stopping the self-hosted runtime.`)
+  await commandRetentionJanitor?.close()
   await managedConnectorWorker?.close()
   await rustShadowWorker?.close()
   await runtimeStreamHub?.close()

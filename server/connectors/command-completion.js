@@ -1,5 +1,6 @@
 import { AuditEvent, CommandEvent } from '../../api/_lib/models.js'
 import { commandTimingProjection } from '../../shared/command-lifecycle.js'
+import { commandPurgeAt, commandRetentionPolicy } from '../../shared/command-retention.js'
 
 const COMPLETABLE_STATUSES = ['dispatched', 'accepted_by_gateway']
 const TERMINAL_STATUSES = ['acknowledged', 'rejected', 'timeout', 'failed']
@@ -17,6 +18,7 @@ export async function persistAndPublishTerminalCommand({
   onAuditError = defaultAuditError,
   onAuditDeferred = () => {},
   onTiming = defaultTimingObserver,
+  retentionPolicy = commandRetentionPolicy(),
 }) {
   if (!TERMINAL_STATUSES.includes(status)) throw new TypeError(`Unsupported terminal command status: ${status}`)
   const completed = await commandEvents.findOneAndUpdate(
@@ -39,7 +41,7 @@ export async function persistAndPublishTerminalCommand({
   hub.publishCommand(completed)
   onTiming(completed)
   scheduleAudit(
-    persistTerminalCommandAudit(completed, { commandEvents, auditEvents }),
+    persistTerminalCommandAudit(completed, { commandEvents, auditEvents, retentionPolicy }),
     error => {
       try {
         onAuditError(error, completed)
@@ -54,6 +56,7 @@ export async function persistAndPublishTerminalCommand({
 export async function persistTerminalCommandAudit(event, {
   commandEvents = CommandEvent,
   auditEvents = AuditEvent,
+  retentionPolicy = commandRetentionPolicy(),
 } = {}) {
   if (!event?._id || !TERMINAL_STATUSES.includes(event.status)) return false
   await auditEvents.updateOne(
@@ -72,9 +75,12 @@ export async function persistTerminalCommandAudit(event, {
     },
     { upsert: true },
   )
+  const retentionFields = { terminalAuditPending: false }
+  const purgeAt = commandPurgeAt({ ...event, terminalAuditPending: false }, { policy: retentionPolicy })
+  if (purgeAt) retentionFields.purgeAt = purgeAt
   await commandEvents.updateOne(
     { _id: event._id, status: event.status, terminalAuditPending: true },
-    { $set: { terminalAuditPending: false } },
+    { $set: retentionFields },
   )
   return true
 }
@@ -83,13 +89,14 @@ export async function flushPendingTerminalCommandAudits({
   limit = 100,
   commandEvents = CommandEvent,
   auditEvents = AuditEvent,
+  retentionPolicy = commandRetentionPolicy(),
 } = {}) {
   const pending = await commandEvents.find({
     terminalAuditPending: true,
     status: { $in: TERMINAL_STATUSES },
   }).sort({ completedAt: 1 }).limit(limit).lean()
   for (const event of pending) {
-    await persistTerminalCommandAudit(event, { commandEvents, auditEvents })
+    await persistTerminalCommandAudit(event, { commandEvents, auditEvents, retentionPolicy })
   }
   return pending.length
 }

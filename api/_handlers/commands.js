@@ -21,7 +21,7 @@ const publishedVersionCache = createBoundedAsyncCache({
   ttlMs: process.env.COMMAND_VERSION_CACHE_TTL_MS,
 })
 
-export default async function handler(req, res) {
+export default async function handler(req, res, { onWorkerCommandAuthorized = null } = {}) {
   const phaseTimer = createCommandPhaseTimer({ enabled: req.method === 'POST' && req.body?.includeMetrics === true })
   const requestReceivedAt = new Date()
   const principal = await phaseTimer.measure('principalAuthMs', () => requirePrincipal(req, res))
@@ -184,11 +184,27 @@ export default async function handler(req, res) {
     return executeServerlessCommand({ event, evaluated, principal, res, version, component, connector, environment })
   }
   if (environment.health?.state !== 'online') return finishUnavailable(event, res, 'Connector is not online.', 'CONNECTOR_OFFLINE')
-  event.status = 'authorized'
-  event.authorizedAt = new Date()
-  await event.save()
-  await auditCommandAuthorized({ principal, projectId, componentId, correlationId, requestId, tagId: tag.id, sourceId: source.id })
+  await persistWorkerCommandAuthorization({
+    event,
+    audit: () => auditCommandAuthorized({ principal, projectId, componentId, correlationId, requestId, tagId: tag.id, sourceId: source.id }),
+    onAuthorized: onWorkerCommandAuthorized,
+  })
   return res.status(202).json(commandResponse(event.toObject(), false))
+}
+
+export async function persistWorkerCommandAuthorization({ event, audit, onAuthorized = null, now = () => new Date() } = {}) {
+  if (!event || typeof event.save !== 'function') throw new TypeError('A command event with save() is required.')
+  if (typeof audit !== 'function') throw new TypeError('An authorization audit callback is required.')
+  event.status = 'authorized'
+  event.authorizedAt = now()
+  await event.save()
+  await audit()
+  if (typeof onAuthorized === 'function') {
+    try { onAuthorized() } catch {
+      // Worker wake-up is best-effort; the durable polling fallback remains active.
+    }
+  }
+  return event
 }
 
 async function commandStatus(req, res, principal) {

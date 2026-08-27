@@ -1,5 +1,7 @@
 export const RUNTIME_IPC_SOURCE = 'scamatic-data-plane'
 export const RUNTIME_IPC_VERSION = 1
+export const RUNTIME_CONTROL_SOURCE = 'scamatic-control-plane'
+export const RUNTIME_CONTROL_VERSION = 1
 
 export const RUNTIME_IPC_TYPES = Object.freeze({
   hello: 'runtime.worker.hello',
@@ -8,10 +10,24 @@ export const RUNTIME_IPC_TYPES = Object.freeze({
   command: 'runtime.command.status',
 })
 
+export const RUNTIME_CONTROL_TYPES = Object.freeze({
+  commandWake: 'runtime.command.wake',
+})
+
 export function runtimeIpcMessage(type, payload = {}) {
   return {
     source: RUNTIME_IPC_SOURCE,
     version: RUNTIME_IPC_VERSION,
+    type,
+    ts: Date.now(),
+    payload,
+  }
+}
+
+export function runtimeControlMessage(type, payload = {}) {
+  return {
+    source: RUNTIME_CONTROL_SOURCE,
+    version: RUNTIME_CONTROL_VERSION,
     type,
     ts: Date.now(),
     payload,
@@ -28,6 +44,27 @@ export function isRuntimeIpcMessage(message) {
     && message.payload
     && typeof message.payload === 'object'
   )
+}
+
+export function isRuntimeControlMessage(message) {
+  return Boolean(
+    message
+    && typeof message === 'object'
+    && message.source === RUNTIME_CONTROL_SOURCE
+    && message.version === RUNTIME_CONTROL_VERSION
+    && Object.values(RUNTIME_CONTROL_TYPES).includes(message.type)
+    && message.payload
+    && typeof message.payload === 'object'
+  )
+}
+
+export function routeRuntimeControlMessage(message, { onCommandWake = () => {} } = {}) {
+  if (!isRuntimeControlMessage(message)) return false
+  if (message.type === RUNTIME_CONTROL_TYPES.commandWake) {
+    try { onCommandWake() } catch {}
+    return true
+  }
+  return false
 }
 
 export class IpcRuntimeEventSink {

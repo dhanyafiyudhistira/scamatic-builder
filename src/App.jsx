@@ -33,7 +33,7 @@ const MODE_CONFIG = {
       { chamber: 'v104', tag: 'Simulasi_OpeningV104', label: 'OPENING V104', unit: '%', decimals: 1, alarmHigh: 95, alarmLow: 0, accent: '#fbbf24' },
     ],
     // Tuning sliders — write setpoints to PLC analog words.
-    // Node-RED decoders (update-deckuser.md) call parseInt(rpcData.params),
+    // Node-RED decoders call parseInt(rpcData.params),
     // so PLC only ever receives integers. step=1 / decimals=0 reflects this —
     // fractional setpoints would be silently truncated server-side.
     tunings: [

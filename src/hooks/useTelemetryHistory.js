@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 
-// Mixer-unit analog telemetry (Sistem2 — deck-user.md):
+// Mixer-unit analog telemetry (Sistem2):
 //   Level_mix              — MW101, mixer tank level
 //   QI_102                 — MW300, quality indicator
 //   Simulasi_OpeningV104   — MW200, simulated analog opening of V104

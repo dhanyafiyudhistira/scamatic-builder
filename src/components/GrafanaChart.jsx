@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
 
-/* ── Series definitions — mixer-unit analogs from deck-user.md flow ─── */
+/* ── Series definitions for mixer-unit analog telemetry ────────────── */
 const SERIES = [
   { tag: 'Level_mix',            label: 'Level_mix             Mixer Tank Level',  color: '#06b6d4', unit: '%', yMin: 0, yMax: 100, alarmHigh: 80, alarmLow: 20 },
   { tag: 'QI_102',               label: 'QI_102                pH Indicator',      color: '#84cc16', unit: 'pH', yMin: 0, yMax: 14, alarmHigh: 8.5, alarmLow: 6.0 },

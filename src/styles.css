@@ -87,7 +87,7 @@ body { font-family: Arial, sans-serif; background-color: #c0c0c0; }
   border: 1px solid #666; background: #efefef; padding: 6px;
 }
 
-/* ── Grey-metallic theme (design.md §3, §7) ──────────────────────────────
+/* ── Grey-metallic HMI theme ─────────────────────────────────────────────
    4-stop brushed-aluminium gradient + double-bevel inset. The 35/55 stops
    create the thin shadow band that makes it read as metal rather than a
    plain web gradient. */

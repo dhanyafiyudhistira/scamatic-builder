@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 // Sistem2 (mixer unit) — tags published by Node-RED "Format Telemetry" function.
-// See deck-user.md: Valve_104/105/106 (digital), Motor_101 (digital),
+// Mixer telemetry includes Valve_104/105/106 (digital), Motor_101 (digital),
 // Simulasi_OpeningV104 (analog %), Level_mix (analog), QI_102 (analog).
 const TELEMETRY_KEYS = 'Valve_104,Valve_105,Valve_106,Motor_101,Simulasi_OpeningV104,Level_mix,QI_102'
 

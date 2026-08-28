@@ -7,7 +7,7 @@ import GrafanaChart from './components/GrafanaChart'
 
 const tabs = ['HOME', 'MONITORING', 'SETTING', 'TREND', 'ALARM']
 
-// Mixer unit (Sistem2 in deck-user.md). Single-mode HMI — telemetry & RPC
+// Mixer unit (Sistem2). Single-mode HMI — telemetry & RPC.
 // names follow Node-RED's "Format Telemetry" + "Decode RPC*" functions exactly.
 // Topology: Unit Pembubuh Kimia (V104/V105/V106 dosing valves) → Unit Pengaduk
 // Cepat (M101 mixer motor, Level_mix tank level, QI_102 quality, Simulasi_OpeningV104
@@ -138,7 +138,7 @@ function buildChamberValueBadges(cfg) {
 
 // Standalone SVG of the operator control panel (moved out of the main schematic into
 // SETTING tab). Coordinates are panel-local (origin at top-left of the plate).
-// Theme: grey-metallic plate (design.md §3) + 4-layer lamp buttons (§5) — water-
+// Theme: grey-metallic plate + four-layer lamp buttons — water-
 // treatment mood uses blue-steel mounting plates.
 function buildPanelStandaloneSvg(cfg) {
   // All 4 toggles in a single horizontal row, evenly spaced across the plate.

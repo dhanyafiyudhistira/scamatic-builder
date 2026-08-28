@@ -105,7 +105,7 @@ page after authentication; the Builder home is `?next=%2F`.
 Register these exact callback URIs on the Google Web application client:
 
 ```text
-https://scada-dhany-wtp.vercel.app/api/auth/callback/google
+https://your-own-redirect-url/api/auth/callback/google
 http://localhost:5173/api/auth/callback/google
 ```
 

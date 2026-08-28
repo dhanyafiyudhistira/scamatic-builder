@@ -87,21 +87,21 @@ records are bound to the old wrapping key.
 
 ## Persistent Node-RED RPC responder
 
-Import and deploy `scada-alif.json` in the Node-RED service that remains active
-independently from the RWTest browser UI. The flow uses one subscription to
+Deploy a project-owned Node-RED flow in the service that remains active
+independently from the browser UI. The flow must use one subscription to
 `v1/devices/me/rpc/request/+`, validates the method and payload, and publishes a
 correlated response to `v1/devices/me/rpc/response/<requestId>`.
 
 After deployment:
 
 1. Close only the RWTest browser UI; keep Node-RED running.
-2. Execute V205 from the published runtime.
-3. Confirm Node-RED receives `setM_manualV205`.
+2. Execute a representative boolean command from the published runtime.
+3. Confirm Node-RED receives the configured RPC method.
 4. Confirm ThingsBoard receives the matching response topic.
-5. Confirm V205 uses its `Valve_205` feedback tag and reaches acknowledged only
+5. Confirm the command uses its configured feedback tag and reaches acknowledged only
    after the telemetry readback matches.
-6. Execute Auto, Manual, and Reset and confirm each request receives its
-   correlated two-way RPC response; these commands have no process readback.
+6. Exercise commands with and without process readback and confirm each request
+   receives its correlated two-way RPC response.
 7. Stop Node-RED deliberately and confirm the same command terminates as
    `unverified/timeout` while connector liveness remains independently derived.
    Restart Node-RED and verify recovery without reopening RWTest.

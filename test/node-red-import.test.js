@@ -1,26 +1,24 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
 import { applyNodeRedImportPlan, createNodeRedImportPlan, parseNodeRedFlow } from '../shared/node-red-import.js'
 import { createProjectSchema, hasBlockingIssues, validateProjectSchema } from '../shared/project-schema.js'
-
-const sampleFlow = JSON.parse(await readFile(new URL('../scada-alif.json', import.meta.url), 'utf8'))
+import { GENERIC_NODE_RED_FLOW as sampleFlow } from './helpers/node-red-flow-fixture.js'
 
 test('Node-RED importer discovers telemetry, writable PLC variables, types, and RPC methods without executing functions', () => {
   const analysis = parseNodeRedFlow(sampleFlow)
   assert.equal(analysis.format, 'node-red')
   assert.equal(analysis.nodeCount, sampleFlow.length)
   assert.equal(analysis.stats.endpoints, 1)
-  assert.equal(analysis.stats.telemetryKeys, 7)
-  assert.equal(analysis.stats.writableVariables, 9)
-  assert.equal(analysis.candidates.length, 14)
+  assert.equal(analysis.stats.telemetryKeys, 2)
+  assert.equal(analysis.stats.writableVariables, 2)
+  assert.equal(analysis.candidates.length, 3)
 
-  const valve = analysis.candidates.find(candidate => candidate.path === 'Valve_106')
-  assert.deepEqual({ dataType: valve.dataType, access: valve.access, componentType: valve.componentType }, { dataType: 'boolean', access: 'read', componentType: 'indicator-lamp' })
-  const manualValve = analysis.candidates.find(candidate => candidate.path === 'M_ManualV106')
-  assert.deepEqual({ dataType: manualValve.dataType, access: manualValve.access, rpcMethod: manualValve.rpcMethod, componentType: manualValve.componentType }, { dataType: 'boolean', access: 'write', rpcMethod: 'setM_ManualV106', componentType: 'control-button' })
-  const level = analysis.candidates.find(candidate => candidate.path === 'Level_Air')
-  assert.deepEqual({ dataType: level.dataType, access: level.access, rpcMethod: level.rpcMethod, componentType: level.componentType }, { dataType: 'number', access: 'read-write', rpcMethod: 'setLevel_Air', componentType: 'tuning-slider' })
+  const pumpState = analysis.candidates.find(candidate => candidate.path === 'Pump_Running')
+  assert.deepEqual({ dataType: pumpState.dataType, access: pumpState.access, componentType: pumpState.componentType }, { dataType: 'boolean', access: 'read', componentType: 'indicator-lamp' })
+  const pumpCommand = analysis.candidates.find(candidate => candidate.path === 'Pump_Command')
+  assert.deepEqual({ dataType: pumpCommand.dataType, access: pumpCommand.access, rpcMethod: pumpCommand.rpcMethod, componentType: pumpCommand.componentType }, { dataType: 'boolean', access: 'write', rpcMethod: 'setPump_Command', componentType: 'control-button' })
+  const level = analysis.candidates.find(candidate => candidate.path === 'Tank_Level')
+  assert.deepEqual({ dataType: level.dataType, access: level.access, rpcMethod: level.rpcMethod, componentType: level.componentType }, { dataType: 'number', access: 'read-write', rpcMethod: 'setTank_Level', componentType: 'tuning-slider' })
 })
 
 test('Node-RED import plan creates valid tags and suggested components for an existing source', () => {
@@ -29,8 +27,8 @@ test('Node-RED import plan creates valid tags and suggested components for an ex
   const plan = createNodeRedImportPlan(analysis, schema, { sourceId: 'source_mock' })
   const imported = applyNodeRedImportPlan(schema, plan)
 
-  assert.equal(plan.stats.tagsCreated, 14)
-  assert.equal(plan.stats.componentsCreated, 14)
+  assert.equal(plan.stats.tagsCreated, 3)
+  assert.equal(plan.stats.componentsCreated, 3)
   assert.equal(imported.tags.every(tag => tag.metadata.importSource === 'node-red'), true)
   assert.equal(imported.components.every(component => component.metadata.importSource === 'node-red'), true)
   assert.equal(hasBlockingIssues(validateProjectSchema(imported)), false)
@@ -45,20 +43,20 @@ test('Node-RED re-import reuses existing tags and components instead of duplicat
 
   assert.equal(secondPlan.tags.length, 0)
   assert.equal(secondPlan.components.length, 0)
-  assert.equal(secondPlan.stats.tagsReused, 14)
-  assert.equal(secondPlan.stats.componentsReused, 14)
+  assert.equal(secondPlan.stats.tagsReused, 3)
+  assert.equal(secondPlan.stats.componentsReused, 3)
 })
 
 test('Node-RED import selection can create tags without every suggested component', () => {
   const schema = createProjectSchema({ id: 'project-select', name: 'Selected import', slug: 'selected-import' })
   const analysis = parseNodeRedFlow(sampleFlow)
-  const selected = analysis.candidates.filter(candidate => ['Valve_106', 'Level_Air'].includes(candidate.path))
+  const selected = analysis.candidates.filter(candidate => ['Pump_Running', 'Tank_Level'].includes(candidate.path))
   const plan = createNodeRedImportPlan(analysis, schema, {
     sourceId: 'source_mock',
     selectedKeys: selected.map(candidate => candidate.importKey),
-    componentKeys: [selected.find(candidate => candidate.path === 'Valve_106').importKey],
+    componentKeys: [selected.find(candidate => candidate.path === 'Pump_Running').importKey],
   })
-  assert.deepEqual(plan.tags.map(tag => tag.path).sort(), ['Level_Air', 'Valve_106'])
+  assert.deepEqual(plan.tags.map(tag => tag.path).sort(), ['Pump_Running', 'Tank_Level'])
   assert.deepEqual(plan.components.map(component => component.type), ['indicator-lamp'])
 })
 

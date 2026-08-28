@@ -17,7 +17,7 @@ test('legacy settings compatibility is opt-in', () => {
 
 test('legacy settings mode accepts bounded identifiers and rejects query-shaped input', () => {
   assert.equal(normalizeLegacyMode('deck-user'), 'deck-user')
-  assert.equal(normalizeLegacyMode(['scada-alif', 'ignored']), 'scada-alif')
+  assert.equal(normalizeLegacyMode(['legacy-scada', 'ignored']), 'legacy-scada')
   assert.equal(normalizeLegacyMode({ $ne: '' }), 'global')
   assert.equal(normalizeLegacyMode('../deck-user'), 'global')
   assert.equal(normalizeLegacyMode('x'.repeat(65)), 'global')

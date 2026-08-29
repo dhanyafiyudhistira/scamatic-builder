@@ -1,7 +1,9 @@
+mod gateway;
 mod http;
 mod protocol;
 mod state;
 
+use gateway::{IsaacGateway, IsaacGatewayConfig};
 use protocol::{ControlFlow, OUTPUT_SOURCE, PROTOCOL_VERSION};
 use serde::Serialize;
 use serde_json::json;
@@ -26,28 +28,45 @@ struct OutputFrame<T: Serialize> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let state = Arc::new(ShadowState::new());
+    let gateway_config = IsaacGatewayConfig::from_environment()?;
+    let gateway = gateway_config
+        .enabled
+        .then(|| Arc::new(IsaacGateway::new(gateway_config.clone())));
+    let state = Arc::new(ShadowState::with_gateway(gateway));
     let output = Arc::new(Mutex::new(BufWriter::new(tokio::io::stdout())));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let bind = if gateway_config.enabled {
+        gateway_config.bind.to_string()
+    } else {
+        "127.0.0.1:0".to_string()
+    };
+    let listener = tokio::net::TcpListener::bind(&bind).await?;
     let address = listener.local_addr()?;
     let health_url = format!("http://{address}");
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     state.set_ready(true);
+    let startup = state.snapshot();
     emit(
         &output,
         "shadow.worker.hello",
         json!({
             "pid": std::process::id(),
-            "mode": "shadow",
-            "active": false,
+            "mode": startup.mode,
+            "active": startup.active,
             "healthUrl": health_url,
-            "capabilities": ["telemetry-observe", "command-status-observe", "health", "metrics"]
+            "gatewayReady": startup.gateway_ready,
+            "capabilities": if startup.gateway_ready {
+                vec!["telemetry-observe", "command-status-observe", "health", "metrics", "isaac-stream"]
+            } else {
+                vec!["telemetry-observe", "command-status-observe", "health", "metrics"]
+            }
         }),
     )
     .await?;
     emit(&output, "shadow.worker.health", state.snapshot()).await?;
-    eprintln!("[RustShadow] Axum health and metrics listening on {address}");
+    eprintln!(
+        "[RustShadow] Axum health, metrics, and optional Isaac canary listening on {address}"
+    );
 
     let server_state = Arc::clone(&state);
     let server =

@@ -1,4 +1,5 @@
 import 'dotenv/config'
+import { randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { dirname, join } from 'node:path'
@@ -29,12 +30,14 @@ import chartStorageHandler from '../api/_handlers/chart-storage.js'
 import simulatorHandler from '../api/_handlers/simulator.js'
 import simulationSequenceHandler from '../api/_handlers/simulation-sequence.js'
 import { isDatabaseUnavailableError, requestId } from '../api/_lib/security.js'
+import { allowedOrigins } from '../api/_lib/auth.js'
 import { connectMongo, disconnectMongo } from '../api/_lib/mongo.js'
 import { warmApiMongo } from './api-mongo-warmup.js'
 import { RuntimeStreamHub } from './connectors/runtime-stream-hub.js'
 import { ManagedConnectorWorker } from './connectors/managed-connector-worker.js'
 import { RustShadowWorker } from './connectors/rust-shadow-worker.js'
 import { CommandRetentionJanitor } from './connectors/command-retention-janitor.js'
+import { createIsaacSessionAuthorizer } from './connectors/isaac-session-authorizer.js'
 
 const app = express()
 const safe = handler => (req, res, next) => Promise.resolve(handler(req, res)).catch(next)
@@ -43,6 +46,9 @@ const connectorPlatformEnabled = process.env.CONNECTOR_PLATFORM_ENABLED === 'tru
 const embeddedConnectorStream = connectorPlatformEnabled && process.env.CONNECTOR_STREAM_MODE === 'embedded'
 const rustShadowEnabled = embeddedConnectorStream && process.env.SCADA_RUST_SHADOW_ENABLED === 'true'
 const commandWakeEnabled = embeddedConnectorStream && process.env.CONNECTOR_COMMAND_WAKE_ENABLED !== 'false'
+const isaacCanaryEnabled = rustShadowEnabled && process.env.SCADA_ISAAC_CANARY_ENABLED === 'true'
+const isaacInternalToken = isaacCanaryEnabled ? randomBytes(32).toString('base64url') : ''
+const PORT = process.env.PORT || 3001
 const distDirectory = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist')
 let managedConnectorWorker = null
 let runtimeStreamHub = null
@@ -75,6 +81,10 @@ app.use((req, res, next) => {
   next()
 })
 
+if (isaacCanaryEnabled) {
+  app.post('/internal/isaac/runtime-session', safe(createIsaacSessionAuthorizer({ internalToken: isaacInternalToken })))
+}
+
 // app.all() forwards every HTTP method to the same handler — the handler
 // already switches on req.method, so we don't need app.get/app.post pairs.
 app.all('/api/health',    safe(healthHandler))
@@ -90,7 +100,9 @@ app.all('/api/svg',       safe(svgHandler))
 app.all('/api/elements',  safe(elementsHandler))
 app.all('/api/publish',   safe(publishHandler))
 app.all('/api/runtime',   safe(runtimeHandler))
-app.all('/api/runtime-session', safe(runtimeSessionHandler))
+app.all('/api/runtime-session', safe((req, res) => runtimeSessionHandler(req, res, {
+  resolveIsaacCanary: project => rustShadowWorker?.canary(project),
+})))
 app.all('/api/runtime-telemetry', safe(runtimeTelemetryHandler))
 app.all('/api/commands',  safe((req, res) => commandsHandler(req, res, {
   onWorkerCommandAuthorized: commandWakeEnabled ? () => managedConnectorWorker?.requestCommandPoll() : null,
@@ -122,6 +134,7 @@ app.get('/health/data-plane/shadow', (req, res) => {
   return res.status(!rustShadowEnabled || health.ok ? 200 : 503).json({ ...health, enabled: rustShadowEnabled, ts: Date.now() })
 })
 app.get('/runtime-stream', (req, res) => res.status(426).json({ error: 'WebSocket upgrade required.' }))
+app.get('/isaac-stream', (req, res) => res.status(426).json({ error: 'Isaac WebSocket upgrade required.' }))
 
 if (shouldServeFrontend()) {
   const assetsDirectory = join(distDirectory, 'assets')
@@ -152,11 +165,19 @@ app.use((error, req, res, next) => {
   return res.status(500).json({ error: 'Internal server error.', correlationId })
 })
 
-const PORT = process.env.PORT || 3001
 const httpServer = createServer(app)
 if (embeddedConnectorStream) {
   runtimeStreamHub = new RuntimeStreamHub({ httpServer })
-  rustShadowWorker = rustShadowEnabled ? new RustShadowWorker() : null
+  rustShadowWorker = rustShadowEnabled ? new RustShadowWorker({
+    environment: {
+      ...process.env,
+      SCADA_ISAAC_GATEWAY_ENABLED: isaacCanaryEnabled ? 'true' : 'false',
+      SCADA_ISAAC_INTERNAL_HOST: '127.0.0.1',
+      SCADA_ISAAC_INTERNAL_PORT: String(PORT),
+      SCADA_ISAAC_INTERNAL_TOKEN: isaacInternalToken,
+      SCADA_ISAAC_ALLOWED_ORIGINS: allowedOrigins().join(','),
+    },
+  }) : null
   managedConnectorWorker = new ManagedConnectorWorker({ hub: runtimeStreamHub, observer: rustShadowWorker })
 }
 commandRetentionJanitor = new CommandRetentionJanitor()
@@ -225,12 +246,13 @@ function shouldServeFrontend() {
 }
 
 function isServicePath(path) {
-  return path === '/api' || path.startsWith('/api/') || path === '/health' || path.startsWith('/health/') || path === '/runtime-stream'
+  return path === '/api' || path.startsWith('/api/') || path === '/health' || path.startsWith('/health/') || path === '/runtime-stream' || path === '/isaac-stream' || path.startsWith('/internal/isaac/')
 }
 
 function contentSecurityPolicy() {
   const streamOrigin = safeWebSocketOrigin(process.env.CONNECTOR_STREAM_PUBLIC_URL)
-  const connectSources = ["'self'", ...(production ? [] : ['ws://localhost:3002', 'ws://127.0.0.1:3002']), ...(streamOrigin ? [streamOrigin] : [])]
+  const isaacOrigin = safeWebSocketOrigin(process.env.SCADA_ISAAC_STREAM_PUBLIC_URL)
+  const connectSources = [...new Set(["'self'", ...(production ? [] : ['ws://localhost:3002', 'ws://127.0.0.1:3002', 'ws://localhost:3003', 'ws://127.0.0.1:3003']), ...(streamOrigin ? [streamOrigin] : []), ...(isaacOrigin ? [isaacOrigin] : [])])]
   return [
     "default-src 'self'",
     "script-src 'self'",

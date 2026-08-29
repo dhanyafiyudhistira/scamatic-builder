@@ -139,6 +139,7 @@ test('restored versions expose immutable lineage and the next explicit version n
 test('technical audit actions become compact human-readable labels', () => {
   assert.equal(auditActionLabel('command.accepted_by_gateway'), 'Command accepted by gateway')
   assert.equal(auditActionLabel('connector.rpc_test_succeeded'), 'Connector RPC test succeeded')
+  assert.equal(auditActionLabel('project.isaac-canary.updated'), 'Project Isaac canary updated')
   assert.equal(auditActionCategory('project.rollback'), 'PROJECT')
   assert.equal(auditActionCategory(''), 'SYSTEM')
 })

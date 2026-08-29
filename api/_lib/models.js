@@ -1,5 +1,6 @@
 import mongoose from 'mongoose'
 import { randomUUID } from 'node:crypto'
+import { RUNTIME_ENGINES, STANDARD_RUNTIME_ENGINE } from '../../shared/runtime-engine.js'
 
 // Every request path must establish a connection explicitly. Silent model
 // buffering hides connectivity failures and otherwise turns them into an
@@ -94,6 +95,7 @@ const runtimeSessionSchema = new mongoose.Schema({
   workspaceId: { type: String, required: true, index: true },
   projectId: { type: String, required: true, index: true },
   versionId: { type: String, required: true },
+  engine: { type: String, enum: RUNTIME_ENGINES, default: STANDARD_RUNTIME_ENGINE },
   responderId: { type: String, default: null, index: true },
   responderGeneration: { type: Number, default: 1 },
   capabilities: { type: [String], default: [] },
@@ -145,6 +147,7 @@ const runtimeStreamSessionSchema = new mongoose.Schema({
   workspaceId: { type: String, required: true, index: true },
   projectId: { type: String, required: true, index: true },
   versionId: { type: String, required: true },
+  engine: { type: String, enum: RUNTIME_ENGINES, default: STANDARD_RUNTIME_ENGINE },
   expiresAt: { type: Date, required: true, index: { expires: 0 } },
   consumedAt: { type: Date, default: null },
   revokedAt: { type: Date, default: null },
@@ -305,6 +308,8 @@ const projectSchema = new mongoose.Schema({
   canvas: { width: Number, height: Number, background: String },
   svgAssetId: { type: String, default: null },
   activeVersionId: { type: String, default: null },
+  runtimeEnginePreference: { type: String, enum: RUNTIME_ENGINES, default: STANDARD_RUNTIME_ENGINE },
+  isaacCanaryEnabled: { type: Boolean, default: false },
   hiddenAt: { type: Date, default: null, index: true },
   security: {
     pinEnabled: { type: Boolean, default: false },

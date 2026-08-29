@@ -3,7 +3,9 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import {
+  isaacCanaryProjectAllowed,
   isRustShadowOutput,
+  resolveIsaacStreamPublicUrl,
   RustShadowWorker,
   rustShadowControlMessage,
   rustShadowEnvironment,
@@ -71,7 +73,64 @@ test('Rust shadow protocol and environment reject foreign output and control-pla
   assert.equal(isRustShadowOutput(shadowOutput('shadow.worker.health', { ok: true })), true)
   assert.equal(isRustShadowOutput({ ...shadowOutput('shadow.worker.health', {}), source: 'foreign' }), false)
   assert.equal(rustShadowControlMessage('control.ping').source, 'scamatic-control-plane')
-  assert.deepEqual(rustShadowEnvironment({ PATH: 'safe', TEMP: 'temp', MONGO_URI: 'secret' }), { PATH: 'safe', TEMP: 'temp' })
+  assert.deepEqual(rustShadowEnvironment({
+    PATH: 'safe',
+    TEMP: 'temp',
+    MONGO_URI: 'secret',
+    SCADA_ISAAC_INTERNAL_TOKEN: 'ephemeral-token',
+  }), {
+    PATH: 'safe',
+    TEMP: 'temp',
+    SCADA_ISAAC_INTERNAL_TOKEN: 'ephemeral-token',
+  })
+})
+
+test('Isaac canary requires an explicit database selection and a safe public URL', () => {
+  const project = { _id: 'project-1', slug: 'plant-one', runtimeEnginePreference: 'isaac', isaacCanaryEnabled: true }
+  assert.equal(isaacCanaryProjectAllowed(project, {
+    SCADA_ISAAC_CANARY_ENABLED: 'true',
+  }), true)
+  assert.equal(isaacCanaryProjectAllowed(project, {
+    SCADA_ISAAC_CANARY_ENABLED: 'false',
+  }), false)
+  assert.equal(isaacCanaryProjectAllowed({ ...project, isaacCanaryEnabled: false }, {
+    SCADA_ISAAC_CANARY_ENABLED: 'true',
+  }), false)
+  assert.equal(isaacCanaryProjectAllowed({ ...project, runtimeEnginePreference: 'standard' }, {
+    SCADA_ISAAC_CANARY_ENABLED: 'true',
+  }), false)
+
+  assert.equal(resolveIsaacStreamPublicUrl({
+    NODE_ENV: 'development',
+    SCADA_ISAAC_STREAM_PUBLIC_URL: 'ws://localhost:5173/',
+  }), 'ws://localhost:5173/isaac-stream')
+  assert.equal(resolveIsaacStreamPublicUrl({
+    NODE_ENV: 'production',
+    SCADA_ISAAC_STREAM_PUBLIC_URL: 'ws://runtime.example/isaac-stream',
+  }), null)
+  assert.equal(resolveIsaacStreamPublicUrl({
+    NODE_ENV: 'production',
+    SCADA_ISAAC_STREAM_PUBLIC_URL: 'wss://runtime.example/isaac-stream?secret=1',
+  }), null)
+})
+
+test('Isaac project selection remains closed until the gateway heartbeat is ready', () => {
+  const worker = new RustShadowWorker({
+    environment: {
+      SCADA_ISAAC_CANARY_ENABLED: 'true',
+      SCADA_ISAAC_STREAM_PUBLIC_URL: 'ws://localhost:5173/isaac-stream',
+    },
+  })
+  const project = { _id: 'project-1', slug: 'plant-one', runtimeEnginePreference: 'isaac', isaacCanaryEnabled: true }
+  assert.equal(worker.canary(project), null)
+
+  worker.child = {}
+  worker.lastHeartbeatAt = Date.now()
+  worker.lastHealth = { ok: true, gatewayReady: false }
+  assert.equal(worker.canary(project), null)
+
+  worker.lastHealth = { ok: true, gatewayReady: true }
+  assert.deepEqual(worker.canary(project), { url: 'ws://localhost:5173/isaac-stream' })
 })
 
 function fakeChildProcess() {

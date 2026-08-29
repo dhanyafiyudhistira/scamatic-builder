@@ -220,7 +220,7 @@ export default function RuntimeApp({ slug, metricsEnabled = false }) {
     return data
   }, [runtime?.projectId, runtimeSession?.telemetry?.bridge, runtimeSession?.telemetry?.mode, runtimeSession?.token, updateSimulationLease])
 
-  const createRuntimeSession = useCallback(projectId => {
+  const createRuntimeSession = useCallback((projectId, { excludeEngine = null } = {}) => {
     const responder = nextRuntimeResponderIdentity()
     return apiRequest('/api/runtime-session', {
       method: 'POST',
@@ -228,6 +228,7 @@ export default function RuntimeApp({ slug, metricsEnabled = false }) {
         projectId,
         responderId: responder.id,
         responderGeneration: responder.generation,
+        ...(excludeEngine ? { excludeEngine } : {}),
       }),
     })
   }, [])
@@ -318,10 +319,14 @@ export default function RuntimeApp({ slug, metricsEnabled = false }) {
     let reconnectTimer = null
     let reconnectAttempt = 0
     const socket = new WebSocket(`${runtimeSession.stream.url}?ticket=${encodeURIComponent(runtimeSession.stream.ticket)}`)
-    socket.addEventListener('open', () => setState('online'))
+    socket.addEventListener('open', () => setState('connecting'))
     socket.addEventListener('message', event => {
       try {
         const message = JSON.parse(event.data)
+        if (message.type === 'ready') {
+          setState('online')
+          return
+        }
         if (message.type === 'command-status') {
           receiveCommandPush(message.command)
           return
@@ -346,7 +351,9 @@ export default function RuntimeApp({ slug, metricsEnabled = false }) {
       const reconnect = async () => {
         if (disposed) return
         try {
-          const scoped = await createRuntimeSession(runtime.projectId)
+          const scoped = await createRuntimeSession(runtime.projectId, {
+            excludeEngine: runtimeSession.engine?.selected === 'isaac' ? 'isaac' : null,
+          })
           if (!disposed) {
             setRuntimeSession(scoped)
             setState('connecting')
@@ -363,7 +370,7 @@ export default function RuntimeApp({ slug, metricsEnabled = false }) {
     })
     socket.addEventListener('error', () => setState('degraded'))
     return () => { disposed = true; window.clearTimeout(reconnectTimer); socket.close() }
-  }, [createRuntimeSession, receiveCommandPush, runtime?.projectId, runtimeSession?.stream?.ticket, runtimeSession?.stream?.url])
+  }, [createRuntimeSession, receiveCommandPush, runtime?.projectId, runtimeSession?.engine?.selected, runtimeSession?.stream?.ticket, runtimeSession?.stream?.url])
 
   useEffect(() => {
     if (runtimeSession?.telemetry?.mode !== 'poll' || !runtime?.projectId || !runtimeSession?.token) return

@@ -4,6 +4,7 @@ import { WebSocketServer } from 'ws'
 import { allowedOrigins, isAuthSessionRecordActive } from '../../api/_lib/auth.js'
 import { AuthSession, Project, ProjectVersion, RuntimeSession, RuntimeStreamSession } from '../../api/_lib/models.js'
 import { runtimeCommandProjection } from '../../shared/command-lifecycle.js'
+import { STANDARD_RUNTIME_ENGINE, runtimeEngine } from '../../shared/runtime-engine.js'
 
 const COMMAND_EXECUTE = 'command.execute'
 
@@ -56,13 +57,14 @@ export class RuntimeStreamHub {
       const url = new URL(request.url, 'http://worker.local')
       const ticket = url.searchParams.get('ticket') || ''
       const session = await RuntimeStreamSession.findOneAndUpdate(
-        { _id: digest(ticket), revokedAt: null, consumedAt: null, expiresAt: { $gt: new Date() } },
+        { _id: digest(ticket), revokedAt: null, consumedAt: null, expiresAt: { $gt: new Date() }, $or: [{ engine: STANDARD_RUNTIME_ENGINE }, { engine: { $exists: false } }] },
         { $set: { consumedAt: new Date() } },
         { new: true }
       ).lean()
       if (!session) return socket.close(4401, 'Invalid stream ticket')
       const runtimeSession = await RuntimeSession.findOne({ _id: session.runtimeSessionId, userId: session.userId, workspaceId: session.workspaceId, projectId: session.projectId, versionId: session.versionId, revokedAt: null, expiresAt: { $gt: new Date() } }).lean()
       if (!runtimeSession) return socket.close(4401, 'Runtime session expired')
+      if (!standardRuntimeEnginesMatch(session, runtimeSession)) return socket.close(4403, 'Runtime engine mismatch')
       const authSession = await AuthSession.findOne({ _id: runtimeSession.authSessionId, userId: session.userId, workspaceId: session.workspaceId, revokedAt: null, expiresAt: { $gt: new Date() } }).lean()
       if (!isAuthSessionRecordActive(authSession)) return socket.close(4401, 'Authentication session expired')
       const project = await Project.findOne({ _id: session.projectId, workspaceId: session.workspaceId, activeVersionId: session.versionId }).lean()
@@ -141,6 +143,11 @@ export class RuntimeStreamHub {
 
 function digest(value) { return createHash('sha256').update(String(value)).digest('hex') }
 function defaultHealth(kind) { return { ok: kind === 'liveness', status: kind === 'liveness' ? 'alive' : 'not-ready' } }
+
+export function standardRuntimeEnginesMatch(streamSession, runtimeSession) {
+  return runtimeEngine(streamSession?.engine) === STANDARD_RUNTIME_ENGINE
+    && runtimeEngine(runtimeSession?.engine) === STANDARD_RUNTIME_ENGINE
+}
 
 export function isRuntimeStreamOriginAllowed(origin, originList = allowedOrigins(), production = process.env.NODE_ENV === 'production') {
   const value = String(origin || '')

@@ -1,3 +1,4 @@
+use crate::gateway::CommandScope;
 use crate::state::ShadowState;
 use serde::Deserialize;
 use serde_json::Value;
@@ -63,6 +64,7 @@ pub fn handle_line(line: &str, state: &ShadowState) -> Result<ControlFlow, &'sta
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
             state.record_telemetry(events.len() as u64, dropped);
+            state.publish_telemetry(events.clone());
             Ok(ControlFlow::Continue)
         }
         "shadow.command.status" => {
@@ -78,6 +80,13 @@ pub fn handle_line(line: &str, state: &ShadowState) -> Result<ControlFlow, &'sta
                 return Err("INVALID_COMMAND_STATUS");
             }
             state.record_command();
+            if let Some(scope) = envelope
+                .payload
+                .get("scope")
+                .and_then(CommandScope::from_value)
+            {
+                state.publish_command(event.clone(), scope);
+            }
             Ok(ControlFlow::Continue)
         }
         "control.ping" => Ok(ControlFlow::Continue),

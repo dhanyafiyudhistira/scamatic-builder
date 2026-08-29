@@ -8,6 +8,7 @@ import { deleteProjectChartTelemetry } from '../_lib/chart-telemetry-store.js'
 import { loadWorkspaceChartStorage } from '../_lib/chart-storage-configuration.js'
 import { enforceRateLimit } from '../_lib/security.js'
 import { grantProjectUnlock, hashProjectPin, projectPinError, projectSecuritySnapshot, revokeProjectUnlock, revokeProjectUnlocks, unlockedProjectIds, verifyProjectPin } from '../_lib/project-pin.js'
+import { applyIsaacCanarySelection, runtimeEngine, validRuntimeEngine } from '../../shared/runtime-engine.js'
 
 const slugPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 
@@ -161,6 +162,56 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true, project: toClientProject(project.toObject(), true) })
       }
 
+      if (action === 'set-runtime-engine') {
+        const preference = String(req.body?.runtimeEnginePreference || '').trim().toLowerCase()
+        if (!validRuntimeEngine(preference)) {
+          return res.status(400).json({ error: 'Runtime engine must be standard or isaac.', code: 'RUNTIME_ENGINE_INVALID' })
+        }
+        const previousPreference = runtimeEngine(project)
+        const previousCanaryEnabled = project.isaacCanaryEnabled === true
+        project.runtimeEnginePreference = preference
+        if (preference === 'standard') project.isaacCanaryEnabled = false
+        project.updatedBy = principal.id
+        await project.save()
+        await AuditEvent.create({
+          workspaceId: principal.workspaceId,
+          projectId,
+          actorId: principal.id,
+          action: 'project.runtime-engine.updated',
+          targetType: 'project',
+          targetId: projectId,
+          metadata: { previousPreference, runtimeEnginePreference: preference, previousCanaryEnabled, isaacCanaryEnabled: project.isaacCanaryEnabled === true },
+        })
+        return res.status(200).json({ ok: true, project: toClientProject(project.toObject(), true) })
+      }
+
+      if (action === 'set-isaac-canary') {
+        if (!requireWorkspacePermission(principal, res, PERMISSIONS.WORKSPACE_MANAGE)) return
+        if (typeof req.body?.enabled !== 'boolean') {
+          return res.status(400).json({ error: 'Isaac canary enabled must be a boolean.', code: 'ISAAC_CANARY_INVALID' })
+        }
+        const previousPreference = runtimeEngine(project)
+        const previousEnabled = project.isaacCanaryEnabled === true
+        applyIsaacCanarySelection(project, req.body.enabled)
+        project.updatedBy = principal.id
+        await project.save()
+        await AuditEvent.create({
+          workspaceId: principal.workspaceId,
+          projectId,
+          actorId: principal.id,
+          action: 'project.isaac-canary.updated',
+          targetType: 'project',
+          targetId: projectId,
+          metadata: {
+            previousEnabled,
+            isaacCanaryEnabled: project.isaacCanaryEnabled,
+            previousPreference,
+            runtimeEnginePreference: project.runtimeEnginePreference,
+          },
+        })
+        return res.status(200).json({ ok: true, project: toClientProject(project.toObject(), true) })
+      }
+
       if (action === 'rename') {
         const name = String(req.body?.name || '').trim()
         if (name.length < 2 || name.length > 80) return res.status(400).json({ error: 'Project name must contain 2–80 characters.' })
@@ -255,6 +306,8 @@ function toClientProject(project, unlocked = false) {
     canvas: project.canvas,
     svgAssetId: project.svgAssetId,
     activeVersionId: project.activeVersionId,
+    runtimeEnginePreference: runtimeEngine(project),
+    isaacCanaryEnabled: project.isaacCanaryEnabled === true,
     hiddenAt: project.hiddenAt || null,
     security: projectSecuritySnapshot(project, unlocked),
     createdAt: project.createdAt,

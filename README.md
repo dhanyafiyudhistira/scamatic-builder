@@ -143,10 +143,11 @@ mode because Express already owns and supervises that child process. Existing
 deployments can retain `CONNECTOR_STREAM_MODE=standalone`, port `3002`, and an
 explicit `CONNECTOR_STREAM_PUBLIC_URL` while migrating.
 
-The Node worker remains the sole active connector telemetry and RPC executor.
+The Node worker remains the sole connector telemetry source and RPC executor.
 The private IPC boundary can additionally mirror sanitized events into the
-Rust/Tokio/Axum shadow worker without changing command ownership or
-acknowledgment semantics.
+Rust/Tokio/Axum worker without changing command ownership or acknowledgment
+semantics. When the Isaac canary is enabled, Axum may fan those events out to
+authorized project sessions, but still owns no connector or command state.
 
 ### Rust shadow data-plane (Phase 2)
 
@@ -171,11 +172,49 @@ Rust toolchain. Shadow readiness is available through Express at
 health URL and observation counters. Set `SCADA_RUST_SHADOW_ENABLED=false` to
 roll back instantly to the Phase 1 Node-only behavior.
 
+### Runtime engine preference
+
+Projects can independently choose an operational runtime engine preference:
+`standard` or `isaac`. This is deliberately separate from the published
+`simulation`, `real`, and `monitor` safety profiles. Engine preference is
+project metadata, so changing it does not alter an immutable published screen
+or its checksum.
+
+Isaac now has an opt-in Axum WebSocket canary. It is selected only when all of
+these checks pass:
+
+- `SCADA_RUST_SHADOW_ENABLED=true` and `SCADA_ISAAC_CANARY_ENABLED=true`;
+- a workspace OWNER or ADMIN enables the project from
+  **Settings → Isaac runtime setup**;
+- the Rust worker reports that its gateway is ready;
+- `SCADA_ISAAC_STREAM_PUBLIC_URL` is a valid WebSocket URL (`wss:` is required
+  in production).
+
+For a local canary behind Vite, use `/isaac-stream` on the frontend origin and
+set `SCADA_ISAAC_STREAM_PUBLIC_URL=ws://localhost:5173/isaac-stream`. For the
+included Caddy edge on port `8088`, use
+`ws://localhost:8088/isaac-stream` locally or the corresponding public `wss:`
+URL in production. Axum itself remains bound to `127.0.0.1:3003`.
+
+Each Isaac ticket is single-use and engine-bound. Axum delegates ticket
+consumption and session authorization to a private loopback Node endpoint,
+then revalidates the revocable auth and runtime scope every five seconds by
+default. If eligibility or Axum connectivity fails, Runtime requests a fresh
+Standard session. This fallback changes only the stream transport: telemetry
+ingestion and every RPC continue to use the existing Node path.
+
+To stop the canary immediately, set `SCADA_ISAAC_CANARY_ENABLED=false` and
+restart Express. Project preferences can remain set to Isaac; the server will
+select Standard and return `ISAAC_UNAVAILABLE` until the canary is available.
+Disabling an individual project from Settings also selects Standard and closes
+its existing Isaac sockets during the next bounded session revalidation.
+
 ### Optional Caddy edge
 
-Caddy is no longer required for local or LAN use. It remains useful for public
-TLS and certificate management; the included `Caddyfile` simply forwards the
-single Express origin, including WebSocket upgrades:
+Caddy is not required for the Standard runtime. It remains useful for public
+TLS and for the Isaac canary: the included `Caddyfile` forwards only
+`/isaac-stream` to loopback Axum and sends every other route, including the
+Standard WebSocket, to Express:
 
 ```powershell
 caddy validate --config .\Caddyfile

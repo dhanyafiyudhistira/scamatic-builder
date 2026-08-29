@@ -9,6 +9,12 @@ export default defineConfig({
       '/api': {
         target:       'http://localhost:3001',
         changeOrigin: true
+      },
+      // Isaac is an opt-in Axum WebSocket canary on a loopback-only port.
+      '/isaac-stream': {
+        target:       'ws://127.0.0.1:3003',
+        ws:           true,
+        changeOrigin: false
       }
     }
   }

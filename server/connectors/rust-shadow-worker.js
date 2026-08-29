@@ -4,6 +4,7 @@ import { createInterface } from 'node:readline'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runtimeCommandProjection } from '../../shared/command-lifecycle.js'
+import { isaacCanarySelected } from '../../shared/runtime-engine.js'
 
 export const RUST_SHADOW_CONTROL_SOURCE = 'scamatic-control-plane'
 export const RUST_SHADOW_OUTPUT_SOURCE = 'scamatic-rust-data-plane'
@@ -96,7 +97,23 @@ export class RustShadowWorker {
     if (!this.child) return false
     const command = runtimeCommandProjection(event)
     if (!command.requestId || !command.componentId) return false
-    return this.#enqueue('shadow.command.status', { event: command }, 'command')
+    return this.#enqueue('shadow.command.status', {
+      event: command,
+      scope: {
+        userId: String(event?.actorId || ''),
+        workspaceId: String(event?.workspaceId || ''),
+        projectId: String(event?.projectId || ''),
+        versionId: String(event?.versionId || ''),
+      },
+    }, 'command')
+  }
+
+  canary(project) {
+    if (!isaacCanaryProjectAllowed(project, this.environment)) return null
+    const url = resolveIsaacStreamPublicUrl(this.environment)
+    const health = this.health()
+    if (!url || !health.ok || health.gatewayReady !== true) return null
+    return { url }
   }
 
   health() {
@@ -107,8 +124,8 @@ export class RustShadowWorker {
       ...(this.lastHealth || {}),
       ok: ready,
       status: ready ? 'ready' : this.unavailableReason || (this.child ? responsive ? 'starting' : 'unresponsive' : this.stopping ? 'stopping' : 'stopped'),
-      mode: 'rust-shadow',
-      active: false,
+      mode: this.lastHealth?.gatewayReady ? 'rust-isaac-canary' : 'rust-shadow',
+      active: this.lastHealth?.gatewayReady === true,
       heartbeatAgeMs,
       healthUrl: this.healthUrl,
       binaryAvailable: !this.unavailableReason,
@@ -291,8 +308,29 @@ export function resolveRustShadowBinary(env = process.env, platform = process.pl
 }
 
 export function rustShadowEnvironment(env = process.env) {
-  const allowed = ['PATH', 'Path', 'PATHEXT', 'SYSTEMROOT', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'TZ', 'RUST_BACKTRACE']
+  const allowed = [
+    'PATH', 'Path', 'PATHEXT', 'SYSTEMROOT', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'TZ', 'RUST_BACKTRACE',
+    'SCADA_ISAAC_GATEWAY_ENABLED', 'SCADA_ISAAC_STREAM_BIND', 'SCADA_ISAAC_INTERNAL_HOST', 'SCADA_ISAAC_INTERNAL_PORT',
+    'SCADA_ISAAC_INTERNAL_TOKEN', 'SCADA_ISAAC_ALLOWED_ORIGINS', 'SCADA_ISAAC_REVALIDATE_MS',
+  ]
   return Object.fromEntries(allowed.filter(name => env[name] != null).map(name => [name, env[name]]))
+}
+
+export function isaacCanaryProjectAllowed(project, env = process.env) {
+  if (env.SCADA_ISAAC_CANARY_ENABLED !== 'true') return false
+  return isaacCanarySelected(project)
+}
+
+export function resolveIsaacStreamPublicUrl(env = process.env) {
+  const configured = String(env.SCADA_ISAAC_STREAM_PUBLIC_URL || '').trim()
+  if (!configured) return null
+  let url
+  try { url = new URL(configured) } catch { return null }
+  const validProtocol = env.NODE_ENV === 'production' ? url.protocol === 'wss:' : ['ws:', 'wss:'].includes(url.protocol)
+  if (!validProtocol || url.username || url.password || url.search || url.hash) return null
+  if (url.pathname === '/') url.pathname = '/isaac-stream'
+  if (url.pathname !== '/isaac-stream') return null
+  return url.toString()
 }
 
 function safeLoopbackHealthUrl(value) {

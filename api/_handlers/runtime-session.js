@@ -7,8 +7,9 @@ import { enforceRateLimit } from '../_lib/security.js'
 import { usesServerlessConnectorExecution } from '../_lib/connector-execution.js'
 import { runtimeProfileMetadata, runtimeUsesLiveTelemetry } from '../../shared/runtime-profile.js'
 import { validRuntimeResponderGeneration, validRuntimeResponderId } from '../../shared/runtime-responder.js'
+import { resolveRuntimeEngine } from '../../shared/runtime-engine.js'
 
-export default async function handler(req, res) {
+export default async function handler(req, res, { resolveIsaacCanary = () => null } = {}) {
   const principal = await requirePrincipal(req, res)
   if (!principal) return
   if (req.method !== 'POST') {
@@ -40,16 +41,20 @@ export default async function handler(req, res) {
   const policy = runtimeSessionPolicy()
   const serverless = usesServerlessConnectorExecution()
   const streamEnabled = liveTelemetry && process.env.CONNECTOR_PLATFORM_ENABLED === 'true' && !serverless
-  const streamUrl = streamEnabled ? resolveRuntimeStreamUrl() : null
+  const isaacCanary = streamEnabled && req.body?.excludeEngine !== 'isaac' ? resolveIsaacCanary(project) : null
+  const engine = resolveRuntimeEngine(project, { isaacAvailable: Boolean(isaacCanary?.url) })
+  const streamUrl = streamEnabled
+    ? engine.selected === 'isaac' ? isaacCanary.url : resolveRuntimeStreamUrl()
+    : null
   const token = randomBytes(32).toString('base64url')
   const expiresAt = new Date(Math.min(Date.now() + policy.ttlMs, new Date(principal.sessionExpiresAt).getTime()))
-  const runtimeSession = await RuntimeSession.create({ _id: digest(token), authSessionId: principal.sessionId, userId: principal.id, workspaceId: principal.workspaceId, projectId, versionId: project.activeVersionId, responderId, responderGeneration, capabilities: authorization.capabilities, expiresAt })
+  const runtimeSession = await RuntimeSession.create({ _id: digest(token), authSessionId: principal.sessionId, userId: principal.id, workspaceId: principal.workspaceId, projectId, versionId: project.activeVersionId, engine: engine.selected, responderId, responderGeneration, capabilities: authorization.capabilities, expiresAt })
   await enforceRuntimeSessionCap(principal.sessionId, projectId, runtimeSession.id, policy.maxSessions)
   let stream = null
   if (streamEnabled) {
     const ticket = randomBytes(32).toString('base64url')
     const streamExpiresAt = new Date(Date.now() + policy.streamTicketTtlMs)
-    await RuntimeStreamSession.create({ _id: digest(ticket), runtimeSessionId: runtimeSession.id, userId: principal.id, workspaceId: principal.workspaceId, projectId, versionId: project.activeVersionId, expiresAt: streamExpiresAt })
+    await RuntimeStreamSession.create({ _id: digest(ticket), runtimeSessionId: runtimeSession.id, userId: principal.id, workspaceId: principal.workspaceId, projectId, versionId: project.activeVersionId, engine: engine.selected, expiresAt: streamExpiresAt })
     stream = { url: streamUrl, ticket, expiresAt: streamExpiresAt }
   }
   return res.status(201).json({
@@ -58,6 +63,7 @@ export default async function handler(req, res) {
     responder: { id: responderId, generation: responderGeneration },
     capabilities: authorization.capabilities,
     profile,
+    engine,
     stream,
     telemetry: !liveTelemetry
       ? {

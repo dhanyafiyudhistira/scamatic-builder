@@ -235,16 +235,24 @@ button:disabled {
 }
 
 .sb-brand {
+  --sb-button-depth: transparent;
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  border: 1px solid var(--sb-line) !important;
-  background-color: var(--sb-field) !important;
-  padding: 6px 9px !important;
-  border-radius: 6px !important;
-  font-size: 16px;
+  justify-content: center;
+  gap: 6px;
+  min-width: 92px;
+  width: 92px;
+  height: 35px;
+  border: 1px solid color-mix(in srgb, var(--sb-line) 86%, #000) !important;
+  background-color: #101419 !important;
+  background-image: linear-gradient(180deg, #252a30 0%, #161a1f 42%, #0b0e11 100%) !important;
+  box-shadow: inset 0 1px 0 #ffffff13, inset 0 -1px 0 #0008 !important;
+  padding: 0 9px !important;
+  border-radius: 4px !important;
+  font-size: 15px;
   font-weight: 900;
-  letter-spacing: .06em;
+  letter-spacing: .08em;
+  white-space: nowrap;
 }
 
 .sb-brand-logo {
@@ -257,6 +265,8 @@ button:disabled {
 
 .sb-brand-name {
   display: inline-flex;
+  min-width: 2ch;
+  justify-content: center;
   font-style: normal;
 }
 
@@ -475,15 +485,16 @@ button:disabled {
 .sb-project-title {
   position: absolute;
   top: 50%;
-  right: 630px;
-  left: 630px;
-  max-width: none;
+  right: auto;
+  left: 50%;
+  width: min(460px, max(160px, calc(100vw - 840px)));
+  max-width: 100%;
   min-width: 0;
   display: flex;
   justify-content: center;
   gap: 6px;
   align-items: baseline;
-  transform: translateY(-50%);
+  transform: translate(-50%, -50%);
   pointer-events: none;
   white-space: nowrap;
 }
@@ -7841,6 +7852,7 @@ body.sb-is-resizing-sidebar * {
 
 .sb-connector-card {
   display: grid;
+  min-width: 0;
   gap: 5px;
   padding: 9px;
   border: 1px solid var(--sb-line);
@@ -7849,10 +7861,16 @@ body.sb-is-resizing-sidebar * {
 }
 
 .sb-connector-card-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
   gap: 6px;
+}
+
+.sb-connector-card-header>strong {
+  min-width: 0;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .sb-connector-card-head-actions {
@@ -7863,26 +7881,33 @@ body.sb-is-resizing-sidebar * {
 }
 
 .sb-connector-info-trigger {
-  width: 20px;
-  min-width: 20px;
-  height: 20px;
-  min-height: 20px;
+  --sb-button-depth: transparent;
+  flex: 0 0 18px;
+  width: 18px !important;
+  min-width: 18px !important;
+  max-width: 18px;
+  height: 18px !important;
+  min-height: 18px !important;
+  max-height: 18px;
+  aspect-ratio: 1;
   display: grid;
   place-items: center;
   margin: 0;
-  padding: 0;
+  padding: 0 !important;
   border: 1px solid var(--sb-line);
-  border-radius: 50%;
+  border-radius: 50% !important;
   color: var(--sb-muted);
-  background: color-mix(in srgb, var(--sb-panel) 72%, transparent);
-  box-shadow: none;
+  background: color-mix(in srgb, var(--sb-panel) 72%, transparent) !important;
+  background-image: none !important;
+  box-shadow: inset 0 1px 0 #ffffff1c !important;
+  transform: none !important;
 }
 
 .sb-connector-info-trigger::before,
 .sb-connector-info-trigger::after {
   position: absolute;
   left: 50%;
-  width: 2px;
+  width: 1.5px;
   border-radius: 2px;
   background: currentColor;
   content: "";
@@ -7890,13 +7915,13 @@ body.sb-is-resizing-sidebar * {
 }
 
 .sb-connector-info-trigger::before {
-  top: calc(50% - 5px);
-  height: 2px;
+  top: calc(50% - 4px);
+  height: 1.5px;
 }
 
 .sb-connector-info-trigger::after {
-  top: calc(50% - 1px);
-  height: 7px;
+  top: calc(50% - .5px);
+  height: 5.25px;
 }
 
 .sb-connector-info-trigger:hover,
@@ -8026,13 +8051,8 @@ body.sb-is-resizing-sidebar * {
   margin: 0;
   padding: 6px 10px;
   line-height: 1.2;
-  white-space: nowrap;
-}
-
-.sb-connector-card-actions .sb-connector-auth-active {
-  color: var(--sb-success);
-  border-color: color-mix(in srgb, var(--sb-success) 52%, var(--sb-line));
-  background: color-mix(in srgb, var(--sb-success) 10%, var(--sb-field));
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .sb-connector-auth-panel {
@@ -8303,13 +8323,7 @@ body.sb-is-resizing-sidebar * {
 
 @media (max-width: 1400px) {
   .sb-project-title {
-    position: static;
-    right: auto;
-    left: auto;
-    flex: 1 1 auto;
-    justify-content: flex-end;
-    max-width: none;
-    transform: none;
+    width: min(460px, max(160px, calc(100vw - 840px)));
   }
 
   .sb-project-title strong {
@@ -8413,6 +8427,8 @@ body.sb-is-resizing-sidebar * {
 
   .sb-brand {
     gap: 5px;
+    min-width: 72px;
+    width: 72px;
     padding-inline: 7px !important;
     font-size: 13px;
     letter-spacing: .035em;

@@ -7,6 +7,14 @@ export async function loadCommandAdmissionReads({ loadProject, loadRuntimeSessio
   return { project, runtimeSession, duplicate }
 }
 
+export async function loadCommandStatusReads({ loadProject, loadRuntimeSession }) {
+  const [project, runtimeSession] = await Promise.all([
+    loadProject(),
+    loadRuntimeSession(),
+  ])
+  return { project, runtimeSession }
+}
+
 export async function loadLiveCommandReads({
   loadPendingCommand,
   loadSnapshot,

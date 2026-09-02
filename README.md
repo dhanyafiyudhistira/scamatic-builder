@@ -120,6 +120,136 @@ Frontend: `http://localhost:5173`
 
 Local API: `http://localhost:3001`
 
+### Tauri Desktop Connected
+
+The Builder and published Runtime can also run as one Tauri desktop
+application. The bundled React/Vite frontend remains compatible with the web
+deployment, while Tauri owns two narrow native transports:
+
+- authenticated API requests travel through a Rust HTTP client with an
+  in-memory cookie jar and CSRF forwarding;
+- Standard and Isaac stream tickets travel through a Rust WebSocket client,
+  then reach React over a Tauri channel.
+
+The desktop bridge accepts only `/api/*` and the shadow health endpoint. Stream
+connections must use the same host as the configured control plane and exactly
+`/runtime-stream` or `/isaac-stream`. HTTPS control planes require WSS. The
+server remains authoritative for authentication, roles, project assignment,
+engine selection, ticket validation, and Standard fallback.
+
+For local development, start the Express control plane separately, then launch
+the desktop shell:
+
+```powershell
+$env:SCAMATIC_DESKTOP_SERVER_ORIGIN = 'http://127.0.0.1:3001'
+npm run dev:server
+```
+
+```powershell
+$env:SCAMATIC_DESKTOP_SERVER_ORIGIN = 'http://127.0.0.1:3001'
+npm run desktop:dev
+```
+
+Build a release installer against a clean HTTPS origin:
+
+```powershell
+$env:SCAMATIC_DESKTOP_SERVER_ORIGIN = 'https://scada-dhany-wtp.vercel.app'
+npm run desktop:build
+```
+
+Desktop sessions intentionally stay in memory and therefore require a fresh
+sign-in after the app exits; tokens are not written to local storage. Password
+sign-in is supported in the first connected release. Google OAuth remains in
+the web edition until a verified desktop callback/deep-link flow is added.
+Caddy is unnecessary for the internal Tauri IPC path. A self-hosted live
+Runtime still needs its existing HTTPS/WSS edge because the desktop connects to
+the authoritative server.
+
+#### One-installer local desktop
+
+The Windows local flavor bundles the Tauri desktop, a production-only Node
+runtime, the Express server and connector worker, and the Isaac binary. Its
+per-machine NSIS installer registers **SCAMATIC Local Runtime** as a delayed
+automatic Windows Service. Express continues to supervise the connector worker
+and Isaac child process, while the service owns their complete process tree.
+Users therefore open only **SCAMATIC Builder Local**; no terminal or manual
+server start is required after installation or reboot.
+
+Build the local NSIS installer with:
+
+```powershell
+npm run desktop:build:local
+```
+
+The local build is compiled against `http://127.0.0.1:3001`. It does not need
+Caddy because the desktop-to-server path stays on loopback. The installer does
+not embed `.env`, MongoDB credentials, connector secrets, or the connector
+master key. Machine configuration is read from:
+
+```text
+C:\ProgramData\SCAMATIC\runtime.env
+```
+
+On the first interactive installation, a commissioning page first asks whether
+this is a **new deployment** or an **existing database**. A new deployment
+generates a 32-byte connector master key with the Windows cryptographic RNG. An
+existing database requires the original master key (64-character hex or
+32-byte base64); creating a replacement key would make its encrypted Data
+Source and Chart credentials unreadable. The page also asks for the MongoDB
+URI, initial administrator email, a password of at least ten characters, and
+connector/archive hostname allowlists. It writes
+`C:\ProgramData\SCAMATIC\runtime.env`, and restricts the file to Local System
+and machine administrators. Existing configuration is never replaced, so the
+page is skipped during upgrades and repairs.
+
+The packaged service accepts both `http://127.0.0.1:3001` and
+`http://localhost:3001` as local application origins. Plain HTTP remains
+restricted to these loopback aliases; non-local production origins must use
+HTTPS. Browser navigation through `localhost` is redirected to the canonical
+`127.0.0.1` origin so authentication cookies, local draft recovery, and UI
+preferences do not split into two browser stores.
+
+The installer also places a non-secret reference file at
+`C:\ProgramData\SCAMATIC\runtime.env.example`. A first silent/passive install
+must pre-provision `runtime.env`; otherwise the service starts in degraded mode
+without inventing credentials. After starting the service, the interactive
+installer waits up to 60 seconds for `GET /health/data-plane/ready`, then checks
+`GET /health/data-plane/key-compatibility`. That second probe unwraps only the
+encrypted data keys and returns counts/status; it never returns a MongoDB URI,
+ThingsBoard token, password, or plaintext secret. A failed
+readiness check reports the MongoDB/log recovery path but leaves the automatic
+service installed so it can recover when the dependency becomes available.
+An incompatible-key warning means the service itself is installed, but legacy
+Data Source/Chart credentials must not be used until the original key is
+restored or a controlled rotation is completed.
+Service output is appended to
+`C:\ProgramData\SCAMATIC\logs\runtime.log`. Upgrade and uninstall stop the
+entire runtime process tree first; uninstall deliberately preserves machine
+configuration and logs for recovery. Code-sign the application binaries and
+NSIS installer with the production publisher certificate before distribution.
+
+### Connector master-key rotation
+
+Do not replace `SCADA_CONNECTOR_MASTER_KEY` directly on a database that already
+contains encrypted secrets. Use the bundled rotation utility as an
+administrator:
+
+1. Back up the database and `C:\ProgramData\SCAMATIC\runtime.env`.
+2. Generate a new key with `scamatic-runtime-service.exe generate-master-key`.
+3. Set the new value as `SCADA_CONNECTOR_MASTER_KEY` and place the old value in
+   `SCADA_CONNECTOR_PREVIOUS_MASTER_KEYS`.
+4. Run a dry run while the service is available:
+   `resources\runtime\node.exe resources\runtime\scripts\rotate-connector-master-key.js`.
+5. Stop `SCAMATICRuntime`, then repeat the command with `--apply`. The utility
+   aborts before writing if any record cannot be unwrapped and rewraps only data
+   keys in a MongoDB transaction.
+6. Remove `SCADA_CONNECTOR_PREVIOUS_MASTER_KEYS`, start the service, and verify
+   `/health/data-plane/ready` plus `/health/data-plane/key-compatibility`.
+
+The `--apply` path refuses to run while the Windows Service is active. Keep the
+old key until post-rotation verification reports zero incompatible records and
+zero records requiring rotation.
+
 ### Self-hosted single-origin runtime
 
 The recommended self-hosted path exposes the frontend, REST API, and runtime
@@ -157,6 +287,34 @@ and Prometheus metrics on a dynamic `127.0.0.1` port. It never receives MongoDB
 or connector credentials, never contacts ThingsBoard, and never performs an
 actuation.
 
+The Axum telemetry hot path deserializes batches into bounded typed events,
+shares each immutable batch between WebSocket subscribers through `Arc`, and
+serializes only the events allowed for each runtime scope. This avoids cloning
+the complete JSON object graph per subscriber while preserving the existing
+NDJSON ingress and `tag-batch` WebSocket contracts. Run the repeatable local
+comparison with `npm run bench:isaac`; benchmark ratios are machine- and
+workload-specific and must not be treated as universal throughput claims.
+
+The private `/metrics` endpoint additionally reports telemetry ingress bytes,
+decode time, subscriber count, encoded bytes, encode time, lagged clients, and
+delivered events. These counters make production tuning evidence-based without
+including tag values or secret material.
+
+### Local RPC performance
+
+Desktop commands continue to enter through `127.0.0.1:3001`, remain durable and
+idempotent in MongoDB, and execute only in the managed Node connector worker.
+Independent project/session reads used by status polling run concurrently. The
+worker also keeps a bounded, expiring LRU of immutable published versions so a
+repeated command does not reload the same schema on every dispatch batch.
+
+Worker readiness at `/health/data-plane/ready` includes safe aggregate RPC
+diagnostics: queue pressure, version-cache hits/misses, terminal status counts,
+and bounded `p50`/`p95`/`p99` phase timings. Payload values, request IDs, JWTs,
+connector secrets, and tag identities are never included. Run the controlled
+round-trip comparison with `npm run bench:rpc`; it measures overlapped and
+avoided local MongoDB waits, not Internet or ThingsBoard latency.
+
 ```powershell
 npm run rust:test
 npm run rust:build
@@ -164,8 +322,8 @@ $env:SCADA_RUST_SHADOW_ENABLED = 'true'
 npm run start
 ```
 
-Development automatically discovers `data-plane-rs/target/release` and then
-`target/debug`. A packaged deployment can set `SCADA_RUST_SHADOW_BINARY` to an
+Development automatically discovers the Cargo workspace `target/release` and
+then `target/debug`. A packaged deployment can set `SCADA_RUST_SHADOW_BINARY` to an
 absolute prebuilt binary path, so the eventual installer will not require a
 Rust toolchain. Shadow readiness is available through Express at
 `GET /health/data-plane/shadow`; the response also reports the private Axum

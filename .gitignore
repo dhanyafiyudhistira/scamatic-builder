@@ -1,5 +1,8 @@
 node_modules
 data-plane-rs/target
+/target
+src-tauri/gen
+src-tauri/binaries
 dist
 .pnpm-store/
 .claude/worktrees/

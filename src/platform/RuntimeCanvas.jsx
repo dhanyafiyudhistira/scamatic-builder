@@ -47,22 +47,54 @@ export function RuntimeCanvas({
   const [openPopupId, setOpenPopupId] = useState(null)
   const [fileDragOver, setFileDragOver] = useState(false)
   const [operationModes, setOperationModes] = useState({})
+  const coordinateFrameRef = useRef(null)
+  const pendingCoordinateRef = useRef(null)
   const popupReturnFocusRef = useRef(null)
   const commandHandlerRef = useRef(onCommand)
   commandHandlerRef.current = onCommand
   const canvas = schema?.project?.canvas || { width: 1920, height: 1080, background: '#101418' }
   const tags = useMemo(() => new Map((schema?.tags || []).map(tag => [tag.id, tag])), [schema?.tags])
   const components = schema?.components || []
+  const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds])
   const componentById = useMemo(() => new Map(components.map(component => [component.id, component])), [components])
   const rootComponents = useMemo(() => rootRuntimeComponents(components), [components])
   const expandedChart = (schema?.components || []).find(component => component.id === expandedChartId && component.type === 'chart' && component.visible !== false)
   const openPopup = componentById.get(openPopupId)
   const operationShifters = useMemo(() => components.filter(component => component.type === 'operation-shifter'), [components])
+  const operationOwnerByComponent = useMemo(() => {
+    const owners = new Map()
+    for (const shifter of operationShifters) {
+      for (const componentId of shifter.properties?.controlledComponentIds || []) {
+        if (!owners.has(componentId)) owners.set(componentId, shifter)
+      }
+    }
+    return owners
+  }, [operationShifters])
   const invokeCommand = useCallback((...args) => commandHandlerRef.current?.(...args), [])
   const stableCommandHandler = onCommand ? invokeCommand : undefined
   const expandChart = useCallback(componentId => setExpandedChartId(componentId), [])
   const changeOperationMode = useCallback((componentId, mode) => {
     setOperationModes(previous => ({ ...previous, [componentId]: mode }))
+  }, [])
+  const scheduleCoordinate = useCallback(nextCoordinate => {
+    pendingCoordinateRef.current = nextCoordinate
+    if (coordinateFrameRef.current !== null) return
+    coordinateFrameRef.current = window.requestAnimationFrame(() => {
+      coordinateFrameRef.current = null
+      const next = pendingCoordinateRef.current
+      pendingCoordinateRef.current = null
+      setCoordinate(previous => previous?.x === next?.x && previous?.y === next?.y ? previous : next)
+    })
+  }, [])
+  const clearCoordinate = useCallback(() => {
+    pendingCoordinateRef.current = null
+    if (coordinateFrameRef.current !== null) window.cancelAnimationFrame(coordinateFrameRef.current)
+    coordinateFrameRef.current = null
+    setCoordinate(previous => previous === null ? previous : null)
+  }, [])
+
+  useEffect(() => () => {
+    if (coordinateFrameRef.current !== null) window.cancelAnimationFrame(coordinateFrameRef.current)
   }, [])
 
   useEffect(() => {
@@ -79,11 +111,11 @@ export function RuntimeCanvas({
     })
   }, [operationShifters, values])
 
-  const operationLockFor = componentId => {
-    const owner = operationShifters.find(shifter => (shifter.properties?.controlledComponentIds || []).includes(componentId))
+  const operationLockFor = useCallback(componentId => {
+    const owner = operationOwnerByComponent.get(componentId)
     const mode = owner ? operationModes[owner.id] || 'manual' : 'manual'
     return owner && mode !== 'manual' ? `${mode.toUpperCase()} LOCK` : ''
-  }
+  }, [operationModes, operationOwnerByComponent])
 
   useEffect(() => {
     if (editable || (expandedChartId && !expandedChart)) setExpandedChartId(null)
@@ -102,36 +134,38 @@ export function RuntimeCanvas({
     return () => window.removeEventListener('keydown', closeOnEscape)
   }, [expandedChartId])
 
-  const startTransform = (event, component, mode) => {
+  const startTransform = useCallback((event, component, mode) => {
     if (!editable || component.locked || !canvasRef.current) return
     event.preventDefault()
     event.stopPropagation()
     const resizing = mode.startsWith('resize-')
     const additive = !resizing && (event.shiftKey || event.ctrlKey || event.metaKey)
-    const preserveGroup = mode === 'move' && !additive && selectedIds.length > 1 && selectedIds.includes(component.id)
+    const preserveGroup = mode === 'move' && !additive && selectedIds.length > 1 && selectedIdSet.has(component.id)
     if (!preserveGroup) onSelect?.(component.id, { additive })
     onTransformStart?.()
     const rect = canvasRef.current.getBoundingClientRect()
     const startX = event.clientX
     const startY = event.clientY
-    const components = schema?.components || []
-    const groupIds = !resizing && mode === 'move' && selectedIds.includes(component.id) && selectedIds.length > 1
+    const allComponents = schema?.components || []
+    const groupIds = !resizing && mode === 'move' && selectedIdSet.has(component.id) && selectedIds.length > 1
       ? new Set(selectedIds)
       : new Set([component.id])
-    const originals = components
+    const originals = allComponents
       .filter(item => groupIds.has(item.id) && !item.locked)
       .map(item => ({ id: item.id, position: { ...item.position } }))
     const groupBounds = selectionBounds(originals.map(item => ({ position: item.position })))
-    const targetBounds = components
+    const targetBounds = allComponents
       .filter(item => !groupIds.has(item.id) && item.visible !== false)
       .map(item => item.position)
     targetBounds.push({ x: 0, y: 0, width: canvas.width, height: canvas.height })
 
-    const move = pointer => {
+    let pointerFrame = null
+    let pendingPointer = null
+    const applyMove = pointer => {
       const rawDx = (pointer.clientX - startX) * (canvas.width / rect.width)
       const rawDy = (pointer.clientY - startY) * (canvas.height / rect.height)
       const snap = value => snapToGrid ? snapValue(value, gridSize) : value
-      setCoordinate(pointerToLogical(pointer, rect, canvas))
+      scheduleCoordinate(pointerToLogical(pointer, rect, canvas))
 
       if (resizing) {
         const original = originals[0].position
@@ -165,7 +199,22 @@ export function RuntimeCanvas({
         onChange?.(original.id, { position: { ...original.position, x: clean(original.position.x + dx), y: clean(original.position.y + dy) } }, { transient: true })
       }
     }
+    const move = pointer => {
+      pendingPointer = pointer
+      if (pointerFrame !== null) return
+      pointerFrame = window.requestAnimationFrame(() => {
+        pointerFrame = null
+        const latest = pendingPointer
+        pendingPointer = null
+        if (latest) applyMove(latest)
+      })
+    }
     const stop = () => {
+      if (pointerFrame !== null) window.cancelAnimationFrame(pointerFrame)
+      pointerFrame = null
+      const latest = pendingPointer
+      pendingPointer = null
+      if (latest) applyMove(latest)
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', stop)
       window.removeEventListener('pointercancel', stop)
@@ -176,7 +225,7 @@ export function RuntimeCanvas({
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', stop)
     window.addEventListener('pointercancel', stop)
-  }
+  }, [canvas, editable, gridSize, onChange, onSelect, onTransformEnd, onTransformStart, scheduleCoordinate, schema?.components, selectedIds, selectedIdSet, smartGuides, snapToGrid])
 
   const launchPopup = useCallback((componentId, trigger) => {
     popupReturnFocusRef.current = trigger || null
@@ -205,8 +254,8 @@ export function RuntimeCanvas({
           maxHeight: zoom > 1 ? 'none' : '100%',
         }}
         onPointerDown={event => { if (event.target === event.currentTarget) onSelect?.(null, { additive: false }) }}
-        onPointerMove={event => editable && setCoordinate(pointerToLogical(event, event.currentTarget.getBoundingClientRect(), canvas))}
-        onPointerLeave={() => !transformHud && setCoordinate(null)}
+        onPointerMove={event => editable && scheduleCoordinate(pointerToLogical(event, event.currentTarget.getBoundingClientRect(), canvas))}
+        onPointerLeave={() => !transformHud && clearCoordinate()}
         onDragOver={event => {
           if (!editable || !onDesignFileDrop || !Array.from(event.dataTransfer?.types || []).includes('Files')) return
           event.preventDefault()
@@ -231,7 +280,7 @@ export function RuntimeCanvas({
           if (component.visible === false) return null
           const value = values[component.binding?.tagId]
           const quality = qualities[component.binding?.tagId] || 'good'
-          const selected = selectedIds.includes(component.id)
+          const selected = selectedIdSet.has(component.id)
           return <RuntimeOverlay
             key={component.id}
             component={component}
@@ -252,7 +301,6 @@ export function RuntimeCanvas({
             operationMode={operationModes[component.id] || 'manual'}
             onOperationModeChange={changeOperationMode}
             operationLockLabel={operationLockFor(component.id)}
-            componentById={componentById}
             onStartTransform={editable ? startTransform : null}
             onSelect={onSelect}
           />
@@ -286,7 +334,6 @@ export function RuntimeCanvas({
             operationModes={operationModes}
             onOperationModeChange={changeOperationMode}
             operationLockFor={operationLockFor}
-            componentById={componentById}
             onClose={closePopup}
           />
         )}
@@ -314,7 +361,6 @@ const RuntimeOverlay = memo(function RuntimeOverlay({
   operationMode,
   onOperationModeChange,
   operationLockLabel,
-  componentById,
   onStartTransform,
   onSelect,
 }) {
@@ -361,7 +407,6 @@ const RuntimeOverlay = memo(function RuntimeOverlay({
           operationMode={operationMode}
           onOperationModeChange={mode => onOperationModeChange(component.id, mode)}
           operationLockLabel={operationLockLabel}
-          componentById={componentById}
         />
       </RuntimeComponentBoundary>
       {editable && selected && !component.locked && RESIZE_HANDLES.map(handle => <button
@@ -434,7 +479,7 @@ class RuntimeComponentBoundary extends Component {
   render() { return this.state.failed ? <div className="sb-runtime-component-error" role="status"><strong>COMPONENT ERROR</strong><span>{this.props.componentName}</span></div> : this.props.children }
 }
 
-function RuntimeComponent({ component, designAsset, tag, value, quality, chartTags, editable, actorRole, onCommand, commandResult, onExpandChart, onOpenPopup, commandConnectionAvailable, operationMode = 'manual', onOperationModeChange, operationLockLabel = '', componentById }) {
+function RuntimeComponent({ component, designAsset, tag, value, quality, chartTags, editable, actorRole, onCommand, commandResult, onExpandChart, onOpenPopup, commandConnectionAvailable, operationMode = 'manual', onOperationModeChange, operationLockLabel = '' }) {
   const [commandState, setCommandState] = useState('idle')
   const properties = component.properties || {}
   const qualityLabel = quality !== 'good' ? quality.toUpperCase() : null
@@ -740,7 +785,7 @@ export function GaugeComponent({ component, tag, value, quality = 'good' }) {
   )
 }
 
-function ControlPopupDialog({ component, childComponents, tags, values, qualities, actorRole, onCommand, commandResults, commandConnectionAvailable, operationModes, onOperationModeChange, operationLockFor, componentById, onClose }) {
+function ControlPopupDialog({ component, childComponents, tags, values, qualities, actorRole, onCommand, commandResults, commandConnectionAvailable, operationModes, onOperationModeChange, operationLockFor, onClose }) {
   const dialogRef = useRef(null)
   const closeRef = useRef(null)
   const properties = component.properties || {}
@@ -810,7 +855,6 @@ function ControlPopupDialog({ component, childComponents, tags, values, qualitie
                     operationMode={operationModes[child.id] || 'manual'}
                     onOperationModeChange={mode => onOperationModeChange(child.id, mode)}
                     operationLockLabel={operationLockFor(child.id)}
-                    componentById={componentById}
                   />
                 </RuntimeComponentBoundary>
               </div>

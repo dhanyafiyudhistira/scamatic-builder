@@ -21,6 +21,8 @@ import { flushPendingTerminalCommandAudits, persistAndPublishTerminalCommand } f
 import { createAdaptiveRecoveryScheduler } from './connectors/adaptive-recovery-scheduler.js'
 import { createKeyedTaskQueue } from './connectors/keyed-task-queue.js'
 import { createWakeablePoller } from './connectors/wakeable-poller.js'
+import { createCommandVersionCache } from './connectors/command-version-cache.js'
+import { createRpcPerformanceTracker } from './connectors/rpc-performance.js'
 
 if (process.env.CONNECTOR_PLATFORM_ENABLED !== 'true') {
   console.error('[ConnectorWorker] CONNECTOR_PLATFORM_ENABLED is not true; refusing to start.')
@@ -37,7 +39,19 @@ async function main() {
   const startedAt = Date.now()
   const startup = { initialized: false, phase: 'starting', attempts: 0 }
   const ipcTransport = process.env.CONNECTOR_STREAM_TRANSPORT === 'ipc' && typeof process.send === 'function'
-  const healthProvider = kind => workerHealth(kind, startup, startedAt, environmentRef)
+  const commandVersionCache = createCommandVersionCache({
+    maxEntries: process.env.CONNECTOR_COMMAND_VERSION_CACHE_MAX_ENTRIES,
+    ttlMs: process.env.CONNECTOR_COMMAND_VERSION_CACHE_TTL_MS,
+  })
+  const rpcPerformance = createRpcPerformanceTracker({
+    maxSamples: process.env.CONNECTOR_RPC_METRICS_CAPACITY,
+  })
+  let commandQueue = null
+  const healthProvider = kind => workerHealth(kind, startup, startedAt, environmentRef, {
+    queue: commandQueue?.snapshot() || null,
+    publishedVersionCache: commandVersionCache.snapshot(),
+    performance: rpcPerformance.snapshot(),
+  })
   const hub = ipcTransport
     ? new IpcRuntimeEventSink({ healthProvider })
     : new RuntimeStreamHub({
@@ -283,7 +297,7 @@ async function main() {
   })
   await terminalAuditRecovery.start()
   let lastCommandQueueErrorAt = 0
-  const commandQueue = createKeyedTaskQueue({
+  commandQueue = createKeyedTaskQueue({
     maxPending: boundedInteger(process.env.CONNECTOR_COMMAND_MAX_PENDING, 20, 2_000, 200),
     onError: (error, stats) => {
       const now = Date.now()
@@ -297,7 +311,7 @@ async function main() {
   const reloadTimer = setInterval(() => reload().catch(error => console.error('[ConnectorWorker] reload failed', error.message)), 10_000)
   let lastCommandPollErrorAt = 0
   const commandPoller = createWakeablePoller({
-    poll: () => dispatchCommands(runtimes, hub, commandHealthWriter, terminalAuditRecovery, commandQueue),
+    poll: () => dispatchCommands(runtimes, hub, commandHealthWriter, terminalAuditRecovery, commandQueue, commandVersionCache, rpcPerformance),
     intervalMs: boundedInteger(process.env.CONNECTOR_COMMAND_POLL_MS, 50, 5_000, 250),
     onError: error => {
       const now = Date.now()
@@ -357,7 +371,7 @@ async function migrateLegacyCommandHealth(environmentRef) {
   )
 }
 
-function workerHealth(kind, startup, startedAt, environmentRef) {
+function workerHealth(kind, startup, startedAt, environmentRef, rpc = {}) {
   const mongo = mongoConnectionStatus()
   const ready = startup.initialized && mongo.ready
   return {
@@ -369,6 +383,7 @@ function workerHealth(kind, startup, startedAt, environmentRef) {
       initialization: startup.phase,
       mongo: mongo.state,
     },
+    rpc,
   }
 }
 
@@ -422,7 +437,7 @@ function nonNegativeInteger(value, fallback) {
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback
 }
 
-async function dispatchCommands(runtimes, hub, commandHealthWriter, terminalAuditRecovery, commandQueue) {
+async function dispatchCommands(runtimes, hub, commandHealthWriter, terminalAuditRecovery, commandQueue, commandVersionCache, rpcPerformance) {
   const pendingIds = commandQueue.pendingIds()
   const filter = { status: 'authorized', executionMode: 'worker' }
   if (pendingIds.length) filter._id = { $nin: pendingIds }
@@ -431,10 +446,10 @@ async function dispatchCommands(runtimes, hub, commandHealthWriter, terminalAudi
   if (!available) return 0
   const candidates = await CommandEvent.find(filter).sort({ createdAt: 1 }).limit(available).lean()
   const versionIds = [...new Set(candidates.map(candidate => candidate.versionId).filter(Boolean))]
-  const versions = versionIds.length
-    ? await ProjectVersion.find({ _id: { $in: versionIds } }).lean()
-    : []
-  const versionsById = new Map(versions.map(version => [String(version._id), version]))
+  const versionsById = await commandVersionCache.load(
+    versionIds,
+    ids => ProjectVersion.find({ _id: { $in: ids } }).lean(),
+  )
   let scheduled = 0
   for (const candidate of candidates) {
     const version = versionsById.get(String(candidate.versionId))
@@ -448,13 +463,14 @@ async function dispatchCommands(runtimes, hub, commandHealthWriter, terminalAudi
       hub,
       commandHealthWriter,
       terminalAuditRecovery,
+      rpcPerformance,
     }), { id: candidate._id })
     if (accepted) scheduled += 1
   }
   return scheduled
 }
 
-async function claimAndExecuteCommand({ candidate, version, runtimes, hub, commandHealthWriter, terminalAuditRecovery }) {
+async function claimAndExecuteCommand({ candidate, version, runtimes, hub, commandHealthWriter, terminalAuditRecovery, rpcPerformance }) {
   const claimed = await CommandEvent.findOneAndUpdate({ _id: candidate._id, status: 'authorized', executionMode: 'worker' }, { $set: { status: 'dispatched', dispatchedAt: new Date() } }, { new: true }).lean()
   if (!claimed) return
   hub.publishCommand(claimed)
@@ -463,12 +479,12 @@ async function claimAndExecuteCommand({ candidate, version, runtimes, hub, comma
   const source = tag && version.schema.dataSources?.find(item => item.id === tag.sourceId)
   const runtime = source && runtimes.get(source.connectorRef)
   if (!runtime || runtime.mode !== 'published' || !component || !tag) {
-    await finishCommand(hub, claimed, 'failed', 'Published connector runtime is unavailable.', {}, {}, terminalAuditRecovery)
+    await finishCommand(hub, claimed, 'failed', 'Published connector runtime is unavailable.', {}, {}, terminalAuditRecovery, rpcPerformance)
     return
   }
   const acknowledgment = commandAcknowledgment(component, runtime.environment.config, claimed.payloadSummary?.value)
   if (!acknowledgment) {
-    await finishCommand(hub, claimed, 'failed', 'Command acknowledgment is not configured.', {}, {}, terminalAuditRecovery)
+    await finishCommand(hub, claimed, 'failed', 'Command acknowledgment is not configured.', {}, {}, terminalAuditRecovery, rpcPerformance)
     return
   }
   const executionTiming = {
@@ -487,34 +503,34 @@ async function claimAndExecuteCommand({ candidate, version, runtimes, hub, comma
     })
     executionTiming.upstreamCompletedAt = new Date()
     if (receipt.rejected) {
-      await finishCommand(hub, claimed, 'rejected', 'Device rejected the command.', { code: receipt.code, deviceResult: receipt.result }, executionTiming, terminalAuditRecovery)
+      await finishCommand(hub, claimed, 'rejected', 'Device rejected the command.', { code: receipt.code, deviceResult: receipt.result }, executionTiming, terminalAuditRecovery, rpcPerformance)
       queueCommandHealth(commandHealthWriter, runtime, 'online', 'Device RPC responder returned a rejection.', { lastAcknowledgedAt: new Date() })
     } else if (!receipt.accepted) {
-      await finishCommand(hub, claimed, 'failed', 'ThingsBoard rejected the RPC.', { code: receipt.code }, executionTiming, terminalAuditRecovery)
+      await finishCommand(hub, claimed, 'failed', 'ThingsBoard rejected the RPC.', { code: receipt.code }, executionTiming, terminalAuditRecovery, rpcPerformance)
       queueCommandHealth(commandHealthWriter, runtime, 'degraded', 'ThingsBoard rejected the RPC dispatch.')
     } else if (receipt.acknowledged) {
-      await finishCommand(hub, claimed, 'acknowledged', 'Command acknowledged.', { value: claimed.payloadSummary?.value, receipt: receipt.code }, executionTiming, terminalAuditRecovery)
+      await finishCommand(hub, claimed, 'acknowledged', 'Command acknowledged.', { value: claimed.payloadSummary?.value, receipt: receipt.code }, executionTiming, terminalAuditRecovery, rpcPerformance)
       queueCommandHealth(commandHealthWriter, runtime, 'online', acknowledgment.mode === 'two-way' ? 'Device RPC responder acknowledged the command.' : 'Process feedback matched the command.', { lastAcknowledgedAt: new Date() })
     } else {
       const timeout = commandAcknowledgmentTimeout(acknowledgment.mode, receipt.code)
-      await finishCommand(hub, claimed, timeout.command.status, timeout.command.message, timeout.command.result, executionTiming, terminalAuditRecovery)
+      await finishCommand(hub, claimed, timeout.command.status, timeout.command.message, timeout.command.result, executionTiming, terminalAuditRecovery, rpcPerformance)
       queueCommandHealth(commandHealthWriter, runtime, timeout.commandHealth.state, timeout.commandHealth.message, { lastTimeoutAt: new Date() })
     }
   } catch (error) {
     executionTiming.upstreamCompletedAt ||= new Date()
     if (error?.name === 'TimeoutError') {
       const timeout = commandAcknowledgmentTimeout(acknowledgment.mode)
-      await finishCommand(hub, claimed, timeout.command.status, timeout.command.message, timeout.command.result, executionTiming, terminalAuditRecovery)
+      await finishCommand(hub, claimed, timeout.command.status, timeout.command.message, timeout.command.result, executionTiming, terminalAuditRecovery, rpcPerformance)
       queueCommandHealth(commandHealthWriter, runtime, timeout.commandHealth.state, timeout.commandHealth.message, { lastTimeoutAt: new Date() })
     } else {
-      await finishCommand(hub, claimed, 'failed', 'Command dispatch failed.', {}, executionTiming, terminalAuditRecovery)
+      await finishCommand(hub, claimed, 'failed', 'Command dispatch failed.', {}, executionTiming, terminalAuditRecovery, rpcPerformance)
       queueCommandHealth(commandHealthWriter, runtime, 'degraded', 'RPC dispatch failed.')
     }
   }
 }
 
-function finishCommand(hub, event, status, message, result = {}, timing = {}, terminalAuditRecovery) {
-  return persistAndPublishTerminalCommand({
+async function finishCommand(hub, event, status, message, result = {}, timing = {}, terminalAuditRecovery, rpcPerformance) {
+  const completed = await persistAndPublishTerminalCommand({
     hub,
     event,
     status,
@@ -523,6 +539,8 @@ function finishCommand(hub, event, status, message, result = {}, timing = {}, te
     timing,
     onAuditDeferred: () => terminalAuditRecovery?.request(),
   })
+  rpcPerformance?.record(completed)
+  return completed
 }
 
 function queueCommandHealth(writer, runtime, state, message, timestamps = {}) {

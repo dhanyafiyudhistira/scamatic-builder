@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { loadCommandAdmissionReads, loadLiveCommandReads } from '../api/_lib/command-read-context.js'
+import { loadCommandAdmissionReads, loadCommandStatusReads, loadLiveCommandReads } from '../api/_lib/command-read-context.js'
 
 test('command admission starts independent MongoDB reads without serial waits', async () => {
   const started = []
@@ -21,6 +21,26 @@ test('command admission starts independent MongoDB reads without serial waits', 
     project: { id: 'project-1' },
     runtimeSession: { id: 'session-1' },
     duplicate: null,
+  })
+})
+
+test('command status overlaps project authorization context and runtime-session reads', async () => {
+  const started = []
+  const pending = new Map()
+  const read = (name, value) => () => {
+    started.push(name)
+    return new Promise(resolve => pending.set(name, () => resolve(value)))
+  }
+  const resultPromise = loadCommandStatusReads({
+    loadProject: read('project', { id: 'project-1' }),
+    loadRuntimeSession: read('runtime-session', { id: 'session-1' }),
+  })
+
+  assert.deepEqual(started, ['project', 'runtime-session'])
+  for (const release of pending.values()) release()
+  assert.deepEqual(await resultPromise, {
+    project: { id: 'project-1' },
+    runtimeSession: { id: 'session-1' },
   })
 })
 

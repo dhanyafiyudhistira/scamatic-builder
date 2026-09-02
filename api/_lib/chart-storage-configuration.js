@@ -26,6 +26,33 @@ export async function loadWorkspaceChartStorage(workspaceId, { environment = pro
   return { source: 'disabled', config, record, public: publicWorkspaceChartStorage(record, config, 'disabled') }
 }
 
+export async function loadPublicWorkspaceChartStorage(workspaceId, { environment = process.env } = {}) {
+  const record = await ChartStorageConfiguration.findOne({ workspaceId }).lean()
+  if (record) {
+    const config = workspaceChartStorageMetadataConfig(record)
+    return { source: 'workspace', config, record, public: publicWorkspaceChartStorage(record, config, 'workspace') }
+  }
+  const config = chartStorageConfig(environment)
+  const source = config.enabled ? 'environment' : 'disabled'
+  return { source, config, record: null, public: publicWorkspaceChartStorage(null, config, source) }
+}
+
+export function workspaceChartStorageMetadataConfig(record = {}) {
+  return {
+    enabled: Boolean(record.enabled && record.secretConfiguredAt),
+    uri: '',
+    dbName: record.dbName || 'scamatic_telemetry',
+    collectionName: record.collectionName || 'chart_samples',
+    retentionDays: record.retentionDays ?? 30,
+    batchSize: record.batchSize ?? 500,
+    flushMs: record.flushMs ?? 250,
+    maxQueue: record.maxQueue ?? 20_000,
+    maxPoolSize: record.maxPoolSize ?? 20,
+    maxBootstrapPoints: record.maxBootstrapPoints ?? 10_000,
+    sharedCluster: false,
+  }
+}
+
 export function storedChartStorageConfig(record, uri, baseEnvironment = process.env) {
   return chartStorageConfig({
     ...baseEnvironment,

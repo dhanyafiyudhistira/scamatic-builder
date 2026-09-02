@@ -228,6 +228,7 @@ const connectorSecretSchema = new mongoose.Schema({
   wrappedKey: { type: String, required: true, select: false },
   wrappedKeyIv: { type: String, required: true, select: false },
   wrappedKeyTag: { type: String, required: true, select: false },
+  wrappingKeyId: { type: String, default: '', index: true },
   keyVersion: { type: String, default: 'v1', select: false },
   rotatedBy: { type: String, required: true },
 }, { timestamps: true })
@@ -294,6 +295,7 @@ const chartStorageSecretSchema = new mongoose.Schema({
   wrappedKey: { type: String, required: true, select: false },
   wrappedKeyIv: { type: String, required: true, select: false },
   wrappedKeyTag: { type: String, required: true, select: false },
+  wrappingKeyId: { type: String, default: '', index: true },
   keyVersion: { type: String, default: 'v1', select: false },
   rotatedBy: { type: String, required: true },
 }, { timestamps: true })

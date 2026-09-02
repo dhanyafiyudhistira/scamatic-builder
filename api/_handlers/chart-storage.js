@@ -5,7 +5,7 @@ import { PERMISSIONS, requireWorkspacePermission } from '../_lib/authorization.j
 import { chartStorageSecretId, decryptChartStorageSecret, encryptChartStorageSecret } from '../_lib/connector-secrets.js'
 import { assertSafeChartMongoTarget, chartStorageTargetLabel, normalizeChartMongoUri } from '../_lib/chart-storage-target.js'
 import { ensureChartTelemetryStore } from '../_lib/chart-telemetry-store.js'
-import { loadWorkspaceChartStorage, publicWorkspaceChartStorage, storedChartStorageConfig } from '../_lib/chart-storage-configuration.js'
+import { loadPublicWorkspaceChartStorage, publicWorkspaceChartStorage, storedChartStorageConfig } from '../_lib/chart-storage-configuration.js'
 import { enforceRateLimit, redactMetadata, requestId } from '../_lib/security.js'
 
 export default async function handler(req, res) {
@@ -22,16 +22,19 @@ export default async function handler(req, res) {
   try {
     await connectMongo()
     if (req.method === 'GET') {
-      const resolved = await loadWorkspaceChartStorage(principal.workspaceId)
+      const resolved = await loadPublicWorkspaceChartStorage(principal.workspaceId)
       return res.status(200).json({ storage: resolved.public })
     }
-    if (req.method === 'POST') return testStorage(req, res, principal)
-    if (req.method === 'PUT') return saveStorage(req, res, principal)
-    return removeStorage(req, res, principal)
+    if (req.method === 'POST') return await testStorage(req, res, principal)
+    if (req.method === 'PUT') return await saveStorage(req, res, principal)
+    return await removeStorage(req, res, principal)
   } catch (error) {
     if (error?.statusCode) return res.status(error.statusCode).json({ error: error.message, code: error.code })
     if (['CONNECTOR_KEY_MISSING', 'CONNECTOR_KEY_INVALID'].includes(error?.code)) {
       return res.status(503).json({ error: 'Server secret encryption is not configured.', code: 'CHART_STORAGE_ENCRYPTION_UNAVAILABLE', correlationId: requestId(req) })
+    }
+    if (error?.code === 'CONNECTOR_KEY_MISMATCH') {
+      return res.status(409).json({ error: 'Stored Chart storage secret uses a different runtime key. Enter the MongoDB URI again to replace it, or remove this configuration.', code: 'CHART_STORAGE_KEY_MISMATCH', correlationId: requestId(req) })
     }
     if (['CHART_STORAGE_UNAVAILABLE', 'CHART_STORAGE_CONFIGURATION', 'CHART_STORAGE_COLLECTION_TYPE'].includes(error?.code)) {
       return res.status(422).json({ error: 'MongoDB Chart storage could not be validated.', code: error.code, correlationId: requestId(req) })

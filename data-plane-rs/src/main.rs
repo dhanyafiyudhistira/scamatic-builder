@@ -1,13 +1,9 @@
-mod gateway;
-mod http;
-mod protocol;
-mod state;
-
-use gateway::{IsaacGateway, IsaacGatewayConfig};
-use protocol::{ControlFlow, OUTPUT_SOURCE, PROTOCOL_VERSION};
+use scamatic_data_plane::gateway::{IsaacGateway, IsaacGatewayConfig};
+use scamatic_data_plane::http;
+use scamatic_data_plane::protocol::{self, ControlFlow, OUTPUT_SOURCE, PROTOCOL_VERSION};
+use scamatic_data_plane::state::ShadowState;
 use serde::Serialize;
 use serde_json::json;
-use state::ShadowState;
 use std::error::Error;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};

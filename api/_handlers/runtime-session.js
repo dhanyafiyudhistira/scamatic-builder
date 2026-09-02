@@ -123,7 +123,8 @@ function embeddedRuntimeStreamUrl() {
   }
   let url
   try { url = new URL(configuredOrigin) } catch { throw Object.assign(new Error('APP_ORIGIN is invalid.'), { statusCode: 503 }) }
-  const validProtocol = process.env.NODE_ENV === 'production' ? url.protocol === 'https:' : ['http:', 'https:'].includes(url.protocol)
+  const loopbackHttp = url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)
+  const validProtocol = url.protocol === 'https:' || loopbackHttp || (process.env.NODE_ENV !== 'production' && url.protocol === 'http:')
   if (!validProtocol || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw Object.assign(new Error('APP_ORIGIN must be a clean HTTP origin.'), { statusCode: 503 })
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
   url.pathname = '/runtime-stream'

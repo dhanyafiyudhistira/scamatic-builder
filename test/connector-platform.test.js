@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { coerceConnectorValue, normalizeTagEvent, publicConnector } from '../shared/connector-contract.js'
-import { connectorSecretId, decryptConnectorSecret, encryptConnectorSecret } from '../api/_lib/connector-secrets.js'
+import { connectorSecretId, decryptConnectorSecret, encryptConnectorSecret, inspectConnectorSecretKey, rewrapConnectorSecretKey } from '../api/_lib/connector-secrets.js'
 import { exponentialBackoff } from '../server/connectors/backoff.js'
 import { AsyncQueue } from '../server/connectors/async-queue.js'
 
@@ -22,6 +22,7 @@ test('normalized connector events coerce values and preserve isolation fields', 
 
 test('connector secrets use authenticated envelope encryption', () => {
   const previous = process.env.SCADA_CONNECTOR_MASTER_KEY
+  const previousFallback = process.env.SCADA_CONNECTOR_PREVIOUS_MASTER_KEYS
   process.env.SCADA_CONNECTOR_MASTER_KEY = Buffer.alloc(32, 7).toString('base64')
   try {
     const encrypted = encryptConnectorSecret({ jwt: 'super-secret-thingsboard-token', deviceToken: 'device-token-secret' }, { connectorId: 'connector-a', environmentRef: 'staging' })
@@ -35,6 +36,36 @@ test('connector secrets use authenticated envelope encryption', () => {
   } finally {
     if (previous == null) delete process.env.SCADA_CONNECTOR_MASTER_KEY
     else process.env.SCADA_CONNECTOR_MASTER_KEY = previous
+    if (previousFallback == null) delete process.env.SCADA_CONNECTOR_PREVIOUS_MASTER_KEYS
+    else process.env.SCADA_CONNECTOR_PREVIOUS_MASTER_KEYS = previousFallback
+  }
+})
+
+test('connector master-key rotation rewraps only the data key through a fallback keyring', () => {
+  const previous = process.env.SCADA_CONNECTOR_MASTER_KEY
+  const previousFallback = process.env.SCADA_CONNECTOR_PREVIOUS_MASTER_KEYS
+  const oldKey = Buffer.alloc(32, 3).toString('hex')
+  const newKey = Buffer.alloc(32, 9).toString('hex')
+  try {
+    process.env.SCADA_CONNECTOR_MASTER_KEY = oldKey
+    delete process.env.SCADA_CONNECTOR_PREVIOUS_MASTER_KEYS
+    const encrypted = encryptConnectorSecret({ jwt: 'secret-that-must-not-change' }, { connectorId: 'connector-a', environmentRef: 'staging' })
+    const originalPayload = encrypted.payloadCiphertext
+
+    process.env.SCADA_CONNECTOR_MASTER_KEY = newKey
+    process.env.SCADA_CONNECTOR_PREVIOUS_MASTER_KEYS = oldKey
+    assert.equal(inspectConnectorSecretKey(encrypted, { connectorId: 'connector-a', environmentRef: 'staging' }).primary, false)
+    const rewrapped = { ...encrypted, ...rewrapConnectorSecretKey(encrypted, { connectorId: 'connector-a', environmentRef: 'staging' }) }
+    assert.equal(rewrapped.payloadCiphertext, originalPayload)
+
+    delete process.env.SCADA_CONNECTOR_PREVIOUS_MASTER_KEYS
+    assert.equal(inspectConnectorSecretKey(rewrapped, { connectorId: 'connector-a', environmentRef: 'staging' }).primary, true)
+    assert.deepEqual(decryptConnectorSecret(rewrapped, { connectorId: 'connector-a', environmentRef: 'staging' }), { jwt: 'secret-that-must-not-change' })
+  } finally {
+    if (previous == null) delete process.env.SCADA_CONNECTOR_MASTER_KEY
+    else process.env.SCADA_CONNECTOR_MASTER_KEY = previous
+    if (previousFallback == null) delete process.env.SCADA_CONNECTOR_PREVIOUS_MASTER_KEYS
+    else process.env.SCADA_CONNECTOR_PREVIOUS_MASTER_KEYS = previousFallback
   }
 })
 

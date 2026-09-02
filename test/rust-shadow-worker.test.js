@@ -1,15 +1,30 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
+import { sep } from 'node:path'
 import { PassThrough } from 'node:stream'
 import {
   isaacCanaryProjectAllowed,
   isRustShadowOutput,
   resolveIsaacStreamPublicUrl,
+  resolveRustShadowBinary,
   RustShadowWorker,
   rustShadowControlMessage,
   rustShadowEnvironment,
 } from '../server/connectors/rust-shadow-worker.js'
+
+test('Rust shadow binary discovery prefers the shared Cargo workspace target', () => {
+  const checked = []
+  const workspaceDebug = ['target', 'debug', 'scamatic-data-plane.exe'].join(sep)
+  const legacyTarget = ['data-plane-rs', 'target'].join(sep)
+  const resolved = resolveRustShadowBinary({}, 'win32', candidate => {
+    checked.push(candidate)
+    return candidate.endsWith(workspaceDebug) && !candidate.includes(legacyTarget)
+  })
+  assert.equal(resolved.endsWith(workspaceDebug), true)
+  assert.equal(resolved.includes(legacyTarget), false)
+  assert.equal(checked.some(candidate => candidate.endsWith(['target', 'release', 'scamatic-data-plane.exe'].join(sep))), true)
+})
 
 test('Rust shadow worker mirrors coalesced telemetry and projected command status without secrets', async () => {
   const child = fakeChildProcess()

@@ -13,7 +13,9 @@ import { createRuntimeHistoryArchiveQueue } from '../../shared/runtime-history-a
 import { nextRuntimeResponderIdentity } from '../../shared/runtime-responder.js'
 import { createRuntimeCommandMetricsRecorder, runtimeCommandMetricsCsv, runtimeCommandMetricsStorageKey, runtimeCommandMetricsSummary } from '../../shared/runtime-command-metrics.js'
 import { numericEngineering, resolveNumericRange } from '../../shared/numeric-tag-config.js'
+import { createRuntimeTelemetryFrame } from '../../shared/runtime-telemetry-frame.js'
 import { AuthScreen } from '../platform/AuthScreen.jsx'
+import { connectRuntimeStream, resolveDesignAssets } from '../platform/desktop.js'
 
 export default function RuntimeApp({ slug, metricsEnabled = false }) {
   const [session, setSession] = useState({ loading: true, user: null })
@@ -285,16 +287,17 @@ export default function RuntimeApp({ slug, metricsEnabled = false }) {
       setState('loading-schema'); setError(''); setLockedProjectId(null)
       try {
         const data = await apiRequest(`/api/runtime?slug=${encodeURIComponent(slug)}`)
+        const runtimeData = { ...data, designAssets: await resolveDesignAssets(data.designAssets || {}) }
         if (cancelled) return
-        setRuntime(data)
-        const initialValues = Object.fromEntries(Object.entries(data.values || {}).map(([tagId, sample]) => [tagId, sample.value]))
+        setRuntime(runtimeData)
+        const initialValues = Object.fromEntries(Object.entries(runtimeData.values || {}).map(([tagId, sample]) => [tagId, sample.value]))
         valuesRef.current = initialValues
-        simulationTargetsRef.current = { ...(data.simulationTargets || {}) }
+        simulationTargetsRef.current = { ...(runtimeData.simulationTargets || {}) }
         setValues(initialValues)
-        setQualities(Object.fromEntries(Object.entries(data.values || {}).map(([tagId, sample]) => [tagId, sample.quality || 'good'])))
-        setHistories(seedRuntimeHistory(data.values || {}, data.history || {}))
+        setQualities(Object.fromEntries(Object.entries(runtimeData.values || {}).map(([tagId, sample]) => [tagId, sample.quality || 'good'])))
+        setHistories(seedRuntimeHistory(runtimeData.values || {}, runtimeData.history || {}))
         setState('connecting')
-        const scoped = await createRuntimeSession(data.projectId)
+        const scoped = await createRuntimeSession(runtimeData.projectId)
         if (cancelled) return
         setRuntimeSession(scoped)
         const waitsForTransport = ['poll', 'stream', 'simulation'].includes(scoped.telemetry?.mode) || Boolean(scoped.stream?.url)
@@ -318,11 +321,28 @@ export default function RuntimeApp({ slug, metricsEnabled = false }) {
     let disposed = false
     let reconnectTimer = null
     let reconnectAttempt = 0
-    const socket = new WebSocket(`${runtimeSession.stream.url}?ticket=${encodeURIComponent(runtimeSession.stream.ticket)}`)
-    socket.addEventListener('open', () => setState('connecting'))
-    socket.addEventListener('message', event => {
+    let disconnect = () => {}
+    const telemetryFrame = createRuntimeTelemetryFrame({
+      schedule: callback => window.setTimeout(callback, 16),
+      cancel: timer => window.clearTimeout(timer),
+      onFlush: events => {
+        if (disposed || events.length === 0) return
+        setValues(previous => {
+          const next = { ...previous }
+          for (const item of events) next[item.tagId] = item.value
+          return next
+        })
+        setQualities(previous => {
+          const next = { ...previous }
+          for (const item of events) next[item.tagId] = item.quality
+          return next
+        })
+        setHistories(previous => appendRuntimeHistory(previous, events))
+      },
+    })
+    const handleMessage = data => {
       try {
-        const message = JSON.parse(event.data)
+        const message = JSON.parse(data)
         if (message.type === 'ready') {
           setState('online')
           return
@@ -332,21 +352,12 @@ export default function RuntimeApp({ slug, metricsEnabled = false }) {
           return
         }
         if (message.type !== 'tag-batch' || !Array.isArray(message.events)) return
-        setValues(previous => {
-          const next = { ...previous }
-          for (const item of message.events) next[item.tagId] = item.value
-          return next
-        })
-        setQualities(previous => {
-          const next = { ...previous }
-          for (const item of message.events) next[item.tagId] = item.quality
-          return next
-        })
-        setHistories(previous => appendRuntimeHistory(previous, message.events))
+        telemetryFrame.enqueue(message.events)
       } catch { /* Ignore malformed worker frames. */ }
-    })
-    socket.addEventListener('close', () => {
+    }
+    const handleClose = () => {
       if (disposed) return
+      telemetryFrame.flush()
       setState('reconnecting')
       const reconnect = async () => {
         if (disposed) return
@@ -367,9 +378,28 @@ export default function RuntimeApp({ slug, metricsEnabled = false }) {
         }
       }
       reconnectTimer = window.setTimeout(reconnect, 250)
+    }
+    void connectRuntimeStream({
+      url: runtimeSession.stream.url,
+      ticket: runtimeSession.stream.ticket,
+      onOpen: () => setState('connecting'),
+      onMessage: handleMessage,
+      onClose: handleClose,
+      onError: () => setState('degraded'),
+    }).then(close => {
+      if (disposed) void close()
+      else disconnect = close
+    }).catch(() => {
+      if (disposed) return
+      setState('degraded')
+      handleClose()
     })
-    socket.addEventListener('error', () => setState('degraded'))
-    return () => { disposed = true; window.clearTimeout(reconnectTimer); socket.close() }
+    return () => {
+      disposed = true
+      window.clearTimeout(reconnectTimer)
+      telemetryFrame.clear()
+      void disconnect()
+    }
   }, [createRuntimeSession, receiveCommandPush, runtime?.projectId, runtimeSession?.engine?.selected, runtimeSession?.stream?.ticket, runtimeSession?.stream?.url])
 
   useEffect(() => {
@@ -1023,6 +1053,7 @@ function RuntimeConnectionNotice({ state, profile, bridgeHealth }) {
       <span className="sb-runtime-connection-copy">
         <strong>{content.title}</strong>
         <small>{content.detail}</small>
+        {state === 'degraded' && <small>Do click Ctrl + R to restart the runtime.</small>}
         <span className="sb-runtime-connection-progress" role="progressbar" aria-label={content.title} aria-valuemin="0" aria-valuemax="100" aria-valuenow={ready ? '100' : undefined}>
           <i />
         </span>

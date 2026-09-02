@@ -297,14 +297,18 @@ export function isRustShadowOutput(message) {
   )
 }
 
-export function resolveRustShadowBinary(env = process.env, platform = process.platform) {
+export function resolveRustShadowBinary(env = process.env, platform = process.platform, pathExists = existsSync) {
   const projectRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
   const configured = String(env.SCADA_RUST_SHADOW_BINARY || '').trim()
   if (configured) return isAbsolute(configured) ? configured : resolve(projectRoot, configured)
   const binary = platform === 'win32' ? 'scamatic-data-plane.exe' : 'scamatic-data-plane'
-  const release = join(projectRoot, 'data-plane-rs', 'target', 'release', binary)
-  const debug = join(projectRoot, 'data-plane-rs', 'target', 'debug', binary)
-  return existsSync(release) ? release : existsSync(debug) ? debug : release
+  const candidates = [
+    join(projectRoot, 'target', 'release', binary),
+    join(projectRoot, 'target', 'debug', binary),
+    join(projectRoot, 'data-plane-rs', 'target', 'release', binary),
+    join(projectRoot, 'data-plane-rs', 'target', 'debug', binary),
+  ]
+  return candidates.find(candidate => pathExists(candidate)) || candidates[0]
 }
 
 export function rustShadowEnvironment(env = process.env) {

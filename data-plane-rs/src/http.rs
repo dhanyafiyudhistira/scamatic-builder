@@ -1,5 +1,8 @@
-use crate::gateway::{IsaacEvent, IsaacGateway, IsaacSession};
+#[cfg(test)]
+use crate::gateway::IsaacSession;
+use crate::gateway::{IsaacEvent, IsaacGateway};
 use crate::state::{ShadowSnapshot, ShadowState};
+use crate::telemetry::encode_scoped_telemetry;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_TYPE};
@@ -11,6 +14,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, watch};
 use tokio::time::MissedTickBehavior;
@@ -148,10 +152,23 @@ async fn handle_isaac_socket(mut socket: WebSocket, gateway: Arc<IsaacGateway>, 
             event = events.recv() => {
                 match event {
                     Ok(IsaacEvent::Telemetry(batch)) => {
-                        let filtered = filter_telemetry(&session, &allowed_tags, batch);
-                        if filtered.is_empty() { continue; }
-                        let delivered = filtered.len() as u64;
-                        if send_json(&mut sender, json!({ "type": "tag-batch", "events": filtered })).await.is_err() { break; }
+                        let encode_started = Instant::now();
+                        let encoded = match encode_scoped_telemetry(
+                            batch.as_ref(),
+                            &session.workspace_id,
+                            &session.project_id,
+                            &allowed_tags,
+                        ) {
+                            Ok(Some(encoded)) => encoded,
+                            Ok(None) => {
+                                gateway.record_encoded(0, elapsed_nanoseconds(encode_started));
+                                continue;
+                            }
+                            Err(_) => break,
+                        };
+                        let delivered = encoded.events as u64;
+                        gateway.record_encoded(encoded.text.len() as u64, elapsed_nanoseconds(encode_started));
+                        if sender.send(Message::Text(encoded.text.into())).await.is_err() { break; }
                         gateway.record_delivered(delivered);
                     }
                     Ok(IsaacEvent::Command { event, scope }) => {
@@ -200,23 +217,8 @@ async fn handle_isaac_socket(mut socket: WebSocket, gateway: Arc<IsaacGateway>, 
     gateway.client_closed();
 }
 
-fn filter_telemetry(
-    session: &IsaacSession,
-    allowed_tags: &HashSet<String>,
-    events: Vec<Value>,
-) -> Vec<Value> {
-    events
-        .into_iter()
-        .filter(|event| {
-            event.get("workspaceId").and_then(Value::as_str) == Some(session.workspace_id.as_str())
-                && event.get("projectId").and_then(Value::as_str)
-                    == Some(session.project_id.as_str())
-                && event
-                    .get("tagId")
-                    .and_then(Value::as_str)
-                    .is_some_and(|tag_id| allowed_tags.contains(tag_id))
-        })
-        .collect()
+fn elapsed_nanoseconds(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
 async fn send_json<S>(sender: &mut S, value: Value) -> Result<(), axum::Error>
@@ -256,6 +258,16 @@ mod tests {
                 .metrics()
                 .contains("scamatic_shadow_telemetry_events_total 3")
         );
+        assert!(
+            state
+                .metrics()
+                .contains("scamatic_shadow_telemetry_decode_nanoseconds_total")
+        );
+        assert!(
+            state
+                .metrics()
+                .contains("scamatic_isaac_gateway_encode_nanoseconds_total")
+        );
     }
 
     #[test]
@@ -271,16 +283,21 @@ mod tests {
             expires_at: "2026-08-28T00:00:00.000Z".into(),
         };
         let allowed = HashSet::from(["tag-a".to_string()]);
-        let filtered = filter_telemetry(
-            &session,
+        let events: Vec<crate::telemetry::TelemetryEvent> = serde_json::from_value(json!([
+            { "workspaceId": "workspace-a", "projectId": "project-a", "tagId": "tag-a", "receivedAt": "now", "value": 1 },
+            { "workspaceId": "workspace-a", "projectId": "project-b", "tagId": "tag-a", "receivedAt": "now", "value": 2 },
+            { "workspaceId": "workspace-a", "projectId": "project-a", "tagId": "tag-b", "receivedAt": "now", "value": 3 }
+        ])).unwrap();
+        let encoded = encode_scoped_telemetry(
+            &events,
+            &session.workspace_id,
+            &session.project_id,
             &allowed,
-            vec![
-                json!({ "workspaceId": "workspace-a", "projectId": "project-a", "tagId": "tag-a", "value": 1 }),
-                json!({ "workspaceId": "workspace-a", "projectId": "project-b", "tagId": "tag-a", "value": 2 }),
-                json!({ "workspaceId": "workspace-a", "projectId": "project-a", "tagId": "tag-b", "value": 3 }),
-            ],
-        );
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0]["value"], 1);
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(encoded.events, 1);
+        let filtered: Value = serde_json::from_str(&encoded.text).unwrap();
+        assert_eq!(filtered["events"][0]["value"], 1);
     }
 }

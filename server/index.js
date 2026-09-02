@@ -32,12 +32,14 @@ import simulationSequenceHandler from '../api/_handlers/simulation-sequence.js'
 import { isDatabaseUnavailableError, requestId } from '../api/_lib/security.js'
 import { allowedOrigins } from '../api/_lib/auth.js'
 import { connectMongo, disconnectMongo } from '../api/_lib/mongo.js'
+import { auditMasterKeyCompatibility } from '../api/_lib/master-key-compatibility.js'
 import { warmApiMongo } from './api-mongo-warmup.js'
 import { RuntimeStreamHub } from './connectors/runtime-stream-hub.js'
 import { ManagedConnectorWorker } from './connectors/managed-connector-worker.js'
 import { RustShadowWorker } from './connectors/rust-shadow-worker.js'
 import { CommandRetentionJanitor } from './connectors/command-retention-janitor.js'
 import { createIsaacSessionAuthorizer } from './connectors/isaac-session-authorizer.js'
+import { canonicalLocalNavigationUrl } from './local-canonical-origin.js'
 
 const app = express()
 const safe = handler => (req, res, next) => Promise.resolve(handler(req, res)).catch(next)
@@ -56,6 +58,19 @@ let rustShadowWorker = null
 let commandRetentionJanitor = null
 app.disable('x-powered-by')
 app.set('trust proxy', 1)
+
+app.use((req, res, next) => {
+  const redirect = canonicalLocalNavigationUrl({
+    method: req.method,
+    host: req.get('host'),
+    accept: req.get('accept'),
+    fetchMode: req.get('sec-fetch-mode'),
+    originalUrl: req.originalUrl,
+  })
+  if (!redirect) return next()
+  res.setHeader('Cache-Control', 'no-store')
+  return res.redirect(308, redirect)
+})
 
 // CORS only matters for local dev (vite:5173 → express:3001).
 // In production, frontend + /api live on one Vercel origin → no CORS needed.
@@ -124,6 +139,16 @@ app.get(['/health/data-plane/live', '/health/data-plane/ready'], (req, res) => {
   }
   return res.status(kind === 'liveness' || health.ok ? 200 : 503).json({ ...health, check: kind, ts: Date.now() })
 })
+app.get('/health/data-plane/key-compatibility', safe(async (req, res) => {
+  try {
+    await connectMongo()
+    const result = await auditMasterKeyCompatibility()
+    return res.status(result.ok ? 200 : 503).json({ ...result, check: 'master-key-compatibility', ts: Date.now() })
+  } catch (error) {
+    const code = ['CONNECTOR_KEY_MISSING', 'CONNECTOR_KEY_INVALID'].includes(error?.code) ? error.code : 'KEY_COMPATIBILITY_UNAVAILABLE'
+    return res.status(503).json({ ok: false, status: 'unavailable', code, check: 'master-key-compatibility', ts: Date.now() })
+  }
+}))
 app.get('/health/data-plane/shadow', (req, res) => {
   const health = rustShadowWorker?.health() || {
     ok: false,

@@ -1,4 +1,5 @@
 use crate::gateway::{CommandScope, IsaacGateway};
+use crate::telemetry::SharedTelemetryBatch;
 use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
@@ -10,6 +11,8 @@ pub struct ShadowState {
     ready: AtomicBool,
     telemetry_batches: AtomicU64,
     telemetry_events: AtomicU64,
+    telemetry_ingress_bytes: AtomicU64,
+    telemetry_decode_nanoseconds: AtomicU64,
     command_events: AtomicU64,
     rejected_frames: AtomicU64,
     upstream_dropped: AtomicU64,
@@ -27,6 +30,8 @@ pub struct ShadowSnapshot {
     pub uptime_seconds: u64,
     pub telemetry_batches: u64,
     pub telemetry_events: u64,
+    pub telemetry_ingress_bytes: u64,
+    pub telemetry_decode_nanoseconds: u64,
     pub command_events: u64,
     pub rejected_frames: u64,
     pub upstream_dropped: u64,
@@ -36,6 +41,9 @@ pub struct ShadowSnapshot {
     pub gateway_auth_failures: u64,
     pub gateway_lagged_clients: u64,
     pub gateway_delivered_events: u64,
+    pub gateway_subscribers: u64,
+    pub gateway_encoded_bytes: u64,
+    pub gateway_encode_nanoseconds: u64,
 }
 
 impl ShadowState {
@@ -49,6 +57,8 @@ impl ShadowState {
             ready: AtomicBool::new(false),
             telemetry_batches: AtomicU64::new(0),
             telemetry_events: AtomicU64::new(0),
+            telemetry_ingress_bytes: AtomicU64::new(0),
+            telemetry_decode_nanoseconds: AtomicU64::new(0),
             command_events: AtomicU64::new(0),
             rejected_frames: AtomicU64::new(0),
             upstream_dropped: AtomicU64::new(0),
@@ -73,12 +83,19 @@ impl ShadowState {
         self.touch();
     }
 
+    pub fn record_telemetry_pipeline(&self, ingress_bytes: u64, decode_nanoseconds: u64) {
+        self.telemetry_ingress_bytes
+            .fetch_add(ingress_bytes, Ordering::Relaxed);
+        self.telemetry_decode_nanoseconds
+            .fetch_add(decode_nanoseconds, Ordering::Relaxed);
+    }
+
     pub fn record_command(&self) {
         self.command_events.fetch_add(1, Ordering::Relaxed);
         self.touch();
     }
 
-    pub fn publish_telemetry(&self, events: Vec<Value>) {
+    pub fn publish_telemetry(&self, events: SharedTelemetryBatch) {
         if let Some(gateway) = &self.gateway {
             gateway.publish_telemetry(events);
         }
@@ -114,6 +131,8 @@ impl ShadowState {
             uptime_seconds: self.started_at.elapsed().as_secs(),
             telemetry_batches: self.telemetry_batches.load(Ordering::Relaxed),
             telemetry_events: self.telemetry_events.load(Ordering::Relaxed),
+            telemetry_ingress_bytes: self.telemetry_ingress_bytes.load(Ordering::Relaxed),
+            telemetry_decode_nanoseconds: self.telemetry_decode_nanoseconds.load(Ordering::Relaxed),
             command_events: self.command_events.load(Ordering::Relaxed),
             rejected_frames: self.rejected_frames.load(Ordering::Relaxed),
             upstream_dropped: self.upstream_dropped.load(Ordering::Relaxed),
@@ -123,6 +142,9 @@ impl ShadowState {
             gateway_auth_failures: gateway.auth_failures,
             gateway_lagged_clients: gateway.lagged_clients,
             gateway_delivered_events: gateway.delivered_events,
+            gateway_subscribers: gateway.subscribers,
+            gateway_encoded_bytes: gateway.encoded_bytes,
+            gateway_encode_nanoseconds: gateway.encode_nanoseconds,
         }
     }
 
@@ -136,6 +158,10 @@ impl ShadowState {
                 "scamatic_shadow_telemetry_batches_total {}\n",
                 "# TYPE scamatic_shadow_telemetry_events_total counter\n",
                 "scamatic_shadow_telemetry_events_total {}\n",
+                "# TYPE scamatic_shadow_telemetry_ingress_bytes_total counter\n",
+                "scamatic_shadow_telemetry_ingress_bytes_total {}\n",
+                "# TYPE scamatic_shadow_telemetry_decode_nanoseconds_total counter\n",
+                "scamatic_shadow_telemetry_decode_nanoseconds_total {}\n",
                 "# TYPE scamatic_shadow_command_events_total counter\n",
                 "scamatic_shadow_command_events_total {}\n",
                 "# TYPE scamatic_shadow_rejected_frames_total counter\n",
@@ -151,11 +177,19 @@ impl ShadowState {
                 "# TYPE scamatic_isaac_gateway_lagged_clients_total counter\n",
                 "scamatic_isaac_gateway_lagged_clients_total {}\n",
                 "# TYPE scamatic_isaac_gateway_delivered_events_total counter\n",
-                "scamatic_isaac_gateway_delivered_events_total {}\n"
+                "scamatic_isaac_gateway_delivered_events_total {}\n",
+                "# TYPE scamatic_isaac_gateway_subscribers gauge\n",
+                "scamatic_isaac_gateway_subscribers {}\n",
+                "# TYPE scamatic_isaac_gateway_encoded_bytes_total counter\n",
+                "scamatic_isaac_gateway_encoded_bytes_total {}\n",
+                "# TYPE scamatic_isaac_gateway_encode_nanoseconds_total counter\n",
+                "scamatic_isaac_gateway_encode_nanoseconds_total {}\n"
             ),
             u8::from(snapshot.ok),
             snapshot.telemetry_batches,
             snapshot.telemetry_events,
+            snapshot.telemetry_ingress_bytes,
+            snapshot.telemetry_decode_nanoseconds,
             snapshot.command_events,
             snapshot.rejected_frames,
             snapshot.upstream_dropped,
@@ -164,6 +198,9 @@ impl ShadowState {
             snapshot.gateway_auth_failures,
             snapshot.gateway_lagged_clients,
             snapshot.gateway_delivered_events,
+            snapshot.gateway_subscribers,
+            snapshot.gateway_encoded_bytes,
+            snapshot.gateway_encode_nanoseconds,
         )
     }
 

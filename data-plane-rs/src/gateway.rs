@@ -1,3 +1,4 @@
+use crate::telemetry::SharedTelemetryBatch;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -221,7 +222,7 @@ impl CommandScope {
 
 #[derive(Clone, Debug)]
 pub enum IsaacEvent {
-    Telemetry(Vec<Value>),
+    Telemetry(SharedTelemetryBatch),
     Command { event: Value, scope: CommandScope },
 }
 
@@ -232,6 +233,8 @@ pub struct IsaacGateway {
     auth_failures: AtomicU64,
     lagged_clients: AtomicU64,
     delivered_events: AtomicU64,
+    encoded_bytes: AtomicU64,
+    encode_nanoseconds: AtomicU64,
 }
 
 impl IsaacGateway {
@@ -244,6 +247,8 @@ impl IsaacGateway {
             auth_failures: AtomicU64::new(0),
             lagged_clients: AtomicU64::new(0),
             delivered_events: AtomicU64::new(0),
+            encoded_bytes: AtomicU64::new(0),
+            encode_nanoseconds: AtomicU64::new(0),
         }
     }
 
@@ -251,7 +256,7 @@ impl IsaacGateway {
         self.events.subscribe()
     }
 
-    pub fn publish_telemetry(&self, events: Vec<Value>) {
+    pub fn publish_telemetry(&self, events: SharedTelemetryBatch) {
         if !events.is_empty() {
             let _ = self.events.send(IsaacEvent::Telemetry(events));
         }
@@ -285,12 +290,21 @@ impl IsaacGateway {
         self.delivered_events.fetch_add(count, Ordering::Relaxed);
     }
 
+    pub fn record_encoded(&self, bytes: u64, nanoseconds: u64) {
+        self.encoded_bytes.fetch_add(bytes, Ordering::Relaxed);
+        self.encode_nanoseconds
+            .fetch_add(nanoseconds, Ordering::Relaxed);
+    }
+
     pub fn counters(&self) -> GatewayCounters {
         GatewayCounters {
             clients: self.clients.load(Ordering::Relaxed),
             auth_failures: self.auth_failures.load(Ordering::Relaxed),
             lagged_clients: self.lagged_clients.load(Ordering::Relaxed),
             delivered_events: self.delivered_events.load(Ordering::Relaxed),
+            subscribers: self.events.receiver_count() as u64,
+            encoded_bytes: self.encoded_bytes.load(Ordering::Relaxed),
+            encode_nanoseconds: self.encode_nanoseconds.load(Ordering::Relaxed),
         }
     }
 }
@@ -301,6 +315,9 @@ pub struct GatewayCounters {
     pub auth_failures: u64,
     pub lagged_clients: u64,
     pub delivered_events: u64,
+    pub subscribers: u64,
+    pub encoded_bytes: u64,
+    pub encode_nanoseconds: u64,
 }
 
 fn identifier(value: &Value, field: &str) -> Option<String> {
@@ -314,6 +331,9 @@ fn identifier(value: &Value, field: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::telemetry::{SharedTelemetryBatch, TelemetryEvent};
+    use serde_json::Map;
+    use std::sync::Arc;
 
     #[test]
     fn command_scope_requires_complete_bounded_identity() {
@@ -337,5 +357,22 @@ mod tests {
         };
         assert!(session.same_scope(&session));
         assert!(session.can_receive_commands());
+    }
+
+    #[test]
+    fn telemetry_event_clones_share_one_batch_allocation() {
+        let batch: SharedTelemetryBatch = Arc::from(vec![TelemetryEvent {
+            workspace_id: "workspace".into(),
+            project_id: "project".into(),
+            tag_id: "tag".into(),
+            received_at: "now".into(),
+            fields: Map::new(),
+        }]);
+        let event = IsaacEvent::Telemetry(Arc::clone(&batch));
+        let IsaacEvent::Telemetry(cloned) = event.clone() else {
+            unreachable!()
+        };
+        assert!(Arc::ptr_eq(&batch, &cloned));
+        assert_eq!(Arc::strong_count(&batch), 3);
     }
 }

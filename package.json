@@ -1,7 +1,7 @@
 {
   "name": "nextporto-wtp-hmi",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.7",
   "type": "module",
   "scripts": {
     "dev":          "concurrently -n vite,api -c cyan,yellow \"vite\" \"node server/index.js\"",
@@ -21,9 +21,17 @@
     "smoke:control-plane": "node scripts/smoke-control-plane.js",
     "audit:rpc-retention": "node scripts/audit-rpc-retention.js",
     "migrate:rpc-retention": "node scripts/migrate-rpc-retention.js",
+    "rotate:master-key": "node scripts/rotate-connector-master-key.js",
+    "desktop:dev": "tauri dev",
+    "desktop:check": "cargo test --workspace",
+    "desktop:build": "tauri build",
+    "desktop:prepare-runtime": "node scripts/prepare-desktop-runtime.js",
+    "desktop:build:local": "npm run build && cargo build --release -p scamatic-data-plane -p scamatic-runtime-service && npm run desktop:prepare-runtime && tauri build --ci --features local-runtime --bundles nsis --config src-tauri/tauri.local.conf.json",
     "rust:fmt":    "cargo fmt --manifest-path data-plane-rs/Cargo.toml --check",
     "rust:test":   "cargo test --manifest-path data-plane-rs/Cargo.toml",
     "rust:build":  "cargo build --release --manifest-path data-plane-rs/Cargo.toml",
+    "bench:isaac": "cargo test --release -p scamatic-data-plane --test telemetry_perf -- --ignored --nocapture",
+    "bench:rpc": "node scripts/benchmark-local-rpc.js",
     "smoke:rust-shadow": "node scripts/smoke-rust-shadow.js",
     "smoke:isaac-canary": "node scripts/smoke-isaac-canary.js"
   },
@@ -35,11 +43,13 @@
     "express":   "^4.21.0",
     "mongodb":   "^6.20.0",
     "mongoose":  "^8.6.0",
+    "@tauri-apps/api": "2.11.1",
     "react":     "^18.3.1",
     "react-dom": "^18.3.1",
     "ws":        "^8.18.0"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "2.11.4",
     "@vitejs/plugin-react": "^4.3.1",
     "concurrently":         "^9.0.0",
     "vite":                 "^5.4.10"

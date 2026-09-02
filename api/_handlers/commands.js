@@ -13,7 +13,7 @@ import { runtimeCommandExecutionPlan, runtimeProfile } from '../../shared/runtim
 import { previousSimulationCommandValue, simulationCommandReadScope } from '../../shared/simulation-command-state.js'
 import { commandTimingProjection } from '../../shared/command-lifecycle.js'
 import { createCommandPhaseTimer } from '../../shared/command-phase-timing.js'
-import { loadCommandAdmissionReads, loadLiveCommandReads } from '../_lib/command-read-context.js'
+import { loadCommandAdmissionReads, loadCommandStatusReads, loadLiveCommandReads } from '../_lib/command-read-context.js'
 import { createBoundedAsyncCache } from '../_lib/bounded-async-cache.js'
 
 const publishedVersionCache = createBoundedAsyncCache({
@@ -218,10 +218,12 @@ async function commandStatus(req, res, principal) {
   }
   await connectMongo()
   if (!(await enforceRateLimit(req, res, 'runtime-command-status', { limit: 180, windowMs: 60_000, identity: `${principal.id}:${projectId}` }))) return
-  const project = await Project.findById(projectId)
+  const { project, runtimeSession } = await loadCommandStatusReads({
+    loadProject: () => Project.findById(projectId),
+    loadRuntimeSession: () => RuntimeSession.findOne({ _id: digest(runtimeToken), authSessionId: principal.sessionId, userId: principal.id, projectId, revokedAt: null, expiresAt: { $gt: new Date() } }).lean(),
+  })
   const authorization = project && await requireProjectPermission(principal, res, project, PERMISSIONS.COMMAND_EXECUTE)
   if (!authorization) return
-  const runtimeSession = await RuntimeSession.findOne({ _id: digest(runtimeToken), authSessionId: principal.sessionId, userId: principal.id, projectId, revokedAt: null, expiresAt: { $gt: new Date() } }).lean()
   if (!runtimeSession || runtimeSession.versionId !== project.activeVersionId || !runtimeSession.capabilities.includes(PERMISSIONS.COMMAND_EXECUTE)) {
     return res.status(403).json({ error: 'Runtime session is invalid or stale.', code: 'RUNTIME_SESSION_INVALID', correlationId })
   }

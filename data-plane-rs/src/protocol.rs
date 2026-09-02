@@ -1,7 +1,11 @@
 use crate::gateway::CommandScope;
 use crate::state::ShadowState;
+use crate::telemetry::{SharedTelemetryBatch, TelemetryBatchPayload};
 use serde::Deserialize;
 use serde_json::Value;
+use serde_json::value::RawValue;
+use std::sync::Arc;
+use std::time::Instant;
 
 pub const CONTROL_SOURCE: &str = "scamatic-control-plane";
 pub const OUTPUT_SOURCE: &str = "scamatic-rust-data-plane";
@@ -17,21 +21,22 @@ pub enum ControlFlow {
 }
 
 #[derive(Debug, Deserialize)]
-struct Envelope {
-    source: String,
+struct Envelope<'a> {
+    source: &'a str,
     version: u8,
     #[serde(rename = "type")]
-    kind: String,
-    #[serde(default)]
-    payload: Value,
+    kind: &'a str,
+    #[serde(default, borrow)]
+    payload: Option<&'a RawValue>,
 }
 
 pub fn handle_line(line: &str, state: &ShadowState) -> Result<ControlFlow, &'static str> {
+    let started = Instant::now();
     if line.len() > MAX_LINE_BYTES {
         state.record_rejected();
         return Err("FRAME_TOO_LARGE");
     }
-    let envelope: Envelope = serde_json::from_str(line).map_err(|_| {
+    let envelope: Envelope<'_> = serde_json::from_str(line).map_err(|_| {
         state.record_rejected();
         "INVALID_JSON"
     })?;
@@ -40,36 +45,34 @@ pub fn handle_line(line: &str, state: &ShadowState) -> Result<ControlFlow, &'sta
         return Err("INVALID_PROTOCOL");
     }
 
-    match envelope.kind.as_str() {
+    match envelope.kind {
         "shadow.telemetry.batch" => {
-            let events = envelope
+            let payload = envelope
                 .payload
-                .get("events")
-                .and_then(Value::as_array)
                 .ok_or_else(|| reject(state, "INVALID_TELEMETRY_BATCH"))?;
-            if events.len() > MAX_EVENTS_PER_BATCH
-                || events.iter().any(|event| {
-                    !valid_identifier(event, "workspaceId")
-                        || !valid_identifier(event, "projectId")
-                        || !valid_identifier(event, "tagId")
-                        || event.get("receivedAt").and_then(Value::as_str).is_none()
-                })
+            let payload: TelemetryBatchPayload = serde_json::from_str(payload.get())
+                .map_err(|_| reject(state, "INVALID_TELEMETRY_BATCH"))?;
+            if payload.events.len() > MAX_EVENTS_PER_BATCH
+                || payload
+                    .events
+                    .iter()
+                    .any(|event| !event.valid_scope(MAX_IDENTIFIER_BYTES))
             {
                 state.record_rejected();
                 return Err("INVALID_TELEMETRY_BATCH");
             }
-            let dropped = envelope
-                .payload
-                .get("dropped")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            state.record_telemetry(events.len() as u64, dropped);
-            state.publish_telemetry(events.clone());
+            let events: SharedTelemetryBatch = Arc::from(payload.events);
+            state.record_telemetry(events.len() as u64, payload.dropped);
+            state.record_telemetry_pipeline(line.len() as u64, elapsed_nanoseconds(started));
+            state.publish_telemetry(events);
             Ok(ControlFlow::Continue)
         }
         "shadow.command.status" => {
-            let event = envelope
+            let payload: Value = envelope
                 .payload
+                .and_then(|payload| serde_json::from_str(payload.get()).ok())
+                .ok_or_else(|| reject(state, "INVALID_COMMAND_STATUS"))?;
+            let event = payload
                 .get("event")
                 .ok_or_else(|| reject(state, "INVALID_COMMAND_STATUS"))?;
             if !valid_identifier(event, "requestId")
@@ -80,11 +83,7 @@ pub fn handle_line(line: &str, state: &ShadowState) -> Result<ControlFlow, &'sta
                 return Err("INVALID_COMMAND_STATUS");
             }
             state.record_command();
-            if let Some(scope) = envelope
-                .payload
-                .get("scope")
-                .and_then(CommandScope::from_value)
-            {
+            if let Some(scope) = payload.get("scope").and_then(CommandScope::from_value) {
                 state.publish_command(event.clone(), scope);
             }
             Ok(ControlFlow::Continue)
@@ -96,6 +95,10 @@ pub fn handle_line(line: &str, state: &ShadowState) -> Result<ControlFlow, &'sta
             Err("UNSUPPORTED_MESSAGE")
         }
     }
+}
+
+fn elapsed_nanoseconds(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
 fn valid_identifier(value: &Value, field: &str) -> bool {
@@ -127,6 +130,7 @@ mod tests {
         assert_eq!(snapshot.command_events, 1);
         assert_eq!(snapshot.upstream_dropped, 2);
         assert_eq!(snapshot.rejected_frames, 0);
+        assert_eq!(snapshot.telemetry_ingress_bytes, telemetry.len() as u64);
     }
 
     #[test]

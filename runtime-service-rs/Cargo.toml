@@ -1,0 +1,18 @@
+[package]
+name = "scamatic-runtime-service"
+version = "0.2.7"
+edition.workspace = true
+rust-version.workspace = true
+description = "Windows service supervisor for the local SCAMATIC runtime"
+license.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8.1"
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Cryptography",
+  "Win32_System_Console",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }

@@ -1,0 +1,23 @@
+{
+  "productName": "SCAMATIC Builder Local",
+  "identifier": "com.scamatic.builder.local",
+  "build": {
+    "beforeBuildCommand": null
+  },
+  "bundle": {
+    "shortDescription": "Local persistent-worker SCADA Builder and Runtime",
+    "externalBin": [
+      "binaries/scamatic-runtime-service"
+    ],
+    "resources": {
+      "../target/desktop-runtime/": "resources/runtime/"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "template": "windows/installer.nsi",
+        "installerHooks": "windows/service-hooks.nsh"
+      }
+    }
+  }
+}

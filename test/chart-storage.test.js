@@ -1,9 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import { chartStorageConfig, publicChartStorageConfig } from '../shared/chart-storage-config.js'
 import { runtimeChartHistoryRequest } from '../shared/runtime-chart-history.js'
 import { normalizeChartTelemetryEvent } from '../api/_lib/chart-telemetry-store.js'
-import { publicWorkspaceChartStorage, storedChartStorageConfig } from '../api/_lib/chart-storage-configuration.js'
+import { publicWorkspaceChartStorage, storedChartStorageConfig, workspaceChartStorageMetadataConfig } from '../api/_lib/chart-storage-configuration.js'
 import { chartStorageTargetLabel, normalizeChartMongoUri } from '../api/_lib/chart-storage-target.js'
 import { decryptChartStorageSecret, encryptChartStorageSecret } from '../api/_lib/connector-secrets.js'
 import { TelemetryBatchWriter } from '../server/connectors/telemetry-batch-writer.js'
@@ -86,6 +87,33 @@ test('an explicitly disabled workspace archive remains workspace-managed', () =>
   assert.equal(publicConfig.health.message, 'Workspace Chart archive is disabled.')
 })
 
+test('Chart storage mutations stay inside the handler error boundary', async () => {
+  const source = await readFile(new URL('../api/_handlers/chart-storage.js', import.meta.url), 'utf8')
+  assert.match(source, /req\.method === 'POST'\) return await testStorage/)
+  assert.match(source, /req\.method === 'PUT'\) return await saveStorage/)
+  assert.match(source, /return await removeStorage/)
+})
+
+test('workspace Chart storage metadata can be displayed without decrypting its secret', () => {
+  const record = {
+    enabled: true,
+    secretConfiguredAt: new Date(),
+    dbName: 'workspace_telemetry',
+    collectionName: 'chart_samples',
+    retentionDays: 45,
+    batchSize: 250,
+    flushMs: 500,
+    maxQueue: 5000,
+    maxPoolSize: 12,
+    maxBootstrapPoints: 8000,
+  }
+  const config = workspaceChartStorageMetadataConfig(record)
+  assert.equal(config.enabled, true)
+  assert.equal(config.uri, '')
+  assert.equal(config.dbName, 'workspace_telemetry')
+  assert.equal(config.maxPoolSize, 12)
+})
+
 test('production web configuration requires credentials, SRV, and an allowlisted host', () => {
   const environment = {
     NODE_ENV: 'production',
@@ -117,7 +145,10 @@ test('Chart storage secrets are encrypted and bound to one workspace', () => {
     const encrypted = encryptChartStorageSecret({ uri }, { workspaceId: 'workspace-a' })
     assert.equal(JSON.stringify(encrypted).includes(uri), false)
     assert.deepEqual(decryptChartStorageSecret(encrypted, { workspaceId: 'workspace-a' }), { uri })
-    assert.throws(() => decryptChartStorageSecret(encrypted, { workspaceId: 'workspace-b' }))
+    assert.throws(
+      () => decryptChartStorageSecret(encrypted, { workspaceId: 'workspace-b' }),
+      error => error.code === 'CONNECTOR_KEY_MISMATCH',
+    )
     const label = chartStorageTargetLabel(uri)
     assert.equal(label.includes('writer'), false)
     assert.equal(label.includes('secret'), false)

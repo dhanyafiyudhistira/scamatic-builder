@@ -13,11 +13,28 @@ export function ConnectorManager({ projectId, schema, onSchemaChange, canConfigu
   const [accountConnectorId, setAccountConnectorId] = useState(null)
   const [infoConnectorId, setInfoConnectorId] = useState(null)
   const [accountForm, setAccountForm] = useState({ username: '', password: '' })
-  const load = useCallback(async () => {
+  const load = useCallback(async ({ notify = true } = {}) => {
     try { const data = await apiRequest(`/api/connectors?projectId=${encodeURIComponent(projectId)}&environmentRef=staging`); setConnectors(data.connectors || []) }
-    catch (error) { onNotice({ type: 'error', text: error.message }) }
+    catch (error) { if (notify) onNotice({ type: 'error', text: error.message }) }
   }, [onNotice, projectId])
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    let refreshing = false
+    const refresh = async (notify = false) => {
+      if (refreshing || (typeof document !== 'undefined' && document.visibilityState === 'hidden')) return
+      refreshing = true
+      try { await load({ notify }) } finally { refreshing = false }
+    }
+    const refreshVisible = () => { void refresh(false) }
+    void refresh(true)
+    const timer = window.setInterval(refreshVisible, 15_000)
+    window.addEventListener('focus', refreshVisible)
+    document.addEventListener('visibilitychange', refreshVisible)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('focus', refreshVisible)
+      document.removeEventListener('visibilitychange', refreshVisible)
+    }
+  }, [load])
 
   const create = async event => {
     event.preventDefault(); setBusy(true)
@@ -177,7 +194,7 @@ export function ConnectorManager({ projectId, schema, onSchemaChange, canConfigu
                   ? <button type="button" onClick={() => detach(connector)} disabled={busy || usage.tagCount > 0} title={usage.tagCount ? 'Move or delete tags using this source first.' : 'Detach source from draft'}>Detach source</button>
                   : <button type="button" onClick={() => attach(connector)} disabled={busy}>Attach source</button>}
                 <button type="button" onClick={() => action(connector, 'test')} disabled={busy || !connector.environment?.secret?.configured}>Test</button>
-                {canRotateSecret && <button type="button" className={autoRefresh ? 'sb-connector-auth-active' : ''} onClick={() => toggleAccountConnection(connector)} disabled={busy}>{autoRefresh ? 'Manage ThingsBoard account' : 'Connect ThingsBoard'}</button>}
+                {canRotateSecret && <button type="button" onClick={() => toggleAccountConnection(connector)} disabled={busy}>{autoRefresh ? 'Manage ThingsBoard account' : 'Connect ThingsBoard'}</button>}
                 {canRotateSecret && <button type="button" onClick={() => configureSimulationToken(connector)} disabled={busy}>Simulation token</button>}
                 <div className="sb-connector-lifecycle-actions">
                   <button type="button" onClick={() => action(connector, 'enable')} disabled={busy}>{connector.enabled ? 'Disable' : 'Enable'}</button>

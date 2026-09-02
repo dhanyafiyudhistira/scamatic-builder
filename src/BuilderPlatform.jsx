@@ -26,6 +26,7 @@ import { runtimeHrefWithMetrics } from '../shared/runtime-metrics-option.js'
 import { validationSummary } from '../shared/validation-diagnostics.js'
 import { ValidationConsole } from './platform/ValidationConsole.jsx'
 import { AuthScreen } from './platform/AuthScreen.jsx'
+import { openApplicationRoute, resolveDesignAsset, resolveDesignAssets } from './platform/desktop.js'
 
 const makeId = prefix => `${prefix}_${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`
 const recoveryKey = projectId => `scamatic.recovery.${projectId}`
@@ -182,6 +183,7 @@ export default function BuilderPlatform() {
     setBusy(true)
     try {
       const data = await apiRequest(`/api/draft?projectId=${encodeURIComponent(project.id)}`)
+      const designAssetsPromise = resolveDesignAssets(data.designAssets || {})
       let schema = data.schema
       let recovered = false
       try {
@@ -196,7 +198,7 @@ export default function BuilderPlatform() {
       editor.replace(schema)
       setRevision(data.revision)
       setSvg(data.svg)
-      setDesignAssets(data.designAssets || {})
+      setDesignAssets(await designAssetsPromise)
       setSelectedIds([])
       setValidationConsoleOpen(false)
       setValidationConsoleSource(null)
@@ -212,12 +214,15 @@ export default function BuilderPlatform() {
   }
 
   const loadGovernance = async projectId => {
-    const versionData = await apiRequest(`/api/versions?projectId=${encodeURIComponent(projectId)}`)
+    const canReadAudit = session.user?.capabilities?.includes('audit.read')
+    const [versionData, auditData] = await Promise.all([
+      apiRequest(`/api/versions?projectId=${encodeURIComponent(projectId)}`),
+      canReadAudit
+        ? apiRequest(`/api/audit?projectId=${encodeURIComponent(projectId)}&limit=12`)
+        : Promise.resolve({ events: [] }),
+    ])
     setVersions(versionData.versions || [])
-    if (session.user?.capabilities?.includes('audit.read')) {
-      const auditData = await apiRequest(`/api/audit?projectId=${encodeURIComponent(projectId)}&limit=12`)
-      setAuditEvents(auditData.events || [])
-    } else setAuditEvents([])
+    setAuditEvents(auditData.events || [])
   }
 
   const changeDraft = useCallback((updater, { transient = false } = {}) => {
@@ -226,6 +231,10 @@ export default function BuilderPlatform() {
     setDirty(true)
     setValidationConsoleSource(null)
   }, [editor.commit, editor.mutate])
+  const finishComponentTransform = useCallback(() => {
+    editor.endTransaction()
+    setDirty(true)
+  }, [editor.endTransaction])
 
   const reviewValidation = useCallback((nextIssues = null, origin = 'Live draft validation') => {
     setValidationConsoleSource({ issues: nextIssues, origin })
@@ -619,11 +628,11 @@ export default function BuilderPlatform() {
   return (
     <div className="sb-app">
       <header className="sb-topbar">
-        <button type="button" className="sb-brand" onClick={closeProject}>
-          <img className="sb-brand-logo" src="/logo-sb.png" alt="" aria-hidden="true" />
-          <span className="sb-brand-name">SCAMATIC<span className="sb-brand-accent">.BUILDER</span></span>
-        </button>
-        <nav className="sb-header-menus" aria-label="Builder menus">
+        <nav className="sb-header-menus" aria-label="Builder navigation and menus">
+          <button type="button" className="sb-brand" onClick={closeProject} aria-label="Kembali ke daftar proyek" title="Kembali ke daftar proyek">
+            <img className="sb-brand-logo" src="/logo-sb.png" alt="" aria-hidden="true" />
+            <span className="sb-brand-name">SB</span>
+          </button>
           <FileMenu
             autoSave={autoSave}
             onAutoSaveChange={setAutoSave}
@@ -721,7 +730,7 @@ export default function BuilderPlatform() {
         />
 
         <main className="sb-workspace">
-          <RuntimeCanvas schema={draft} svg={svg} designAssets={designAssets} values={mockValues} selectedIds={selectedIds} editable boardTone={boardTone} zoom={zoom} gridSize={gridSize} snapToGrid={snapToGrid} showGrid={showGrid} showRulers={showRulers} smartGuides={smartGuides} onSelect={selectComponent} onChange={updateComponent} onTransformStart={editor.beginTransaction} onTransformEnd={() => { editor.endTransaction(); setDirty(true) }} onDesignFileDrop={dropDesignElement} />
+          <RuntimeCanvas schema={draft} svg={svg} designAssets={designAssets} values={mockValues} selectedIds={selectedIds} editable boardTone={boardTone} zoom={zoom} gridSize={gridSize} snapToGrid={snapToGrid} showGrid={showGrid} showRulers={showRulers} smartGuides={smartGuides} onSelect={selectComponent} onChange={updateComponent} onTransformStart={editor.beginTransaction} onTransformEnd={finishComponentTransform} onDesignFileDrop={dropDesignElement} />
         </main>
 
         <aside className="sb-sidebar right">
@@ -809,7 +818,7 @@ function FileMenu({ autoSave, onAutoSaveChange, dirty, revision, lastSavedAt, bu
   const openRuntime = metricsEnabled => {
     setRuntimePromptOpen(false)
     setOpen(false)
-    globalThis.open(runtimeHrefWithMetrics(runtimeHref, metricsEnabled), '_blank', 'noopener,noreferrer')
+    openApplicationRoute(runtimeHrefWithMetrics(runtimeHref, metricsEnabled))
   }
 
   const toggleFileMenu = next => {
@@ -1673,7 +1682,7 @@ async function uploadDesignElementFile(projectId, file) {
   if (!/\.(png|jpe?g|svg)$/i.test(file.name) || file.size > 3 * 1024 * 1024) throw new Error('Choose a PNG, JPG, JPEG, or SVG file smaller than 3 MB.')
   const content = file.type === 'image/svg+xml' || /\.svg$/i.test(file.name) ? await file.text() : await fileAsBase64(file)
   const data = await apiRequest('/api/elements', { method: 'POST', body: JSON.stringify({ projectId, fileName: file.name, mimeType: file.type || mimeTypeFromName(file.name), content }) })
-  return data.asset
+  return resolveDesignAsset(data.asset)
 }
 
 function fileAsBase64(file) {

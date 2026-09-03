@@ -2,8 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { encodeHardPassword } from '../shared/hard-password.js'
 
-test('hard password encoder reproduces the requested numeric and capital-delimited word pattern', () => {
-  assert.equal(encodeHardPassword('040801DanteHowardAutomation'), '040903IeqvfNtadteKdbvsfxlqo')
+test('hard password encoder reproduces a numeric and capital-delimited word pattern', () => {
+  assert.equal(encodeHardPassword('135790SampleCredentialFixture'), '14710130YfqsnfMamkksxlcmMocxxtf')
 })
 
 test('numeric offsets skip zero and continue naturally beyond one digit', () => {

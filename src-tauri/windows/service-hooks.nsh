@@ -522,6 +522,13 @@ FunctionEnd
 !macroend
 
 !macro NSIS_HOOK_PREINSTALL
+  ${If} ${Silent}
+  ${OrIf} $PassiveMode = 1
+    IfFileExists "$APPDATA\SCAMATIC\runtime.env" scamatic_silent_config_ready 0
+    SetErrorLevel 2
+    Abort "Fresh silent or passive installation requires a pre-provisioned C:\ProgramData\SCAMATIC\runtime.env. Run the interactive installer once or provision the protected configuration first."
+    scamatic_silent_config_ready:
+  ${EndIf}
   !insertmacro SCAMATIC_STOP_SERVICE
 !macroend
 

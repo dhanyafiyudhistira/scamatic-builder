@@ -198,9 +198,11 @@ existing database requires the original master key (64-character hex or
 Source and Chart credentials unreadable. The page also asks for the MongoDB
 URI, initial administrator email, a password of at least ten characters, and
 connector/archive hostname allowlists. It writes
-`C:\ProgramData\SCAMATIC\runtime.env`, and restricts the file to Local System
-and machine administrators. Existing configuration is never replaced, so the
-page is skipped during upgrades and repairs.
+`C:\ProgramData\SCAMATIC\runtime.env`, and restricts the file to Local System,
+machine administrators, and read-only access for the dedicated
+`NT SERVICE\SCAMATICRuntime` virtual service account. The service does not run
+as Local System. Existing configuration is never replaced, so the page is
+skipped during upgrades and repairs.
 
 The packaged service accepts both `http://127.0.0.1:3001` and
 `http://localhost:3001` as local application origins. Plain HTTP remains
@@ -210,9 +212,10 @@ HTTPS. Browser navigation through `localhost` is redirected to the canonical
 preferences do not split into two browser stores.
 
 The installer also places a non-secret reference file at
-`C:\ProgramData\SCAMATIC\runtime.env.example`. A first silent/passive install
-must pre-provision `runtime.env`; otherwise the service starts in degraded mode
-without inventing credentials. After starting the service, the interactive
+`C:\ProgramData\SCAMATIC\runtime.env.example`. A fresh silent or passive install
+must pre-provision the protected `runtime.env`; otherwise installation fails
+with a non-zero exit code rather than reporting success with an unusable service.
+After starting the service, the interactive
 installer waits up to 60 seconds for `GET /health/data-plane/ready`, then checks
 `GET /health/data-plane/key-compatibility`. That second probe unwraps only the
 encrypted data keys and returns counts/status; it never returns a MongoDB URI,
@@ -260,6 +263,7 @@ worker nor the Rust shadow data-plane needs a browser-facing port.
 ```powershell
 npm run build
 $env:APP_ORIGIN = 'http://127.0.0.1:3001'
+$env:SCAMATIC_BIND_HOST = '127.0.0.1'
 $env:CONNECTOR_PLATFORM_ENABLED = 'true'
 $env:CONNECTOR_EXECUTION_MODE = 'worker'
 $env:CONNECTOR_STREAM_MODE = 'embedded'
@@ -272,6 +276,10 @@ The application is then available at `http://127.0.0.1:3001`, including
 mode because Express already owns and supervises that child process. Existing
 deployments can retain `CONNECTOR_STREAM_MODE=standalone`, port `3002`, and an
 explicit `CONNECTOR_STREAM_PUBLIC_URL` while migrating.
+
+The Node server binds to `127.0.0.1` by default. Network exposure requires an
+explicit `SCAMATIC_BIND_HOST=0.0.0.0` or `::` and should be paired with a host
+firewall, TLS reverse proxy, and a reviewed `APP_ORIGIN` allowlist.
 
 The Node worker remains the sole connector telemetry source and RPC executor.
 The private IPC boundary can additionally mirror sanitized events into the

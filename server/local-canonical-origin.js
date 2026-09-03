@@ -1,4 +1,22 @@
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]'])
+const EXPLICIT_BIND_HOSTS = new Set(['127.0.0.1', '::1', '0.0.0.0', '::'])
+
+export function resolveServerBindHost(value) {
+  const configured = String(value || '').trim().toLowerCase()
+  if (!configured || configured === 'localhost') return '127.0.0.1'
+  if (!EXPLICIT_BIND_HOSTS.has(configured)) {
+    throw new Error('SCAMATIC_BIND_HOST must be 127.0.0.1, ::1, 0.0.0.0, or ::.')
+  }
+  return configured
+}
+
+export function isLoopbackAddress(value) {
+  const address = String(value || '').trim().toLowerCase().split('%')[0]
+  return address === '127.0.0.1'
+    || address === '::1'
+    || address === '::ffff:127.0.0.1'
+    || address === '::ffff:7f00:1'
+}
 
 export function canonicalLocalNavigationUrl(request = {}, configuredOrigin = process.env.SCAMATIC_CANONICAL_LOCAL_ORIGIN) {
   const origin = cleanCanonicalOrigin(configuredOrigin)

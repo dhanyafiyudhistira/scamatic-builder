@@ -44,6 +44,7 @@ mod windows_host {
 
     const SERVICE_NAME: &str = "SCAMATICRuntime";
     const SERVICE_DISPLAY_NAME: &str = "SCAMATIC Local Runtime";
+    const SERVICE_ACCOUNT: &str = r"NT SERVICE\SCAMATICRuntime";
     const SERVICE_DESCRIPTION: &str =
         "Keeps the local SCAMATIC Express, connector worker, and Isaac data-plane available.";
     const ERROR_SERVICE_EXISTS: i32 = 1073;
@@ -269,6 +270,8 @@ mod windows_host {
     }
 
     fn register_service() -> Result<(), DynError> {
+        let layout = RuntimeLayout::discover(None, None)?;
+        validate_service_configuration(&layout)?;
         let executable = env::current_exe()?;
         let binary_path = service_binary_path(&executable);
 
@@ -283,6 +286,8 @@ mod windows_host {
                 "delayed-auto",
                 "DisplayName=",
                 SERVICE_DISPLAY_NAME,
+                "obj=",
+                SERVICE_ACCOUNT,
             ],
             &[0, ERROR_SERVICE_EXISTS],
         )?;
@@ -297,6 +302,8 @@ mod windows_host {
                 "delayed-auto",
                 "DisplayName=",
                 SERVICE_DISPLAY_NAME,
+                "obj=",
+                SERVICE_ACCOUNT,
             ],
             &[0],
         )?;
@@ -322,6 +329,12 @@ mod windows_host {
             &["failureflag", SERVICE_NAME, "1"],
             &[0],
         )?;
+        run_sc(
+            "enable the per-service security identifier",
+            &["sidtype", SERVICE_NAME, "unrestricted"],
+            &[0],
+        )?;
+        grant_service_file_permissions(&layout)?;
         if query_service_state()? != ServiceState::Running {
             wait_for_port_available(READINESS_ADDRESS.parse()?, Duration::from_secs(5))?;
         }
@@ -345,6 +358,45 @@ mod windows_host {
         let code = status.code().unwrap_or(-1);
         if !accepted_codes.contains(&code) {
             return Err(format!("failed to {label}: sc.exe exited with {code}").into());
+        }
+        Ok(())
+    }
+
+    fn grant_service_file_permissions(layout: &RuntimeLayout) -> Result<(), DynError> {
+        let log_directory = layout
+            .log_file
+            .parent()
+            .ok_or("runtime log path has no parent directory")?;
+        run_icacls(
+            "grant runtime configuration read access",
+            &layout.config_file,
+            "(R)",
+        )?;
+        run_icacls(
+            "grant runtime log write access",
+            log_directory,
+            "(OI)(CI)(M)",
+        )?;
+        run_icacls(
+            "grant packaged runtime read and execute access",
+            &layout.runtime_root,
+            "(OI)(CI)(RX)",
+        )
+    }
+
+    fn run_icacls(label: &str, path: &Path, access: &str) -> Result<(), DynError> {
+        let system_root = env::var_os("SystemRoot").ok_or("SystemRoot is not available")?;
+        let executable = PathBuf::from(system_root)
+            .join("System32")
+            .join("icacls.exe");
+        let grant = format!("{SERVICE_ACCOUNT}:{access}");
+        let status = Command::new(executable)
+            .arg(path)
+            .args(["/grant:r", &grant])
+            .status()?;
+        let code = status.code().unwrap_or(-1);
+        if code != 0 {
+            return Err(format!("failed to {label}: icacls.exe exited with {code}").into());
         }
         Ok(())
     }
@@ -541,6 +593,28 @@ mod windows_host {
                 "Runtime can start in degraded mode; missing: {}",
                 missing.join(", ")
             );
+        }
+        Ok(())
+    }
+
+    fn validate_service_configuration(layout: &RuntimeLayout) -> Result<(), DynError> {
+        layout.validate_files()?;
+        if !layout.config_file.is_file() {
+            return Err(format!(
+                "machine configuration is missing: {}",
+                layout.config_file.display()
+            )
+            .into());
+        }
+        let environment = load_environment(&layout.config_file)?;
+        validate_master_key_environment(&environment)?;
+        let missing = operational_warnings(&environment);
+        if !missing.is_empty() {
+            return Err(format!(
+                "machine configuration is missing required keys: {}",
+                missing.join(", ")
+            )
+            .into());
         }
         Ok(())
     }
@@ -762,6 +836,7 @@ mod windows_host {
         command
             .env("NODE_ENV", "production")
             .env("PORT", "3001")
+            .env("SCAMATIC_BIND_HOST", "127.0.0.1")
             .env("APP_ORIGIN", LOCAL_APP_ORIGINS)
             .env("SCAMATIC_CANONICAL_LOCAL_ORIGIN", "http://127.0.0.1:3001")
             .env("SERVE_STATIC_FRONTEND", "true")

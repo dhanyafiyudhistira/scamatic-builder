@@ -39,7 +39,7 @@ import { ManagedConnectorWorker } from './connectors/managed-connector-worker.js
 import { RustShadowWorker } from './connectors/rust-shadow-worker.js'
 import { CommandRetentionJanitor } from './connectors/command-retention-janitor.js'
 import { createIsaacSessionAuthorizer } from './connectors/isaac-session-authorizer.js'
-import { canonicalLocalNavigationUrl } from './local-canonical-origin.js'
+import { canonicalLocalNavigationUrl, isLoopbackAddress, resolveServerBindHost } from './local-canonical-origin.js'
 
 const app = express()
 const safe = handler => (req, res, next) => Promise.resolve(handler(req, res)).catch(next)
@@ -51,6 +51,7 @@ const commandWakeEnabled = embeddedConnectorStream && process.env.CONNECTOR_COMM
 const isaacCanaryEnabled = rustShadowEnabled && process.env.SCADA_ISAAC_CANARY_ENABLED === 'true'
 const isaacInternalToken = isaacCanaryEnabled ? randomBytes(32).toString('base64url') : ''
 const PORT = process.env.PORT || 3001
+const HOST = resolveServerBindHost(process.env.SCAMATIC_BIND_HOST)
 const distDirectory = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist')
 let managedConnectorWorker = null
 let runtimeStreamHub = null
@@ -140,6 +141,7 @@ app.get(['/health/data-plane/live', '/health/data-plane/ready'], (req, res) => {
   return res.status(kind === 'liveness' || health.ok ? 200 : 503).json({ ...health, check: kind, ts: Date.now() })
 })
 app.get('/health/data-plane/key-compatibility', safe(async (req, res) => {
+  if (!isLoopbackAddress(req.socket?.remoteAddress)) return res.status(404).json({ error: 'Not found.' })
   try {
     await connectMongo()
     const result = await auditMasterKeyCompatibility()
@@ -207,8 +209,9 @@ if (embeddedConnectorStream) {
 }
 commandRetentionJanitor = new CommandRetentionJanitor()
 
-httpServer.listen(PORT, '0.0.0.0', () => {
-  console.log(`[Server] Express listening on http://localhost:${PORT}${shouldServeFrontend() ? ' with frontend assets' : ''}`)
+httpServer.listen(PORT, HOST, () => {
+  const displayHost = HOST.includes(':') ? `[${HOST}]` : HOST
+  console.log(`[Server] Express listening on http://${displayHost}:${PORT}${shouldServeFrontend() ? ' with frontend assets' : ''}`)
   if (rustShadowWorker) rustShadowWorker.start()
   if (managedConnectorWorker) managedConnectorWorker.start()
   commandRetentionJanitor.start()

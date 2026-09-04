@@ -62,7 +62,7 @@ async function main() {
     const options = session ? { session, ordered: false } : { ordered: false }
     if (connectorOperations.length) await ConnectorSecret.bulkWrite(connectorOperations, options)
     if (chartOperations.length) await ChartStorageSecret.bulkWrite(chartOperations, options)
-  })
+  }, { requireTransaction: true })
   const after = await auditMasterKeyCompatibility()
   printSummary('completed', after)
   if (!after.ok || after.rotationRequired !== 0) throw new Error('Post-rotation verification failed. Keep the previous key configured and investigate before restarting the service.')

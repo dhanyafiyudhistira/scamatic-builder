@@ -39,6 +39,8 @@ Sebelum maintenance:
 5. Pastikan key lama masih tersedia dan instalasi sedang sehat.
 6. Jangan menempelkan MongoDB URI, master key, JWT, atau password ke tiket,
    source control, chat, screenshot, maupun log operasional.
+7. Gunakan MongoDB Atlas atau replica set yang mendukung transaksi. Utility
+   rotasi sengaja berhenti tanpa menulis jika transaksi tidak tersedia.
 
 Path default yang digunakan runbook:
 
@@ -256,6 +258,13 @@ Get-Service -Name $ScamaticService
 ```
 
 Lanjutkan hanya jika statusnya `Stopped`.
+
+### MongoDB melaporkan transaction/replica-set tidak tersedia
+
+Rotasi fail-closed dan tidak melakukan fallback non-transaksional. Jangan
+mengubah `NODE_ENV` untuk melewati perlindungan ini. Pindahkan database ke
+MongoDB Atlas atau konfigurasi replica set yang mendukung transaksi, pastikan
+readiness sehat, lalu ulangi dry-run dan `--apply`.
 
 ### Dry-run melaporkan record `incompatible`
 

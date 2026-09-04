@@ -1,4 +1,4 @@
-import { connectMongo } from '../_lib/mongo.js'
+import { connectMongo, runMongoTransaction } from '../_lib/mongo.js'
 import { AuditEvent, Connector, ConnectorEnvironment, ConnectorHealthEvent, ConnectorSecret, Project, ProjectDraft } from '../_lib/models.js'
 import { requireCsrf, requirePrincipal } from '../_lib/auth.js'
 import { PERMISSIONS, requireProjectPermission, roleCan } from '../_lib/authorization.js'
@@ -191,18 +191,26 @@ async function connectorAction(req, res, principal, projectId) {
 }
 
 async function deleteConnector(req, res, principal, projectId) {
-  const connector = await ownedConnector(req.query?.connectorId || req.body?.connectorId, principal, projectId)
-  if (!connector) return res.status(404).json({ error: 'Connector not found.' })
-  const draftReference = await ProjectDraft.exists({ _id: projectId, 'schema.dataSources.connectorRef': connector.id })
-  const deletionBlock = connectorDeletionBlock({ enabled: connector.enabled, draftAttached: Boolean(draftReference) })
-  if (deletionBlock) return res.status(409).json({ error: deletionBlock.message, code: deletionBlock.code })
-  await Promise.all([
-    ConnectorEnvironment.deleteMany({ connectorId: connector.id }),
-    ConnectorSecret.deleteMany({ connectorId: connector.id }),
-    ConnectorHealthEvent.deleteMany({ connectorId: connector.id }),
-  ])
-  await connector.deleteOne()
-  await audit(principal, projectId, 'connector.delete', connector.id, { type: connector.type, publishedHistoryPreserved: true })
+  const connectorId = req.query?.connectorId || req.body?.connectorId
+  const outcome = await runMongoTransaction(async session => {
+    const connector = await ownedConnector(connectorId, principal, projectId, session)
+    if (!connector) return { status: 'not-found' }
+    const draftQuery = ProjectDraft.exists({ _id: projectId, 'schema.dataSources.connectorRef': connector.id })
+    if (session) draftQuery.session(session)
+    const draftReference = await draftQuery
+    const deletionBlock = connectorDeletionBlock({ enabled: connector.enabled, draftAttached: Boolean(draftReference) })
+    if (deletionBlock) return { status: 'blocked', deletionBlock }
+    const options = session ? { session } : {}
+    // MongoDB does not support parallel operations on one transaction session.
+    await ConnectorEnvironment.deleteMany({ connectorId: connector.id }, options)
+    await ConnectorSecret.deleteMany({ connectorId: connector.id }, options)
+    await ConnectorHealthEvent.deleteMany({ connectorId: connector.id }, options)
+    await connector.deleteOne(options)
+    await audit(principal, projectId, 'connector.delete', connector.id, { type: connector.type, publishedHistoryPreserved: true }, session)
+    return { status: 'deleted' }
+  })
+  if (outcome.status === 'not-found') return res.status(404).json({ error: 'Connector not found.' })
+  if (outcome.status === 'blocked') return res.status(409).json({ error: outcome.deletionBlock.message, code: outcome.deletionBlock.code })
   return res.status(200).json({ ok: true, publishedHistoryPreserved: true })
 }
 
@@ -232,6 +240,14 @@ function validEnvironment(value) {
   if (!ENVIRONMENTS.has(environment)) throw Object.assign(new Error('Invalid connector environment.'), { statusCode: 400 })
   return environment
 }
-async function ownedConnector(id, principal, projectId) { return Connector.findOne({ _id: String(id || ''), workspaceId: principal.workspaceId, projectId }) }
+async function ownedConnector(id, principal, projectId, session = null) {
+  const query = Connector.findOne({ _id: String(id || ''), workspaceId: principal.workspaceId, projectId })
+  return session ? query.session(session) : query
+}
 function boundedNumber(value, min, max, fallback) { const number = Number(value); return Number.isFinite(number) ? Math.min(max, Math.max(min, Math.round(number))) : fallback }
-function audit(principal, projectId, action, targetId, metadata) { return AuditEvent.create({ workspaceId: principal.workspaceId, projectId, actorId: principal.id, action, targetType: 'connector', targetId, correlationId: null, metadata: redactMetadata(metadata) }) }
+async function audit(principal, projectId, action, targetId, metadata, session = null) {
+  const event = { workspaceId: principal.workspaceId, projectId, actorId: principal.id, action, targetType: 'connector', targetId, correlationId: null, metadata: redactMetadata(metadata) }
+  if (!session) return AuditEvent.create(event)
+  const [created] = await AuditEvent.create([event], { session })
+  return created
+}

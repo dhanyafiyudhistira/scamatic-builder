@@ -79,6 +79,11 @@ password: admin
 
 Production does not enable a default password. The configured owner is
 bootstrapped into MongoDB with a salted scrypt password hash on first login.
+Treat `SCADA_ADMIN_PASSWORD` as a one-time bootstrap credential: after the
+owner can sign in and has changed the password through the application, clear
+this variable from machine configuration and restart the service. The database
+hash remains authoritative; retaining the plaintext bootstrap value only
+extends its exposure window.
 Set these variables:
 
 ```text
@@ -243,15 +248,21 @@ The verifier checks the Windows Service state, virtual service account,
 automatic delayed start and recovery policy, per-service SID, quoted executable
 command, runtime bundle, protected `runtime.env` ACL, runtime/log access, port
 ownership, loopback-only binding, data-plane readiness, master-key
-compatibility, and the installed service binary signature. It does not start,
-stop, register, reconfigure, or delete the service, and it never prints values
-from `runtime.env`.
+compatibility, and signatures for the Desktop, service, uninstaller, Isaac,
+packaged Node runtime, and an explicitly supplied NSIS installer. It does not
+start, stop, register, reconfigure, or delete the service, and it never prints
+values from `runtime.env`.
 
-An unsigned development build produces a warning. Make signature validation a
-release-blocking check with:
+An unsigned development build produces warnings. Make signature validation a
+release-blocking check for the installer, Desktop, service, uninstaller, Isaac,
+and packaged Node runtime. Pin project-owned artifacts to the production
+publisher certificate:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify-windows-install.ps1 -RequireSignature
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify-windows-install.ps1 `
+  -RequireSignature `
+  -InstallerPath '<PATH_TO_SIGNED_NSIS_INSTALLER>' `
+  -ExpectedPublisherThumbprint '<PRODUCTION_CERTIFICATE_THUMBPRINT>'
 ```
 
 Use `-Json` for machine-readable output. The process exits with code `1` when

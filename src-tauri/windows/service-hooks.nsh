@@ -471,7 +471,9 @@ Function ScamaticWriteRuntimeConfig
   FileWrite $R0 "SCADA_CONNECTOR_MASTER_KEY=$ScamaticMasterKey$\r$\n"
   FileWrite $R0 "SCADA_CONNECTOR_PREVIOUS_MASTER_KEYS=$\r$\n"
   FileWrite $R0 "SCADA_ADMIN_EMAIL=$\"$ScamaticAdminEmail$\"$\r$\n"
-  FileWrite $R0 "SCADA_ADMIN_PASSWORD=$\"$ScamaticAdminPassword$\"$\r$\n"
+  ; dotenv expands \n and \r escapes inside double quotes. Single quotes keep
+  ; the password identical to what the operator entered and to Rust validation.
+  FileWrite $R0 "SCADA_ADMIN_PASSWORD='$ScamaticAdminPassword'$\r$\n"
   FileWrite $R0 "SCADA_WORKSPACE_ID=local$\r$\n$\r$\n"
   FileWrite $R0 "CONNECTOR_ALLOWED_HOSTS=$ScamaticConnectorAllowedHosts$\r$\n"
   FileWrite $R0 "CONNECTOR_ALLOWED_PRIVATE_HOSTS=$ScamaticConnectorAllowedPrivateHosts$\r$\n"

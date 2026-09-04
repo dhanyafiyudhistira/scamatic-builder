@@ -1026,6 +1026,17 @@ mod windows_host {
         }
 
         #[test]
+        fn single_quoted_bootstrap_password_preserves_literal_escape_sequences() {
+            let parsed =
+                parse_environment("SCADA_ADMIN_PASSWORD='literal\\n-and-\\r-#-password'\n")
+                    .unwrap();
+            assert_eq!(
+                parsed.get("SCADA_ADMIN_PASSWORD").unwrap(),
+                r"literal\n-and-\r-#-password"
+            );
+        }
+
+        #[test]
         fn rejects_duplicate_and_process_control_keys() {
             assert!(parse_environment("A=one\nA=two\n").is_err());
             assert!(parse_environment("NODE_OPTIONS=--require malware.js\n").is_err());

@@ -1,6 +1,6 @@
 [package]
 name = "scamatic-runtime-service"
-version = "0.2.7"
+version = "0.2.8"
 edition.workspace = true
 rust-version.workspace = true
 description = "Windows service supervisor for the local SCAMATIC runtime"

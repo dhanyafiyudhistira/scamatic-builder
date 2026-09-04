@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import { auditMasterKeyCompatibility } from '../api/_lib/master-key-compatibility.js'
 import {
@@ -51,6 +52,11 @@ test('master-key audit detects fallback records and verifies rewrap completion',
     if (originalPrevious == null) delete process.env.SCADA_CONNECTOR_PREVIOUS_MASTER_KEYS
     else process.env.SCADA_CONNECTOR_PREVIOUS_MASTER_KEYS = originalPrevious
   }
+})
+
+test('master-key rotation fails closed when MongoDB transactions are unavailable', async () => {
+  const source = await readFile(new URL('../scripts/rotate-connector-master-key.js', import.meta.url), 'utf8')
+  assert.match(source, /runMongoTransaction\([\s\S]*\{ requireTransaction: true \}\)/)
 })
 
 function fakeModel(records) {

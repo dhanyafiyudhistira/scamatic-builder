@@ -1,7 +1,7 @@
 {
   "name": "nextporto-wtp-hmi",
   "private": true,
-  "version": "0.2.7",
+  "version": "0.2.8",
   "type": "module",
   "scripts": {
     "dev":          "concurrently -n vite,api -c cyan,yellow \"vite\" \"node server/index.js\"",

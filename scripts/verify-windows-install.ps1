@@ -6,6 +6,8 @@ param(
   [ValidateRange(1, 60)]
   [int]$TimeoutSeconds = 10,
   [switch]$RequireSignature,
+  [string]$InstallerPath,
+  [string]$ExpectedPublisherThumbprint,
   [switch]$Json
 )
 
@@ -25,6 +27,48 @@ function Add-CheckResult {
     status = $Status
     detail = $Detail
   })
+}
+
+function Add-AuthenticodeCheck {
+  param(
+    [Parameter(Mandatory = $true)][string]$Name,
+    [Parameter(Mandatory = $true)][string]$Path,
+    [switch]$ProjectOwned
+  )
+
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+    Add-CheckResult $Name 'FAIL' "Executable is missing: '$Path'."
+    return
+  }
+
+  try {
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    if ($signature.Status -ne 'Valid') {
+      $status = if ($RequireSignature) { 'FAIL' } else { 'WARN' }
+      Add-CheckResult $Name $status "Signature status is '$($signature.Status)' for '$Path'."
+      return
+    }
+
+    if ($ProjectOwned -and $ExpectedPublisherThumbprint) {
+      $actualThumbprint = StringOrEmpty $signature.SignerCertificate.Thumbprint
+      $expectedThumbprint = ($ExpectedPublisherThumbprint -replace '\s', '').ToUpperInvariant()
+      if ($actualThumbprint.ToUpperInvariant() -ne $expectedThumbprint) {
+        Add-CheckResult $Name 'FAIL' "Signature is valid but does not match the approved publisher thumbprint."
+        return
+      }
+    }
+
+    Add-CheckResult $Name 'PASS' "Signature is valid ($($signature.SignerCertificate.Subject))."
+  } catch {
+    $status = if ($RequireSignature) { 'FAIL' } else { 'WARN' }
+    Add-CheckResult $Name $status "Could not inspect signature: $($_.Exception.Message)"
+  }
+}
+
+function StringOrEmpty {
+  param($Value)
+  if ($null -eq $Value) { return '' }
+  return [string]$Value
 }
 
 function Resolve-IdentitySid {
@@ -236,19 +280,6 @@ if ($null -ne $service) {
     Add-CheckResult 'Service executable' 'PASS' "Runtime service executable exists at '$serviceExecutable'."
     $runtimeRoot = Join-Path (Split-Path -Parent $serviceExecutable) 'resources\runtime'
 
-    try {
-      $signature = Get-AuthenticodeSignature -LiteralPath $serviceExecutable
-      if ($signature.Status -eq 'Valid') {
-        Add-CheckResult 'Code signature' 'PASS' "Service binary signature is valid ($($signature.SignerCertificate.Subject))."
-      } elseif ($RequireSignature) {
-        Add-CheckResult 'Code signature' 'FAIL' "Signature is required, but status is '$($signature.Status)'."
-      } else {
-        Add-CheckResult 'Code signature' 'WARN' "Binary signature status is '$($signature.Status)'; require signing before public release."
-      }
-    } catch {
-      $signatureStatus = if ($RequireSignature) { 'FAIL' } else { 'WARN' }
-      Add-CheckResult 'Code signature' $signatureStatus "Could not inspect signature: $($_.Exception.Message)"
-    }
   } else {
     Add-CheckResult 'Service executable' 'FAIL' "Configured executable was not found: '$serviceExecutable'."
   }
@@ -279,6 +310,35 @@ if ($null -ne $service) {
   } catch {
     Add-CheckResult 'Service registry' 'FAIL' "Could not inspect service policy: $($_.Exception.Message)"
   }
+}
+
+$installDirectory = if ($serviceExecutable) { Split-Path -Parent $serviceExecutable } else { $null }
+$normalizedExpectedPublisherThumbprint = ($ExpectedPublisherThumbprint -replace '\s', '')
+if ($RequireSignature -and -not $ExpectedPublisherThumbprint) {
+  Add-CheckResult 'Publisher policy' 'FAIL' 'Release signature validation requires -ExpectedPublisherThumbprint for project-owned binaries.'
+} elseif ($ExpectedPublisherThumbprint -and $normalizedExpectedPublisherThumbprint -notmatch '^[A-Fa-f0-9]{40,64}$') {
+  Add-CheckResult 'Publisher policy' 'FAIL' 'Expected publisher thumbprint must contain 40–64 hexadecimal characters.'
+} elseif ($ExpectedPublisherThumbprint) {
+  Add-CheckResult 'Publisher policy' 'PASS' 'An approved publisher thumbprint was supplied for project-owned binaries.'
+}
+
+if ($serviceExecutable) {
+  Add-AuthenticodeCheck 'Service signature' $serviceExecutable -ProjectOwned
+}
+if ($installDirectory) {
+  Add-AuthenticodeCheck 'Desktop signature' (Join-Path $installDirectory 'scamatic-desktop.exe') -ProjectOwned
+  Add-AuthenticodeCheck 'Uninstaller signature' (Join-Path $installDirectory 'uninstall.exe') -ProjectOwned
+}
+if ($runtimeRoot) {
+  Add-AuthenticodeCheck 'Isaac signature' (Join-Path $runtimeRoot 'scamatic-data-plane.exe') -ProjectOwned
+  Add-AuthenticodeCheck 'Node runtime signature' (Join-Path $runtimeRoot 'node.exe')
+}
+if ($InstallerPath) {
+  Add-AuthenticodeCheck 'Installer signature' $InstallerPath -ProjectOwned
+} elseif ($RequireSignature) {
+  Add-CheckResult 'Installer signature' 'FAIL' 'Release signature validation requires -InstallerPath.'
+} else {
+  Add-CheckResult 'Installer signature' 'WARN' 'Installer was not inspected; provide -InstallerPath for release validation.'
 }
 
 $configFile = Join-Path $ProgramDataRoot 'runtime.env'

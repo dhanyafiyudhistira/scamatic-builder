@@ -70,7 +70,7 @@ export async function withMongoDeadline(operation, timeoutMs) {
   }
 }
 
-export async function runMongoTransaction(work) {
+export async function runMongoTransaction(work, { requireTransaction = process.env.NODE_ENV === 'production' } = {}) {
   const connection = await connectMongo()
   const session = await connection.startSession()
   try {
@@ -79,7 +79,7 @@ export async function runMongoTransaction(work) {
     return result
   } catch (error) {
     const unsupported = /Transaction numbers are only allowed|replica set|mongos/i.test(String(error?.message || ''))
-    if (!unsupported || process.env.NODE_ENV === 'production') throw error
+    if (!unsupported || requireTransaction) throw error
     // Local standalone MongoDB fallback. Production intentionally fails closed
     // unless a replica set/transaction-capable cluster is configured.
     return work(null)

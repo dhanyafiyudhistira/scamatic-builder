@@ -91,3 +91,28 @@ test('desktop shell aligns compact branding with menus and enables native zoom s
   assert.equal(parsed.app.windows[0].zoomHotkeysEnabled, true)
   assert.ok(permissions.includes('core:webview:allow-set-webview-zoom'))
 })
+
+test('post-install verifier audits service security without mutating Windows state', async () => {
+  const [verifier, packageSource] = await Promise.all([
+    read('../scripts/verify-windows-install.ps1'),
+    read('../package.json'),
+  ])
+  const scripts = JSON.parse(packageSource).scripts
+
+  assert.equal(
+    scripts['desktop:verify-install'],
+    'powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-windows-install.ps1',
+  )
+  assert.match(verifier, /Get-CimInstance -ClassName Win32_Service/)
+  assert.match(verifier, /DelayedAutoStart/)
+  assert.match(verifier, /ServiceSidType/)
+  assert.match(verifier, /FailureActionsOnNonCrashFailures/)
+  assert.match(verifier, /Get-Acl -LiteralPath \$configFile/)
+  assert.match(verifier, /Get-NetTCPConnection -State Listen/)
+  assert.match(verifier, /Test-DescendantProcess/)
+  assert.match(verifier, /Get-AuthenticodeSignature/)
+  assert.match(verifier, /health\/data-plane\/ready/)
+  assert.match(verifier, /health\/data-plane\/key-compatibility/)
+  assert.doesNotMatch(verifier, /\b(?:Start|Stop|Restart|Remove|Set|New)-Service\b/)
+  assert.doesNotMatch(verifier, /Get-Content\s+[^\r\n]*runtime\.env/i)
+})

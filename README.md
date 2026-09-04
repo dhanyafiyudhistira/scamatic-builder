@@ -231,11 +231,43 @@ entire runtime process tree first; uninstall deliberately preserves machine
 configuration and logs for recovery. Code-sign the application binaries and
 NSIS installer with the production publisher certificate before distribution.
 
+### Verify a Windows installation
+
+Run the read-only post-install verifier from an elevated PowerShell session:
+
+```powershell
+npm run desktop:verify-install
+```
+
+The verifier checks the Windows Service state, virtual service account,
+automatic delayed start and recovery policy, per-service SID, quoted executable
+command, runtime bundle, protected `runtime.env` ACL, runtime/log access, port
+ownership, loopback-only binding, data-plane readiness, master-key
+compatibility, and the installed service binary signature. It does not start,
+stop, register, reconfigure, or delete the service, and it never prints values
+from `runtime.env`.
+
+An unsigned development build produces a warning. Make signature validation a
+release-blocking check with:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify-windows-install.ps1 -RequireSignature
+```
+
+Use `-Json` for machine-readable output. The process exits with code `1` when
+any required check fails and `0` when required checks pass; warnings do not
+change the exit code. After the initial run succeeds, reboot Windows and run the
+same command again to validate real boot recovery.
+
 ### Connector master-key rotation
 
 Do not replace `SCADA_CONNECTOR_MASTER_KEY` directly on a database that already
 contains encrypted secrets. Use the bundled rotation utility as an
-administrator:
+administrator. The complete operator procedure, recovery rules, troubleshooting,
+and audit checklist are maintained in
+[`docs/runbooks/windows-master-key-rotation.md`](docs/runbooks/windows-master-key-rotation.md).
+
+The abbreviated flow is:
 
 1. Back up the database and `C:\ProgramData\SCAMATIC\runtime.env`.
 2. Generate a new key with `scamatic-runtime-service.exe generate-master-key`.

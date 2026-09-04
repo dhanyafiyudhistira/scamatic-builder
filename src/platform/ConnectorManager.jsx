@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { connectorSourceUsage, detachUnusedConnectorSources } from '../../shared/connector-lifecycle.js'
+import { connectorDeletionBlock, connectorSourceUsage, detachUnusedConnectorSources } from '../../shared/connector-lifecycle.js'
 import { applyNodeRedImportPlan, createNodeRedImportPlan, NODE_RED_IMPORT_LIMITS, parseNodeRedFlow } from '../../shared/node-red-import.js'
 import { validateProjectSchema } from '../../shared/project-schema.js'
 import { apiRequest } from './api.js'
@@ -74,12 +74,12 @@ export function ConnectorManager({ projectId, schema, onSchemaChange, canConfigu
   }
 
   const remove = async connector => {
-    if (!window.confirm(`Delete connector “${connector.name}”? This also removes its encrypted secret and health history.`)) return
+    if (!window.confirm(`Delete connector “${connector.name}”? This removes its encrypted secret and health history. Published snapshots remain immutable, but this connector will no longer be available to them.`)) return
     setBusy(true)
     try {
       await apiRequest(`/api/connectors?projectId=${encodeURIComponent(projectId)}&connectorId=${encodeURIComponent(connector.id)}`, { method: 'DELETE' })
       await load()
-      onNotice({ type: 'success', text: 'Connector deleted.' })
+      onNotice({ type: 'success', text: 'Connector and encrypted credentials deleted. Published history was preserved.' })
     } catch (error) { onNotice({ type: 'error', text: error.message }); await load() } finally { setBusy(false) }
   }
 
@@ -166,8 +166,9 @@ export function ConnectorManager({ projectId, schema, onSchemaChange, canConfigu
           const autoRefresh = authentication.mode === 'refresh-token'
           const infoOpen = infoConnectorId === connector.id
           const infoPanelId = `connector-info-${String(connector.id).replace(/[^a-zA-Z0-9_-]/g, '')}`
-          const deleteDisabled = busy || attached || connector.enabled || draftDirty
-          const deleteTitle = attached ? 'Detach and save the draft first.' : connector.enabled ? 'Disable the connector first.' : draftDirty ? 'Save the draft first.' : 'Delete connector'
+          const deletionBlock = connectorDeletionBlock({ enabled: connector.enabled, draftAttached: attached, draftDirty })
+          const deleteDisabled = busy || Boolean(deletionBlock)
+          const deleteTitle = deletionBlock?.message || 'Delete connector and encrypted credentials'
           return (
             <article className="sb-connector-card" key={connector.id}>
               <header className="sb-connector-card-header">

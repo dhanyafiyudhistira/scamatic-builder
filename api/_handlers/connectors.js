@@ -1,5 +1,5 @@
 import { connectMongo } from '../_lib/mongo.js'
-import { AuditEvent, Connector, ConnectorEnvironment, ConnectorHealthEvent, ConnectorSecret, Project, ProjectDraft, ProjectVersion } from '../_lib/models.js'
+import { AuditEvent, Connector, ConnectorEnvironment, ConnectorHealthEvent, ConnectorSecret, Project, ProjectDraft } from '../_lib/models.js'
 import { requireCsrf, requirePrincipal } from '../_lib/auth.js'
 import { PERMISSIONS, requireProjectPermission, roleCan } from '../_lib/authorization.js'
 import { connectorSecretId, decryptConnectorSecret, encryptConnectorSecret } from '../_lib/connector-secrets.js'
@@ -8,6 +8,7 @@ import { publicConnector } from '../../shared/connector-contract.js'
 import { enforceRateLimit, redactMetadata, requestId } from '../_lib/security.js'
 import { usesServerlessConnectorExecution } from '../_lib/connector-execution.js'
 import { loginThingsBoardAccount, mergeThingsBoardSecret, thingsBoardAuthenticationMetadata, withThingsBoardAccessToken } from '../_lib/thingsboard-auth.js'
+import { connectorDeletionBlock } from '../../shared/connector-lifecycle.js'
 
 const ENVIRONMENTS = new Set(['development', 'staging', 'production'])
 
@@ -192,20 +193,17 @@ async function connectorAction(req, res, principal, projectId) {
 async function deleteConnector(req, res, principal, projectId) {
   const connector = await ownedConnector(req.query?.connectorId || req.body?.connectorId, principal, projectId)
   if (!connector) return res.status(404).json({ error: 'Connector not found.' })
-  if (connector.enabled) return res.status(409).json({ error: 'Disable the connector before deleting it.', code: 'CONNECTOR_ENABLED' })
-  const [draftReference, versionReference] = await Promise.all([
-    ProjectDraft.exists({ _id: projectId, 'schema.dataSources.connectorRef': connector.id }),
-    ProjectVersion.exists({ projectId, 'schema.dataSources.connectorRef': connector.id }),
-  ])
-  if (draftReference || versionReference) return res.status(409).json({ error: 'Detach the connector from all draft and published versions before deleting it.', code: 'CONNECTOR_IN_USE' })
+  const draftReference = await ProjectDraft.exists({ _id: projectId, 'schema.dataSources.connectorRef': connector.id })
+  const deletionBlock = connectorDeletionBlock({ enabled: connector.enabled, draftAttached: Boolean(draftReference) })
+  if (deletionBlock) return res.status(409).json({ error: deletionBlock.message, code: deletionBlock.code })
   await Promise.all([
     ConnectorEnvironment.deleteMany({ connectorId: connector.id }),
     ConnectorSecret.deleteMany({ connectorId: connector.id }),
     ConnectorHealthEvent.deleteMany({ connectorId: connector.id }),
   ])
   await connector.deleteOne()
-  await audit(principal, projectId, 'connector.delete', connector.id, { type: connector.type })
-  return res.status(200).json({ ok: true })
+  await audit(principal, projectId, 'connector.delete', connector.id, { type: connector.type, publishedHistoryPreserved: true })
+  return res.status(200).json({ ok: true, publishedHistoryPreserved: true })
 }
 
 async function testConnection(connector, environment) {

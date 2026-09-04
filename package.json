@@ -26,6 +26,7 @@
     "desktop:check": "cargo test --workspace",
     "desktop:build": "tauri build",
     "desktop:prepare-runtime": "node scripts/prepare-desktop-runtime.js",
+    "desktop:verify-install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-windows-install.ps1",
     "desktop:build:local": "npm run build && cargo build --release -p scamatic-data-plane -p scamatic-runtime-service && npm run desktop:prepare-runtime && tauri build --ci --features local-runtime --bundles nsis --config src-tauri/tauri.local.conf.json",
     "rust:fmt":    "cargo fmt --manifest-path data-plane-rs/Cargo.toml --check",
     "rust:test":   "cargo test --manifest-path data-plane-rs/Cargo.toml",

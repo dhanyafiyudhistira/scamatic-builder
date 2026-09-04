@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { connectorSourceUsage, detachUnusedConnectorSources } from '../shared/connector-lifecycle.js'
+import { connectorDeletionBlock, connectorSourceUsage, detachUnusedConnectorSources } from '../shared/connector-lifecycle.js'
 
 test('connector source usage counts only tags belonging to the selected connector', () => {
   const schema = sampleSchema()
@@ -21,6 +21,22 @@ test('connector sources with tag bindings cannot detach', () => {
   assert.equal(result.ok, false)
   assert.equal(result.usage.tagCount, 1)
   assert.equal(result.schema, schema)
+})
+
+test('connector deletion depends on active draft state, not immutable published history', () => {
+  assert.deepEqual(connectorDeletionBlock({ enabled: true }), {
+    code: 'CONNECTOR_ENABLED',
+    message: 'Disable the connector before deleting it.',
+  })
+  assert.deepEqual(connectorDeletionBlock({ draftAttached: true }), {
+    code: 'CONNECTOR_IN_DRAFT',
+    message: 'Detach the connector from the saved draft before deleting it.',
+  })
+  assert.deepEqual(connectorDeletionBlock({ draftDirty: true }), {
+    code: 'DRAFT_DIRTY',
+    message: 'Save the draft before deleting the connector.',
+  })
+  assert.equal(connectorDeletionBlock(), null)
 })
 
 function sampleSchema() {

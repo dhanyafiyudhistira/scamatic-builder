@@ -10,6 +10,13 @@ coverage/
 .DS_Store
 npm-debug.log*
 
+# Windows code-signing private material
+*.pfx
+*.pfx.*
+*.p12
+*.pem
+*.key
+
 .vercel
 
 .env

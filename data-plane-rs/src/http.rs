@@ -11,7 +11,9 @@ use axum::routing::get;
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use serde_json::{Value, json};
+#[cfg(test)]
+use serde_json::Value;
+use serde_json::json;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
@@ -171,7 +173,7 @@ async fn handle_isaac_socket(mut socket: WebSocket, gateway: Arc<IsaacGateway>, 
                         if sender.send(Message::Text(encoded.text.into())).await.is_err() { break; }
                         gateway.record_delivered(delivered);
                     }
-                    Ok(IsaacEvent::Command { event, scope }) => {
+                    Ok(IsaacEvent::Command { frame, scope }) => {
                         if !session.can_receive_commands()
                             || scope.user_id != session.user_id
                             || scope.workspace_id != session.workspace_id
@@ -180,7 +182,7 @@ async fn handle_isaac_socket(mut socket: WebSocket, gateway: Arc<IsaacGateway>, 
                         {
                             continue;
                         }
-                        if send_json(&mut sender, json!({ "type": "command-status", "command": event })).await.is_err() { break; }
+                        if sender.send(Message::Text(frame)).await.is_err() { break; }
                         gateway.record_delivered(1);
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -219,13 +221,6 @@ async fn handle_isaac_socket(mut socket: WebSocket, gateway: Arc<IsaacGateway>, 
 
 fn elapsed_nanoseconds(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
-}
-
-async fn send_json<S>(sender: &mut S, value: Value) -> Result<(), axum::Error>
-where
-    S: futures_util::Sink<Message, Error = axum::Error> + Unpin,
-{
-    sender.send(Message::Text(value.to_string().into())).await
 }
 
 async fn close_socket(

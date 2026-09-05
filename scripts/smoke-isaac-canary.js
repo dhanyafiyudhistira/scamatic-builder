@@ -25,7 +25,9 @@ const worker = new RustShadowWorker({
   environment: {
     ...process.env,
     SCADA_ISAAC_GATEWAY_ENABLED: 'true',
+    SCADA_ISAAC_CANARY_ENABLED: 'true',
     SCADA_ISAAC_STREAM_BIND: `127.0.0.1:${gatewayPort}`,
+    SCADA_ISAAC_STREAM_PUBLIC_URL: `ws://127.0.0.1:${gatewayPort}/isaac-stream`,
     SCADA_ISAAC_INTERNAL_HOST: '127.0.0.1',
     SCADA_ISAAC_INTERNAL_TOKEN: internalToken,
     SCADA_ISAAC_ALLOWED_ORIGINS: origin,
@@ -76,21 +78,28 @@ try {
   if (telemetry.events.length !== 1 || telemetry.events[0].tagId !== 'smoke-tag' || telemetry.events[0].value !== 42) {
     throw new Error(`Isaac scope filter failed: ${JSON.stringify(telemetry)}`)
   }
+  const commandStatus = messages.find(message => message.type === 'command-status')
+  if (commandStatus.command?.requestId !== 'smoke-request' || commandStatus.command?.status !== 'acknowledged') {
+    throw new Error(`Isaac command-status wire format changed: ${JSON.stringify(commandStatus)}`)
+  }
 
   const closed = waitForSocketClose(socket, 4_000)
   sessionValid = false
   const close = await closed
   if (close.code !== 4401) throw new Error(`Expected revoked session close code 4401, received ${close.code}.`)
   const health = worker.health()
-  if (authorizationCalls !== 1 || revalidationCalls < 1 || health.gatewayDeliveredEvents < 2) {
+  if (authorizationCalls !== 1 || revalidationCalls < 1 || health.gatewayDeliveredEvents < 2 || health.gatewayCommandEncodedBytes < 1) {
     throw new Error(`Isaac lifecycle counters are invalid: ${JSON.stringify({ authorizationCalls, revalidationCalls, health })}`)
   }
 
   console.log(JSON.stringify({
     ok: true,
     mode: health.mode,
+    active: health.active,
     gatewayReady: health.gatewayReady,
+    publicUrlReady: health.publicUrlReady,
     deliveredEvents: health.gatewayDeliveredEvents,
+    commandEncodedBytes: health.gatewayCommandEncodedBytes,
     authorizationCalls,
     revalidationCalls,
     revokedCloseCode: close.code,

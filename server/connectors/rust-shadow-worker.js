@@ -112,7 +112,7 @@ export class RustShadowWorker {
     if (!isaacCanaryProjectAllowed(project, this.environment)) return null
     const url = resolveIsaacStreamPublicUrl(this.environment)
     const health = this.health()
-    if (!url || !health.ok || health.gatewayReady !== true) return null
+    if (!url || !health.ok || health.active !== true) return null
     return { url }
   }
 
@@ -120,12 +120,17 @@ export class RustShadowWorker {
     const heartbeatAgeMs = this.lastHeartbeatAt ? Date.now() - this.lastHeartbeatAt : null
     const responsive = Boolean(this.child && heartbeatAgeMs != null && heartbeatAgeMs <= this.heartbeatTimeoutMs)
     const ready = responsive && this.lastHealth?.ok === true
+    const gatewayReady = this.lastHealth?.gatewayReady === true
+    const publicUrlReady = Boolean(resolveIsaacStreamPublicUrl(this.environment))
+    const active = gatewayReady && publicUrlReady && this.environment.SCADA_ISAAC_CANARY_ENABLED === 'true'
     return {
       ...(this.lastHealth || {}),
       ok: ready,
       status: ready ? 'ready' : this.unavailableReason || (this.child ? responsive ? 'starting' : 'unresponsive' : this.stopping ? 'stopping' : 'stopped'),
-      mode: this.lastHealth?.gatewayReady ? 'rust-isaac-canary' : 'rust-shadow',
-      active: this.lastHealth?.gatewayReady === true,
+      mode: active ? 'rust-isaac-canary' : 'rust-shadow',
+      active,
+      gatewayReady,
+      publicUrlReady,
       heartbeatAgeMs,
       healthUrl: this.healthUrl,
       binaryAvailable: !this.unavailableReason,
@@ -330,7 +335,12 @@ export function resolveIsaacStreamPublicUrl(env = process.env) {
   if (!configured) return null
   let url
   try { url = new URL(configured) } catch { return null }
-  const validProtocol = env.NODE_ENV === 'production' ? url.protocol === 'wss:' : ['ws:', 'wss:'].includes(url.protocol)
+  // An unencrypted WebSocket is safe only for the fixed loopback endpoint used
+  // by the packaged desktop runtime. Remote production streams still require TLS.
+  const productionLoopback = url.protocol === 'ws:' && url.hostname === '127.0.0.1' && url.port === '3003'
+  const validProtocol = env.NODE_ENV === 'production'
+    ? url.protocol === 'wss:' || productionLoopback
+    : ['ws:', 'wss:'].includes(url.protocol)
   if (!validProtocol || url.username || url.password || url.search || url.hash) return null
   if (url.pathname === '/') url.pathname = '/isaac-stream'
   if (url.pathname !== '/isaac-stream') return null

@@ -527,6 +527,27 @@ foreach ($probe in @(
   }
 }
 
+try {
+  $isaacPath = '/health/data-plane/shadow'
+  $isaacUri = '{0}{1}' -f $BaseUri.TrimEnd('/'), $isaacPath
+  $isaacResponse = Invoke-WebRequest -Uri $isaacUri -UseBasicParsing -TimeoutSec $TimeoutSeconds
+  $isaac = $isaacResponse.Content | ConvertFrom-Json
+  $isaacActive = $isaacResponse.StatusCode -eq 200 `
+    -and $isaac.ok -eq $true `
+    -and $isaac.enabled -eq $true `
+    -and $isaac.active -eq $true `
+    -and $isaac.gatewayReady -eq $true `
+    -and $isaac.publicUrlReady -eq $true `
+    -and $isaac.mode -eq 'rust-isaac-canary'
+  if ($isaacActive) {
+    Add-CheckResult 'Isaac Axum gateway' 'PASS' "GET $isaacPath confirmed active=true, gatewayReady=true, and publicUrlReady=true."
+  } else {
+    Add-CheckResult 'Isaac Axum gateway' 'FAIL' "GET $isaacPath did not confirm an active rust-isaac-canary gateway."
+  }
+} catch {
+  Add-CheckResult 'Isaac Axum gateway' 'FAIL' (Get-HealthProbeFailureDetail $_ '/health/data-plane/shadow')
+}
+
 $passed = @($script:Results | Where-Object status -eq 'PASS').Count
 $warnings = @($script:Results | Where-Object status -eq 'WARN').Count
 $failed = @($script:Results | Where-Object status -eq 'FAIL').Count

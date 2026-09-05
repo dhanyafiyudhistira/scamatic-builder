@@ -29,10 +29,12 @@
     "desktop:verify-install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-windows-install.ps1",
     "desktop:verify-release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-windows-release.ps1",
     "desktop:build:local": "npm run build && cargo build --release -p scamatic-data-plane -p scamatic-runtime-service && npm run desktop:prepare-runtime && tauri build --ci --features local-runtime --bundles nsis --config src-tauri/tauri.local.conf.json",
+    "desktop:release:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-signed-windows-release.ps1",
     "rust:fmt":    "cargo fmt --manifest-path data-plane-rs/Cargo.toml --check",
     "rust:test":   "cargo test --manifest-path data-plane-rs/Cargo.toml",
     "rust:build":  "cargo build --release --manifest-path data-plane-rs/Cargo.toml",
     "bench:isaac": "cargo test --release -p scamatic-data-plane --test telemetry_perf -- --ignored --nocapture",
+    "bench:isaac-rpc": "cargo test --release -p scamatic-data-plane --test command_status_perf -- --ignored --nocapture",
     "bench:rpc": "node scripts/benchmark-local-rpc.js",
     "smoke:rust-shadow": "node scripts/smoke-rust-shadow.js",
     "smoke:isaac-canary": "node scripts/smoke-isaac-canary.js"

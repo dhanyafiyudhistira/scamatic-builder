@@ -43,6 +43,10 @@ test('commissioning writes protected machine configuration and verifies readines
   assert.match(hooks, /CHART_MONGO_ALLOWED_HOSTS=\$ScamaticChartMongoAllowedHosts/)
   assert.match(hooks, /CHART_MONGO_ALLOWED_PRIVATE_HOSTS=\$ScamaticChartMongoAllowedPrivateHosts/)
   assert.match(hooks, /CHART_MONGO_ALLOW_SHARED_CLUSTER=false/)
+  assert.match(hooks, /SCADA_RUST_SHADOW_ENABLED=true/)
+  assert.match(hooks, /SCADA_ISAAC_CANARY_ENABLED=true/)
+  assert.match(hooks, /SCADA_ISAAC_STREAM_BIND=127\.0\.0\.1:3003/)
+  assert.match(hooks, /SCADA_ISAAC_STREAM_PUBLIC_URL=ws:\/\/127\.0\.0\.1:3003\/isaac-stream/)
   assert.doesNotMatch(hooks, /CONNECTOR_ALLOWED_PRIVATE_HOSTS=false/)
   assert.match(hooks, /generate-master-key/)
   assert.match(hooks, /SCADA_CONNECTOR_PREVIOUS_MASTER_KEYS=/)
@@ -60,6 +64,7 @@ test('commissioning writes protected machine configuration and verifies readines
   assert.match(hooks, /S-1-5-18:\(F\)/)
   assert.match(hooks, /S-1-5-32-544:\(F\)/)
   assert.match(hooks, /wait-ready --timeout-seconds 60/)
+  assert.match(hooks, /wait-isaac-ready --timeout-seconds 60/)
   assert.match(hooks, /check-key-compatible/)
   assert.match(hooks, /Fresh silent or passive installation requires a pre-provisioned/)
   assert.match(hooks, /\$PassiveMode = 1/)
@@ -105,9 +110,12 @@ test('desktop shell aligns compact branding with menus and enables native zoom s
 })
 
 test('post-install and release verifiers enforce service and signing policy without mutating Windows state', async () => {
-  const [verifier, releaseVerifier, packageSource] = await Promise.all([
+  const [verifier, releaseVerifier, releaseBuilder, releaseWorkflow, gitignore, packageSource] = await Promise.all([
     read('../scripts/verify-windows-install.ps1'),
     read('../scripts/verify-windows-release.ps1'),
+    read('../scripts/build-signed-windows-release.ps1'),
+    read('../.github/workflows/windows-signed-release.yml'),
+    read('../.gitignore'),
     read('../package.json'),
   ])
   const scripts = JSON.parse(packageSource).scripts
@@ -119,6 +127,10 @@ test('post-install and release verifiers enforce service and signing policy with
   assert.equal(
     scripts['desktop:verify-release'],
     'powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-windows-release.ps1',
+  )
+  assert.equal(
+    scripts['desktop:release:windows'],
+    'powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-signed-windows-release.ps1',
   )
   assert.match(verifier, /Get-CimInstance -ClassName Win32_Service/)
   assert.match(verifier, /DelayedAutoStart/)
@@ -140,6 +152,10 @@ test('post-install and release verifiers enforce service and signing policy with
   assert.match(verifier, /Installer signature/)
   assert.match(verifier, /health\/data-plane\/ready/)
   assert.match(verifier, /health\/data-plane\/key-compatibility/)
+  assert.match(verifier, /health\/data-plane\/shadow/)
+  assert.match(verifier, /isaac\.active -eq \$true/)
+  assert.match(verifier, /isaac\.gatewayReady -eq \$true/)
+  assert.match(verifier, /isaac\.publicUrlReady -eq \$true/)
   assert.doesNotMatch(verifier, /\b(?:Start|Stop|Restart|Remove|Set|New)-Service\b/)
   assert.doesNotMatch(verifier, /Get-Content\s+[^\r\n]*runtime\.env/i)
   assert.match(releaseVerifier, /Get-AuthenticodeSignature/)
@@ -148,4 +164,28 @@ test('post-install and release verifiers enforce service and signing policy with
   assert.match(releaseVerifier, /scamatic-data-plane\.exe/)
   assert.match(releaseVerifier, /node\.exe/)
   assert.match(releaseVerifier, /ExpectedPublisherThumbprint/)
+  assert.match(releaseBuilder, /Resolve-SigningCertificate/)
+  assert.match(releaseBuilder, /1\.3\.6\.1\.5\.5\.7\.3\.3/)
+  assert.match(releaseBuilder, /Add-AuthenticodeSignature -Path \$serviceExecutable/)
+  assert.match(releaseBuilder, /Add-AuthenticodeSignature -Path \$isaacExecutable/)
+  assert.match(releaseBuilder, /@\('build', '--locked', '--release'/)
+  assert.ok(releaseBuilder.indexOf('Add-AuthenticodeSignature -Path $serviceExecutable') < releaseBuilder.indexOf("@('run', 'desktop:prepare-runtime')"))
+  assert.match(releaseBuilder, /certificateThumbprint/)
+  assert.match(releaseBuilder, /timestampUrl/)
+  assert.match(releaseBuilder, /verify-windows-release\.ps1/)
+  assert.match(releaseBuilder, /Get-FileHash -LiteralPath \$installerPath -Algorithm SHA256/)
+  assert.match(releaseBuilder, /Remove-Item -LiteralPath \$generatedConfigurationPath/)
+  assert.match(releaseWorkflow, /workflow_dispatch:/)
+  assert.match(releaseWorkflow, /environment: windows-release/)
+  assert.match(releaseWorkflow, /SCAMATIC_WINDOWS_CERTIFICATE_BASE64: \$\{\{ secrets\.SCAMATIC_WINDOWS_CERTIFICATE_BASE64 \}\}/)
+  assert.match(releaseWorkflow, /npm run desktop:release:windows/)
+  assert.match(releaseWorkflow, /if-no-files-found: error/)
+  assert.match(releaseWorkflow, /persist-credentials: false/)
+  assert.match(releaseWorkflow, /package-manager-cache: false/)
+  assert.ok(releaseWorkflow.indexOf('- name: Remove signing material') < releaseWorkflow.indexOf('- name: Upload verified installer'))
+  assert.doesNotMatch(releaseWorkflow, /uses: actions\/[a-z-]+@v\d+/)
+  assert.doesNotMatch(releaseWorkflow, /pull_request:/)
+  assert.match(gitignore, /^\*\.pfx$/m)
+  assert.match(gitignore, /^\*\.p12$/m)
+  assert.match(gitignore, /^\*\.key$/m)
 })

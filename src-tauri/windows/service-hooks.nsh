@@ -514,7 +514,9 @@ Function ScamaticWriteRuntimeConfig
   FileWrite $R0 "CHART_MONGO_ALLOWED_PRIVATE_HOSTS=$ScamaticChartMongoAllowedPrivateHosts$\r$\n"
   FileWrite $R0 "CHART_MONGO_ALLOW_SHARED_CLUSTER=false$\r$\n"
   FileWrite $R0 "SCADA_RUST_SHADOW_ENABLED=true$\r$\n"
-  FileWrite $R0 "SCADA_ISAAC_CANARY_ENABLED=false$\r$\n"
+  FileWrite $R0 "SCADA_ISAAC_CANARY_ENABLED=true$\r$\n"
+  FileWrite $R0 "SCADA_ISAAC_STREAM_BIND=127.0.0.1:3003$\r$\n"
+  FileWrite $R0 "SCADA_ISAAC_STREAM_PUBLIC_URL=ws://127.0.0.1:3003/isaac-stream$\r$\n"
   FileClose $R0
   IfErrors scamatic_config_file_error 0
 
@@ -605,6 +607,17 @@ FunctionEnd
 
   scamatic_key_compatible:
   DetailPrint "Encrypted database records are compatible with the configured master key."
+  DetailPrint "Checking Isaac Axum canary activation..."
+  nsExec::ExecToLog '"$INSTDIR\scamatic-runtime-service.exe" wait-isaac-ready --timeout-seconds 60'
+  Pop $0
+  StrCmp $0 0 scamatic_isaac_ready 0
+  ${IfNot} ${Silent}
+    MessageBox MB_ICONEXCLAMATION|MB_OK "Service SCAMATIC berjalan, tetapi Isaac Axum belum aktif. Standard runtime tetap tersedia. Periksa konfigurasi SCADA_ISAAC_* dan log runtime sebelum memakai engine Isaac."
+  ${EndIf}
+  Goto scamatic_service_done
+
+  scamatic_isaac_ready:
+  DetailPrint "Isaac Axum gateway is active on 127.0.0.1:3003."
 
   scamatic_service_done:
 !macroend

@@ -125,6 +125,14 @@ test('Isaac canary requires an explicit database selection and a safe public URL
   }), null)
   assert.equal(resolveIsaacStreamPublicUrl({
     NODE_ENV: 'production',
+    SCADA_ISAAC_STREAM_PUBLIC_URL: 'ws://127.0.0.1:3003/isaac-stream',
+  }), 'ws://127.0.0.1:3003/isaac-stream')
+  assert.equal(resolveIsaacStreamPublicUrl({
+    NODE_ENV: 'production',
+    SCADA_ISAAC_STREAM_PUBLIC_URL: 'ws://127.0.0.1:3002/isaac-stream',
+  }), null)
+  assert.equal(resolveIsaacStreamPublicUrl({
+    NODE_ENV: 'production',
     SCADA_ISAAC_STREAM_PUBLIC_URL: 'wss://runtime.example/isaac-stream?secret=1',
   }), null)
 })

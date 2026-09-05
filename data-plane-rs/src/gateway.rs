@@ -1,4 +1,5 @@
 use crate::telemetry::SharedTelemetryBatch;
+use axum::extract::ws::Utf8Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -6,7 +7,7 @@ use std::env;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::broadcast;
@@ -223,7 +224,25 @@ impl CommandScope {
 #[derive(Clone, Debug)]
 pub enum IsaacEvent {
     Telemetry(SharedTelemetryBatch),
-    Command { event: Value, scope: CommandScope },
+    Command {
+        frame: Utf8Bytes,
+        scope: CommandScope,
+    },
+}
+
+#[derive(Serialize)]
+struct CommandStatusFrame<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    command: &'a Value,
+}
+
+pub fn encode_command_status(event: &Value) -> Result<Utf8Bytes, serde_json::Error> {
+    serde_json::to_string(&CommandStatusFrame {
+        kind: "command-status",
+        command: event,
+    })
+    .map(Into::into)
 }
 
 pub struct IsaacGateway {
@@ -235,6 +254,8 @@ pub struct IsaacGateway {
     delivered_events: AtomicU64,
     encoded_bytes: AtomicU64,
     encode_nanoseconds: AtomicU64,
+    command_encoded_bytes: AtomicU64,
+    command_encode_nanoseconds: AtomicU64,
 }
 
 impl IsaacGateway {
@@ -249,6 +270,8 @@ impl IsaacGateway {
             delivered_events: AtomicU64::new(0),
             encoded_bytes: AtomicU64::new(0),
             encode_nanoseconds: AtomicU64::new(0),
+            command_encoded_bytes: AtomicU64::new(0),
+            command_encode_nanoseconds: AtomicU64::new(0),
         }
     }
 
@@ -262,8 +285,21 @@ impl IsaacGateway {
         }
     }
 
-    pub fn publish_command(&self, event: Value, scope: CommandScope) {
-        let _ = self.events.send(IsaacEvent::Command { event, scope });
+    pub fn publish_command(
+        &self,
+        event: Value,
+        scope: CommandScope,
+    ) -> Result<(), serde_json::Error> {
+        let started = Instant::now();
+        let frame = encode_command_status(&event)?;
+        self.command_encoded_bytes
+            .fetch_add(frame.len() as u64, Ordering::Relaxed);
+        self.command_encode_nanoseconds.fetch_add(
+            u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        let _ = self.events.send(IsaacEvent::Command { frame, scope });
+        Ok(())
     }
 
     pub fn origin_allowed(&self, origin: &str) -> bool {
@@ -305,6 +341,8 @@ impl IsaacGateway {
             subscribers: self.events.receiver_count() as u64,
             encoded_bytes: self.encoded_bytes.load(Ordering::Relaxed),
             encode_nanoseconds: self.encode_nanoseconds.load(Ordering::Relaxed),
+            command_encoded_bytes: self.command_encoded_bytes.load(Ordering::Relaxed),
+            command_encode_nanoseconds: self.command_encode_nanoseconds.load(Ordering::Relaxed),
         }
     }
 }
@@ -318,6 +356,8 @@ pub struct GatewayCounters {
     pub subscribers: u64,
     pub encoded_bytes: u64,
     pub encode_nanoseconds: u64,
+    pub command_encoded_bytes: u64,
+    pub command_encode_nanoseconds: u64,
 }
 
 fn identifier(value: &Value, field: &str) -> Option<String> {
@@ -357,6 +397,21 @@ mod tests {
         };
         assert!(session.same_scope(&session));
         assert!(session.can_receive_commands());
+    }
+
+    #[test]
+    fn command_status_is_encoded_once_with_the_existing_wire_shape() {
+        let command = json!({
+            "requestId": "request-1",
+            "componentId": "button-1",
+            "status": "acknowledged"
+        });
+        let encoded = encode_command_status(&command).unwrap();
+        let decoded: Value = serde_json::from_str(encoded.as_str()).unwrap();
+        assert_eq!(
+            decoded,
+            json!({ "type": "command-status", "command": command })
+        );
     }
 
     #[test]

@@ -265,19 +265,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify-windows-insta
   -ExpectedPublisherThumbprint '<PRODUCTION_CERTIFICATE_THUMBPRINT>'
 ```
 
-Before distribution, configure `bundle.windows.certificateThumbprint`,
-`digestAlgorithm: "sha256"`, and a trusted `timestampUrl` in the protected
-Windows release configuration used by Tauri. Keep the PFX/password in the
-approved certificate store or CI secret store, never in this repository. After
-the Rust release build, sign the service and Isaac executables before running
-`desktop:prepare-runtime`; this ensures the exact sidecar/resource copies packed
-by Tauri are signed. After Tauri builds and signs the Desktop plus NSIS
-installer, run the artifact gate:
+The supported release orchestrator signs the service and Isaac before staging,
+passes an ephemeral publisher configuration to Tauri for the Desktop and NSIS,
+then runs the artifact gate automatically:
 
 ```powershell
-npm run desktop:verify-release -- `
-  -InstallerPath '<PATH_TO_SIGNED_NSIS_INSTALLER>' `
-  -ExpectedPublisherThumbprint '<PRODUCTION_CERTIFICATE_THUMBPRINT>'
+npm run desktop:release:windows -- `
+  -ExpectedPublisherThumbprint '<PRODUCTION_CERTIFICATE_THUMBPRINT>' `
+  -TimestampUrl '<CERTIFICATE_AUTHORITY_TIMESTAMP_URL>'
 ```
 
 This gate requires a valid, timestamped production-publisher signature on the
@@ -285,6 +280,10 @@ Desktop executable, runtime service, Isaac data-plane, and NSIS installer. It
 also requires a valid vendor signature on the packaged Node runtime. The
 post-install verifier above remains mandatory because it additionally verifies
 the generated uninstaller and the live Windows Service installation.
+
+Certificate storage rules, the protected GitHub Actions workflow, required
+secrets, checksum handling, and clean-VM acceptance steps are documented in
+[`docs/runbooks/windows-code-signing-release.md`](docs/runbooks/windows-code-signing-release.md).
 
 Use `-Json` for machine-readable output. The process exits with code `1` when
 any required check fails and `0` when required checks pass; warnings do not
@@ -411,21 +410,29 @@ Projects can independently choose an operational runtime engine preference:
 project metadata, so changing it does not alter an immutable published screen
 or its checksum.
 
-Isaac now has an opt-in Axum WebSocket canary. It is selected only when all of
-these checks pass:
+The packaged local runtime starts the Isaac Axum gateway on fixed loopback by
+default. A project uses it only when all of these checks pass:
 
 - `SCADA_RUST_SHADOW_ENABLED=true` and `SCADA_ISAAC_CANARY_ENABLED=true`;
 - a workspace OWNER or ADMIN enables the project from
   **Settings → Isaac runtime setup**;
 - the Rust worker reports that its gateway is ready;
-- `SCADA_ISAAC_STREAM_PUBLIC_URL` is a valid WebSocket URL (`wss:` is required
-  in production).
+- `SCADA_ISAAC_STREAM_PUBLIC_URL` is a valid WebSocket URL. Remote production
+  URLs require `wss:`; the packaged `ws://127.0.0.1:3003/isaac-stream` endpoint
+  is allowed because it cannot leave the device.
 
 For a local canary behind Vite, use `/isaac-stream` on the frontend origin and
 set `SCADA_ISAAC_STREAM_PUBLIC_URL=ws://localhost:5173/isaac-stream`. For the
 included Caddy edge on port `8088`, use
 `ws://localhost:8088/isaac-stream` locally or the corresponding public `wss:`
 URL in production. Axum itself remains bound to `127.0.0.1:3003`.
+
+Fresh Windows installations write the fixed loopback URL and enable global
+canary availability. Existing protected `runtime.env` files are intentionally
+not overwritten during upgrade; set the three `SCADA_ISAAC_*` values from
+`src-tauri/runtime.env.example`, restart `SCAMATICRuntime`, and run
+`npm run desktop:verify-install`. The verification is successful only when the
+gateway reports both `active=true` and `gatewayReady=true`.
 
 Each Isaac ticket is single-use and engine-bound. Axum delegates ticket
 consumption and session authorization to a private loopback Node endpoint,

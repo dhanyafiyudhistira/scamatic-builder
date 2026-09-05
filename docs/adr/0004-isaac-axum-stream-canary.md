@@ -20,6 +20,13 @@ project's audited `isaacCanaryEnabled` setting, the Axum worker reports gateway
 readiness, and a valid public WebSocket URL is configured. Otherwise the server
 selects `standard` and reports `ISAAC_UNAVAILABLE`.
 
+The packaged local installer enables global canary availability and binds Axum
+to `127.0.0.1:3003`; project selection remains explicit and audited. Plain
+`ws:` is permitted only for that exact loopback endpoint. Remote production
+endpoints continue to require `wss:`. The post-install verifier treats a
+shadow-only worker as incomplete and requires `active=true` plus
+`gatewayReady=true`.
+
 Axum consumes single-use tickets whose `RuntimeStreamSession.engine` is
 `isaac`. It asks a private loopback-only Node endpoint to consume each ticket
 and revalidates the resulting runtime session every five seconds by default.
@@ -29,6 +36,8 @@ capabilities, active published version, and allowed tag ids in MongoDB.
 The Rust process receives only sanitized live event projections over the
 existing bounded NDJSON child-process channel. It filters every telemetry and
 command-status event against the authorized session scope before fan-out.
+Command-status frames are serialized once into reference-counted UTF-8 bytes;
+each authorized client receives a cheap clone of the same immutable frame.
 
 ## Safety boundaries
 

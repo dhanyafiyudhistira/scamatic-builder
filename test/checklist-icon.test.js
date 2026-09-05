@@ -20,6 +20,10 @@ test('checklist controls and success indicators use the shared check.svg asset',
   assert.match(icon, /<path\b/)
   assert.match(css, /input\[type="checkbox"\]::after\s*\{[\s\S]*?mask:\s*url\('\/check\.svg'\)/)
   assert.match(css, /\.sb-tag-value-control input\[type="checkbox"\]:checked::after\s*\{[\s\S]*?mask:\s*url\('\/check\.svg'\)/)
+  const circularIndicatorRule = css.match(/\.sb-version-active-mark::before,\s*\.sb-validation-panel-result\.ok>\.sb-validation-ok-mark::before\s*\{([\s\S]*?)\}/)?.[1]
+  assert.ok(circularIndicatorRule)
+  assert.match(circularIndicatorRule, /mask:\s*url\('\/check\.svg'\)/)
+  assert.doesNotMatch(circularIndicatorRule, /border-(?:right|bottom)/)
   assert.ok(sources.every(source => source.includes('src="/check.svg"')))
   assert.doesNotMatch(sources.join('\n'), /[✓✔☑]/)
 })

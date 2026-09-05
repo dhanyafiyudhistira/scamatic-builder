@@ -7196,15 +7196,11 @@ body.sb-is-resizing-sidebar * {
 .sb-version-active-mark::before,
 .sb-validation-panel-result.ok>.sb-validation-ok-mark::before {
   content: '';
-  width: 4px;
-  height: 8px;
-  border-right: 2px solid #fff;
-  border-bottom: 2px solid #fff;
-  transform: translateY(-1px) rotate(45deg);
-}
-
-.sb-validation-panel-result.ok>.sb-validation-ok-mark::before {
-  transform: translateX(15%) translateY(-1px) rotate(45deg);
+  width: 12px;
+  height: 12px;
+  background: #fff;
+  -webkit-mask: url('/check.svg') center / contain no-repeat;
+  mask: url('/check.svg') center / contain no-repeat;
 }
 
 .sb-version-restore {

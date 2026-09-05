@@ -50,6 +50,13 @@ test('commissioning writes protected machine configuration and verifies readines
   assert.doesNotMatch(hooks, /SCADA_ADMIN_PASSWORD=\$\"\$ScamaticAdminPassword/)
   assert.match(hooks, /validate --config/)
   assert.match(hooks, /register-service/)
+  assert.ok(hooks.indexOf('Call ScamaticHardenRuntimeStorage') < hooks.indexOf('Call ScamaticWriteRuntimeConfig'))
+  assert.match(hooks, /Function ScamaticHardenRuntimeStorage/)
+  assert.match(hooks, /\/inheritance:r \/remove:g/)
+  assert.match(hooks, /SCAMATIC\\logs\\runtime\.log" \/inheritance:r/)
+  assert.match(hooks, /S-1-1-0/)
+  assert.match(hooks, /S-1-5-11/)
+  assert.match(hooks, /S-1-5-32-545/)
   assert.match(hooks, /S-1-5-18:\(F\)/)
   assert.match(hooks, /S-1-5-32-544:\(F\)/)
   assert.match(hooks, /wait-ready --timeout-seconds 60/)
@@ -66,6 +73,9 @@ test('commissioning writes protected machine configuration and verifies readines
   assert.match(service, /NT SERVICE\\SCAMATICRuntime/)
   assert.match(service, /"sidtype", SERVICE_NAME, "unrestricted"/)
   assert.match(service, /grant_service_file_permissions/)
+  assert.match(service, /harden_runtime_storage\(&layout\)/)
+  assert.match(service, /BROAD_ACCESS_SIDS/)
+  assert.ok(service.indexOf('harden_runtime_storage(&layout)') < service.indexOf('grant_service_file_permissions(&layout)'))
   assert.match(service, /validate_service_configuration\(&layout\)/)
   assert.match(service, /wait_for_port_available/)
   assert.match(service, /query_service_state/)
@@ -94,9 +104,10 @@ test('desktop shell aligns compact branding with menus and enables native zoom s
   assert.ok(permissions.includes('core:webview:allow-set-webview-zoom'))
 })
 
-test('post-install verifier audits service security without mutating Windows state', async () => {
-  const [verifier, packageSource] = await Promise.all([
+test('post-install and release verifiers enforce service and signing policy without mutating Windows state', async () => {
+  const [verifier, releaseVerifier, packageSource] = await Promise.all([
     read('../scripts/verify-windows-install.ps1'),
+    read('../scripts/verify-windows-release.ps1'),
     read('../package.json'),
   ])
   const scripts = JSON.parse(packageSource).scripts
@@ -105,11 +116,18 @@ test('post-install verifier audits service security without mutating Windows sta
     scripts['desktop:verify-install'],
     'powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-windows-install.ps1',
   )
+  assert.equal(
+    scripts['desktop:verify-release'],
+    'powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-windows-release.ps1',
+  )
   assert.match(verifier, /Get-CimInstance -ClassName Win32_Service/)
   assert.match(verifier, /DelayedAutoStart/)
   assert.match(verifier, /ServiceSidType/)
   assert.match(verifier, /FailureActionsOnNonCrashFailures/)
   assert.match(verifier, /Get-Acl -LiteralPath \$configFile/)
+  assert.match(verifier, /Get-Acl -LiteralPath \$ProgramDataRoot/)
+  assert.match(verifier, /Get-BroadAllowRules \$logAcl/)
+  assert.match(verifier, /Get-Acl -LiteralPath \$logFile/)
   assert.match(verifier, /Get-NetTCPConnection -State Listen/)
   assert.match(verifier, /Test-DescendantProcess/)
   assert.match(verifier, /Get-AuthenticodeSignature/)
@@ -124,4 +142,10 @@ test('post-install verifier audits service security without mutating Windows sta
   assert.match(verifier, /health\/data-plane\/key-compatibility/)
   assert.doesNotMatch(verifier, /\b(?:Start|Stop|Restart|Remove|Set|New)-Service\b/)
   assert.doesNotMatch(verifier, /Get-Content\s+[^\r\n]*runtime\.env/i)
+  assert.match(releaseVerifier, /Get-AuthenticodeSignature/)
+  assert.match(releaseVerifier, /TimeStamperCertificate/)
+  assert.match(releaseVerifier, /scamatic-runtime-service-\$TargetTriple\.exe/)
+  assert.match(releaseVerifier, /scamatic-data-plane\.exe/)
+  assert.match(releaseVerifier, /node\.exe/)
+  assert.match(releaseVerifier, /ExpectedPublisherThumbprint/)
 })

@@ -45,6 +45,9 @@ mod windows_host {
     const SERVICE_NAME: &str = "SCAMATICRuntime";
     const SERVICE_DISPLAY_NAME: &str = "SCAMATIC Local Runtime";
     const SERVICE_ACCOUNT: &str = r"NT SERVICE\SCAMATICRuntime";
+    const SYSTEM_ACCOUNT_SID: &str = "*S-1-5-18";
+    const ADMINISTRATORS_GROUP_SID: &str = "*S-1-5-32-544";
+    const BROAD_ACCESS_SIDS: [&str; 3] = ["*S-1-1-0", "*S-1-5-11", "*S-1-5-32-545"];
     const SERVICE_DESCRIPTION: &str =
         "Keeps the local SCAMATIC Express, connector worker, and Isaac data-plane available.";
     const ERROR_SERVICE_EXISTS: i32 = 1073;
@@ -334,6 +337,7 @@ mod windows_host {
             &["sidtype", SERVICE_NAME, "unrestricted"],
             &[0],
         )?;
+        harden_runtime_storage(&layout)?;
         grant_service_file_permissions(&layout)?;
         if query_service_state()? != ServiceState::Running {
             wait_for_port_available(READINESS_ADDRESS.parse()?, Duration::from_secs(5))?;
@@ -363,10 +367,19 @@ mod windows_host {
     }
 
     fn grant_service_file_permissions(layout: &RuntimeLayout) -> Result<(), DynError> {
+        let configuration_directory = layout
+            .config_file
+            .parent()
+            .ok_or("runtime configuration path has no parent directory")?;
         let log_directory = layout
             .log_file
             .parent()
             .ok_or("runtime log path has no parent directory")?;
+        run_icacls(
+            "grant runtime storage traverse access",
+            configuration_directory,
+            "(RX)",
+        )?;
         run_icacls(
             "grant runtime configuration read access",
             &layout.config_file,
@@ -377,6 +390,13 @@ mod windows_host {
             log_directory,
             "(OI)(CI)(M)",
         )?;
+        if layout.log_file.is_file() {
+            run_icacls(
+                "grant existing runtime log write access",
+                &layout.log_file,
+                "(M)",
+            )?;
+        }
         run_icacls(
             "grant packaged runtime read and execute access",
             &layout.runtime_root,
@@ -384,15 +404,66 @@ mod windows_host {
         )
     }
 
+    fn harden_runtime_storage(layout: &RuntimeLayout) -> Result<(), DynError> {
+        let configuration_directory = layout
+            .config_file
+            .parent()
+            .ok_or("runtime configuration path has no parent directory")?;
+        let log_directory = layout
+            .log_file
+            .parent()
+            .ok_or("runtime log path has no parent directory")?;
+        fs::create_dir_all(configuration_directory)?;
+        fs::create_dir_all(log_directory)?;
+        harden_acl(
+            "harden runtime configuration directory",
+            configuration_directory,
+            true,
+        )?;
+        harden_acl("harden runtime log directory", log_directory, true)?;
+        if layout.log_file.is_file() {
+            harden_acl("harden existing runtime log file", &layout.log_file, false)?;
+        }
+        harden_acl(
+            "harden runtime configuration file",
+            &layout.config_file,
+            false,
+        )
+    }
+
+    fn harden_acl(label: &str, path: &Path, directory: bool) -> Result<(), DynError> {
+        let access = if directory { "(OI)(CI)(F)" } else { "(F)" };
+        let system_grant = format!("{SYSTEM_ACCOUNT_SID}:{access}");
+        let administrators_grant = format!("{ADMINISTRATORS_GROUP_SID}:{access}");
+        run_icacls_arguments(
+            label,
+            path,
+            &[
+                "/inheritance:r",
+                "/remove:g",
+                BROAD_ACCESS_SIDS[0],
+                BROAD_ACCESS_SIDS[1],
+                BROAD_ACCESS_SIDS[2],
+                "/grant:r",
+                &system_grant,
+                &administrators_grant,
+            ],
+        )
+    }
+
     fn run_icacls(label: &str, path: &Path, access: &str) -> Result<(), DynError> {
+        let grant = format!("{SERVICE_ACCOUNT}:{access}");
+        run_icacls_arguments(label, path, &["/grant:r", &grant])
+    }
+
+    fn run_icacls_arguments(label: &str, path: &Path, arguments: &[&str]) -> Result<(), DynError> {
         let system_root = env::var_os("SystemRoot").ok_or("SystemRoot is not available")?;
         let executable = PathBuf::from(system_root)
             .join("System32")
             .join("icacls.exe");
-        let grant = format!("{SERVICE_ACCOUNT}:{access}");
         let status = Command::new(executable)
             .arg(path)
-            .args(["/grant:r", &grant])
+            .args(arguments)
             .status()?;
         let code = status.code().unwrap_or(-1);
         if code != 0 {

@@ -12,6 +12,7 @@ import {
   rewrapConnectorSecretKey,
 } from '../api/_lib/connector-secrets.js'
 import { auditMasterKeyCompatibility } from '../api/_lib/master-key-compatibility.js'
+import { assertRotationWritesMatched, guardedRotationFilter } from '../api/_lib/master-key-rotation.js'
 
 const SECRET_FIELDS = '+payloadCiphertext +payloadIv +payloadTag +wrappedKey +wrappedKeyIv +wrappedKeyTag +keyVersion'
 
@@ -33,35 +34,41 @@ async function main() {
   }
   assertServiceStopped()
 
-  const [connectorRecords, chartRecords] = await Promise.all([
-    ConnectorSecret.find({}).select(SECRET_FIELDS).lean(),
-    ChartStorageSecret.find({}).select(SECRET_FIELDS).lean(),
-  ])
-  const connectorOperations = connectorRecords.flatMap(record => {
-    const inspected = inspectConnectorSecretKey(record, { connectorId: record.connectorId, environmentRef: record.environmentRef })
-    if (inspected.primary && record.wrappingKeyId === metadata.primaryKeyId) return []
-    return [{
-      updateOne: {
-        filter: { _id: record._id },
-        update: { $set: rewrapConnectorSecretKey(record, { connectorId: record.connectorId, environmentRef: record.environmentRef }) },
-      },
-    }]
-  })
-  const chartOperations = chartRecords.flatMap(record => {
-    const inspected = inspectChartStorageSecretKey(record, { workspaceId: record.workspaceId })
-    if (inspected.primary && record.wrappingKeyId === metadata.primaryKeyId) return []
-    return [{
-      updateOne: {
-        filter: { _id: record._id },
-        update: { $set: rewrapChartStorageSecretKey(record, { workspaceId: record.workspaceId }) },
-      },
-    }]
-  })
-
   await runMongoTransaction(async session => {
-    const options = session ? { session, ordered: false } : { ordered: false }
-    if (connectorOperations.length) await ConnectorSecret.bulkWrite(connectorOperations, options)
-    if (chartOperations.length) await ChartStorageSecret.bulkWrite(chartOperations, options)
+    // MongoDB transactions do not support parallel operations. Read and write
+    // sequentially inside the same snapshot so withTransaction can safely retry
+    // the complete rotation after a write conflict.
+    const connectorRecords = await ConnectorSecret.find({}).select(SECRET_FIELDS).session(session).lean()
+    const chartRecords = await ChartStorageSecret.find({}).select(SECRET_FIELDS).session(session).lean()
+    const connectorOperations = connectorRecords.flatMap(record => {
+      const inspected = inspectConnectorSecretKey(record, { connectorId: record.connectorId, environmentRef: record.environmentRef })
+      if (inspected.primary && record.wrappingKeyId === metadata.primaryKeyId) return []
+      return [{
+        updateOne: {
+          filter: guardedRotationFilter(record),
+          update: { $set: rewrapConnectorSecretKey(record, { connectorId: record.connectorId, environmentRef: record.environmentRef }) },
+        },
+      }]
+    })
+    const chartOperations = chartRecords.flatMap(record => {
+      const inspected = inspectChartStorageSecretKey(record, { workspaceId: record.workspaceId })
+      if (inspected.primary && record.wrappingKeyId === metadata.primaryKeyId) return []
+      return [{
+        updateOne: {
+          filter: guardedRotationFilter(record),
+          update: { $set: rewrapChartStorageSecretKey(record, { workspaceId: record.workspaceId }) },
+        },
+      }]
+    })
+    const writeOptions = { session, ordered: false }
+    if (connectorOperations.length) {
+      const result = await ConnectorSecret.bulkWrite(connectorOperations, writeOptions)
+      assertRotationWritesMatched('A Data Source secret', result, connectorOperations.length)
+    }
+    if (chartOperations.length) {
+      const result = await ChartStorageSecret.bulkWrite(chartOperations, writeOptions)
+      assertRotationWritesMatched('A Chart storage secret', result, chartOperations.length)
+    }
   }, { requireTransaction: true })
   const after = await auditMasterKeyCompatibility()
   printSummary('completed', after)

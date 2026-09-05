@@ -101,6 +101,7 @@ fn validate_stream_request(
     };
     if url.scheme() != expected_scheme
         || url.host_str() != server_origin.host_str()
+        || !stream_port_is_allowed(server_origin, &url)
         || !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()
@@ -111,6 +112,25 @@ fn validate_stream_request(
     }
     url.query_pairs_mut().append_pair("ticket", &input.ticket);
     Ok(url)
+}
+
+fn stream_port_is_allowed(server_origin: &Url, stream_url: &Url) -> bool {
+    let server_port = server_origin.port_or_known_default();
+    let stream_port = stream_url.port_or_known_default();
+    if stream_port == server_port {
+        return true;
+    }
+    if stream_url.path() != "/isaac-stream" {
+        return false;
+    }
+    match stream_port {
+        Some(3003) => matches!(
+            server_origin.host_str(),
+            Some("127.0.0.1" | "localhost" | "::1")
+        ),
+        Some(8088) => true,
+        _ => false,
+    }
 }
 
 async fn run_stream(
@@ -230,6 +250,13 @@ mod tests {
         assert!(
             validate_stream_request(
                 &server,
+                &request("wss://scada.example:8088/isaac-stream", ticket)
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_stream_request(
+                &server,
                 &request("wss://foreign.example/isaac-stream", ticket)
             )
             .is_err()
@@ -245,6 +272,13 @@ mod tests {
             validate_stream_request(&server, &request("wss://scada.example/admin", ticket))
                 .is_err()
         );
+        assert!(
+            validate_stream_request(
+                &server,
+                &request("wss://scada.example:9443/isaac-stream", ticket)
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -258,5 +292,25 @@ mod tests {
             ),
         );
         assert!(resolved.is_ok());
+        assert!(
+            validate_stream_request(
+                &server,
+                &request(
+                    "ws://127.0.0.1:6553/isaac-stream",
+                    "abcdefghijklmnopqrstuvwxyz_1234",
+                ),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_stream_request(
+                &server,
+                &request(
+                    "ws://127.0.0.1:3003/runtime-stream",
+                    "abcdefghijklmnopqrstuvwxyz_1234",
+                ),
+            )
+            .is_err()
+        );
     }
 }

@@ -445,6 +445,39 @@ Function ScamaticRuntimeSetupLeave
   StrCpy $ScamaticConfigureRuntime 1
 FunctionEnd
 
+Function ScamaticHardenRuntimeStorage
+  CreateDirectory "$APPDATA\SCAMATIC"
+  CreateDirectory "$APPDATA\SCAMATIC\logs"
+
+  ; Remove inherited/broad grants before any secret-bearing file is created.
+  ; Well-known SIDs avoid failures on non-English Windows installations.
+  nsExec::ExecToLog '"$SYSDIR\icacls.exe" "$APPDATA\SCAMATIC" /inheritance:r /remove:g "*S-1-1-0" "*S-1-5-11" "*S-1-5-32-545" /grant:r "*S-1-5-18:(OI)(CI)(F)" "*S-1-5-32-544:(OI)(CI)(F)"'
+  Pop $R0
+  StrCmp $R0 0 0 scamatic_storage_acl_error
+
+  nsExec::ExecToLog '"$SYSDIR\icacls.exe" "$APPDATA\SCAMATIC\logs" /inheritance:r /remove:g "*S-1-1-0" "*S-1-5-11" "*S-1-5-32-545" /grant:r "*S-1-5-18:(OI)(CI)(F)" "*S-1-5-32-544:(OI)(CI)(F)"'
+  Pop $R0
+  StrCmp $R0 0 0 scamatic_storage_acl_error
+
+  IfFileExists "$APPDATA\SCAMATIC\logs\runtime.log" 0 scamatic_storage_config_acl
+  nsExec::ExecToLog '"$SYSDIR\icacls.exe" "$APPDATA\SCAMATIC\logs\runtime.log" /inheritance:r /remove:g "*S-1-1-0" "*S-1-5-11" "*S-1-5-32-545" /grant:r "*S-1-5-18:(F)" "*S-1-5-32-544:(F)"'
+  Pop $R0
+  StrCmp $R0 0 0 scamatic_storage_acl_error
+
+  scamatic_storage_config_acl:
+  IfFileExists "$APPDATA\SCAMATIC\runtime.env" 0 scamatic_storage_acl_done
+  nsExec::ExecToLog '"$SYSDIR\icacls.exe" "$APPDATA\SCAMATIC\runtime.env" /inheritance:r /remove:g "*S-1-1-0" "*S-1-5-11" "*S-1-5-32-545" /grant:r "*S-1-5-18:(F)" "*S-1-5-32-544:(F)"'
+  Pop $R0
+  StrCmp $R0 0 0 scamatic_storage_acl_error
+
+  scamatic_storage_acl_done:
+  Return
+
+  scamatic_storage_acl_error:
+  MessageBox MB_ICONSTOP|MB_OK "Folder konfigurasi runtime tidak dapat diamankan. Instalasi dihentikan sebelum credential ditulis."
+  Abort
+FunctionEnd
+
 Function ScamaticWriteRuntimeConfig
   StrCmp $ScamaticConfigureRuntime 1 0 scamatic_config_done
   IfFileExists "$APPDATA\SCAMATIC\runtime.env" scamatic_config_done 0
@@ -535,8 +568,7 @@ FunctionEnd
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
-  CreateDirectory "$APPDATA\SCAMATIC"
-  CreateDirectory "$APPDATA\SCAMATIC\logs"
+  Call ScamaticHardenRuntimeStorage
   IfFileExists "$APPDATA\SCAMATIC\runtime.env.example" +2 0
     CopyFiles /SILENT "$INSTDIR\resources\runtime\runtime.env.example" "$APPDATA\SCAMATIC\runtime.env.example"
 

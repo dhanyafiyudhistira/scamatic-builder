@@ -8,6 +8,7 @@ import {
   rewrapChartStorageSecretKey,
   rewrapConnectorSecretKey,
 } from '../api/_lib/connector-secrets.js'
+import { assertRotationWritesMatched, guardedRotationFilter } from '../api/_lib/master-key-rotation.js'
 
 test('master-key audit detects fallback records and verifies rewrap completion', async () => {
   const originalPrimary = process.env.SCADA_CONNECTOR_MASTER_KEY
@@ -57,6 +58,36 @@ test('master-key audit detects fallback records and verifies rewrap completion',
 test('master-key rotation fails closed when MongoDB transactions are unavailable', async () => {
   const source = await readFile(new URL('../scripts/rotate-connector-master-key.js', import.meta.url), 'utf8')
   assert.match(source, /runMongoTransaction\([\s\S]*\{ requireTransaction: true \}\)/)
+  const transactionStart = source.indexOf('await runMongoTransaction')
+  assert.ok(transactionStart >= 0)
+  assert.ok(source.indexOf('ConnectorSecret.find({})', transactionStart) > transactionStart)
+  assert.ok(source.indexOf('ChartStorageSecret.find({})', transactionStart) > transactionStart)
+  assert.doesNotMatch(source.slice(transactionStart), /Promise\.all/)
+})
+
+test('master-key rotation guards wrapping state and rejects lost updates', () => {
+  const record = {
+    _id: 'secret-a',
+    wrappedKey: 'wrapped',
+    wrappedKeyIv: 'iv',
+    wrappedKeyTag: 'tag',
+    wrappingKeyId: 'old-key',
+    keyVersion: 'v1',
+    payloadCiphertext: 'not-used-as-a-write-guard',
+  }
+  assert.deepEqual(guardedRotationFilter(record), {
+    _id: 'secret-a',
+    wrappedKey: 'wrapped',
+    wrappedKeyIv: 'iv',
+    wrappedKeyTag: 'tag',
+    wrappingKeyId: 'old-key',
+    keyVersion: 'v1',
+  })
+  assert.doesNotThrow(() => assertRotationWritesMatched('secret', { matchedCount: 1 }, 1))
+  assert.throws(
+    () => assertRotationWritesMatched('secret', { matchedCount: 0 }, 1),
+    /transaction was aborted and must be retried/,
+  )
 })
 
 function fakeModel(records) {

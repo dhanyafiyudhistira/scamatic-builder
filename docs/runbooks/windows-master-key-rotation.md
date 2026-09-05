@@ -33,7 +33,9 @@ Sebelum maintenance:
 1. Gunakan akun Windows yang merupakan anggota local Administrators dan buka
    PowerShell dengan **Run as administrator**.
 2. Jadwalkan maintenance window singkat. Service tetap dapat berjalan selama
-   dry-run, tetapi harus berhenti saat `--apply` dijalankan.
+   dry-run, tetapi harus berhenti saat `--apply` dijalankan. Blokir juga UI,
+   API/serverless function, worker, atau deployment SCAMATIC lain yang memakai
+   database yang sama agar tidak ada writer credential selama rotasi.
 3. Buat snapshot/backup MongoDB yang dapat dipulihkan.
 4. Cadangkan `C:\ProgramData\SCAMATIC\runtime.env` dengan ACL yang sama ketatnya.
 5. Pastikan key lama masih tersedia dan instalasi sedang sehat.
@@ -156,8 +158,10 @@ adalah jumlah record yang akan dirotasi. Jangan lanjut jika `ok` bernilai
 
 ## 5. Terapkan rotasi
 
-Hentikan Windows Service, pastikan statusnya `Stopped`, lalu jalankan utility
-dengan `--apply`:
+Aktifkan maintenance mode pada seluruh deployment yang berbagi database.
+Hentikan Windows Service, pastikan statusnya `Stopped`, pastikan tidak ada API
+atau worker SCAMATIC lain yang masih dapat mengubah Data Source/Chart secret,
+lalu jalankan utility dengan `--apply`:
 
 ```powershell
 Stop-Service -Name $ScamaticService
@@ -165,8 +169,11 @@ Stop-Service -Name $ScamaticService
 & $ScamaticNode $ScamaticRotationScript --apply
 ```
 
-Utility melakukan preflight sekali lagi, menulis ulang hanya wrapped data key
-dalam transaksi MongoDB, lalu memverifikasi hasilnya. Output sukses wajib
+Utility melakukan preflight sekali lagi, membaca dan menulis ulang hanya
+wrapped data key dalam snapshot transaksi MongoDB yang sama, lalu memverifikasi
+hasilnya. Setiap update membawa guard atas wrapping state yang dibaca. Bila ada
+writer lain mengubah record, transaksi dibatalkan atau diulang dari snapshot
+baru sehingga update tersebut tidak tertimpa diam-diam. Output sukses wajib
 memuat:
 
 ```text
@@ -285,6 +292,14 @@ Jika service harus tersedia selama investigasi, konfigurasi dua-key dapat tetap
 digunakan untuk menyalakan service. Jangan menganggap rotasi selesai sampai
 compatibility menunjukkan `incompatible: 0` dan `rotationRequired: 0`.
 
+### Utility melaporkan record berubah selama rotasi
+
+Masih ada writer lain pada database yang sama atau terjadi perubahan credential
+di tengah maintenance. Jangan menghapus previous key. Hentikan akses tulis dari
+Desktop, API/serverless function, worker, dan deployment SCAMATIC lain, lalu
+ulangi dry-run serta `--apply`. Guard transaksi sengaja menggagalkan rotasi
+daripada menimpa update yang lebih baru.
+
 ### `npm` melaporkan `Missing script: desktop:verify-install`
 
 Perintah dijalankan di luar root repository atau checkout belum memuat verifier.
@@ -300,6 +315,8 @@ di direktori instalasi tidak memerlukan current directory repository.
 - [ ] Validasi konfigurasi berhasil.
 - [ ] Dry-run: `ok=true`, `incompatible=0`.
 - [ ] Service berhenti sebelum `--apply`.
+- [ ] Semua deployment/API/worker lain yang berbagi database berada dalam
+      maintenance mode dan tidak dapat menulis secret.
 - [ ] Apply selesai: `status=compatible`, `rotationRequired=0`.
 - [ ] Previous keys dikosongkan setelah verifikasi berhasil.
 - [ ] Service kembali `Running` dan kedua health endpoint sehat.

@@ -265,6 +265,27 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify-windows-insta
   -ExpectedPublisherThumbprint '<PRODUCTION_CERTIFICATE_THUMBPRINT>'
 ```
 
+Before distribution, configure `bundle.windows.certificateThumbprint`,
+`digestAlgorithm: "sha256"`, and a trusted `timestampUrl` in the protected
+Windows release configuration used by Tauri. Keep the PFX/password in the
+approved certificate store or CI secret store, never in this repository. After
+the Rust release build, sign the service and Isaac executables before running
+`desktop:prepare-runtime`; this ensures the exact sidecar/resource copies packed
+by Tauri are signed. After Tauri builds and signs the Desktop plus NSIS
+installer, run the artifact gate:
+
+```powershell
+npm run desktop:verify-release -- `
+  -InstallerPath '<PATH_TO_SIGNED_NSIS_INSTALLER>' `
+  -ExpectedPublisherThumbprint '<PRODUCTION_CERTIFICATE_THUMBPRINT>'
+```
+
+This gate requires a valid, timestamped production-publisher signature on the
+Desktop executable, runtime service, Isaac data-plane, and NSIS installer. It
+also requires a valid vendor signature on the packaged Node runtime. The
+post-install verifier above remains mandatory because it additionally verifies
+the generated uninstaller and the live Windows Service installation.
+
 Use `-Json` for machine-readable output. The process exits with code `1` when
 any required check fails and `0` when required checks pass; warnings do not
 change the exit code. After the initial run succeeds, reboot Windows and run the
@@ -286,9 +307,10 @@ The abbreviated flow is:
    `SCADA_CONNECTOR_PREVIOUS_MASTER_KEYS`.
 4. Run a dry run while the service is available:
    `resources\runtime\node.exe resources\runtime\scripts\rotate-connector-master-key.js`.
-5. Stop `SCAMATICRuntime`, then repeat the command with `--apply`. The utility
-   aborts before writing if any record cannot be unwrapped and rewraps only data
-   keys in a MongoDB transaction.
+5. Put every SCAMATIC deployment that writes to the same database in maintenance
+   mode, stop `SCAMATICRuntime`, then repeat the command with `--apply`. The
+   utility aborts before writing if any record cannot be unwrapped and rewraps
+   only data keys inside one conflict-guarded MongoDB transaction.
 6. Remove `SCADA_CONNECTOR_PREVIOUS_MASTER_KEYS`, start the service, and verify
    `/health/data-plane/ready` plus `/health/data-plane/key-compatibility`.
 

@@ -115,6 +115,16 @@ function Test-AclPermission {
   return $false
 }
 
+function Get-BroadAllowRules {
+  param([Parameter(Mandatory = $true)]$Acl)
+
+  $forbiddenSids = @('S-1-1-0', 'S-1-5-11', 'S-1-5-32-545')
+  return @($Acl.Access | Where-Object {
+    $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and
+    $forbiddenSids -contains (Resolve-IdentitySid $_.IdentityReference.Value)
+  })
+}
+
 function Get-ServiceExecutablePath {
   param([Parameter(Mandatory = $true)][string]$PathName)
 
@@ -343,6 +353,26 @@ if ($InstallerPath) {
 
 $configFile = Join-Path $ProgramDataRoot 'runtime.env'
 $logDirectory = Join-Path $ProgramDataRoot 'logs'
+$logFile = Join-Path $logDirectory 'runtime.log'
+if (Test-Path -LiteralPath $ProgramDataRoot -PathType Container) {
+  try {
+    $storageAcl = Get-Acl -LiteralPath $ProgramDataRoot
+    $storageSystemAccess = Test-AclPermission $storageAcl @('NT AUTHORITY\SYSTEM', 'S-1-5-18') ([System.Security.AccessControl.FileSystemRights]::FullControl)
+    $storageAdminAccess = Test-AclPermission $storageAcl @('BUILTIN\Administrators', 'S-1-5-32-544') ([System.Security.AccessControl.FileSystemRights]::FullControl)
+    $storageServiceAccess = Test-AclPermission $storageAcl @("NT SERVICE\$ServiceName") ([System.Security.AccessControl.FileSystemRights]::ReadAndExecute)
+    $storageBroadRules = @(Get-BroadAllowRules $storageAcl)
+    if ($storageAcl.AreAccessRulesProtected -and $storageSystemAccess -and $storageAdminAccess -and $storageServiceAccess -and $storageBroadRules.Count -eq 0) {
+      Add-CheckResult 'Runtime storage ACL' 'PASS' 'ProgramData storage is protected and limited to SYSTEM, Administrators, and service traversal.'
+    } else {
+      Add-CheckResult 'Runtime storage ACL' 'FAIL' "Unsafe ProgramData storage ACL (Protected=$($storageAcl.AreAccessRulesProtected), SYSTEM=$storageSystemAccess, Admins=$storageAdminAccess, ServiceReadExecute=$storageServiceAccess, BroadRules=$($storageBroadRules.Count))."
+    }
+  } catch {
+    Add-CheckResult 'Runtime storage ACL' 'FAIL' "Could not inspect ProgramData storage ACL: $($_.Exception.Message)"
+  }
+} else {
+  Add-CheckResult 'Runtime storage directory' 'FAIL' "Runtime storage directory is missing: '$ProgramDataRoot'."
+}
+
 if (Test-Path -LiteralPath $configFile -PathType Leaf) {
   Add-CheckResult 'Runtime configuration' 'PASS' "Protected configuration exists at '$configFile'."
 
@@ -363,11 +393,7 @@ if (Test-Path -LiteralPath $configFile -PathType Leaf) {
       Add-CheckResult 'Configuration ACL' 'FAIL' "Expected ACL entries are incomplete (SYSTEM=$systemAccess, Admins=$adminAccess, ServiceRead=$serviceAccess)."
     }
 
-    $forbiddenSids = @('S-1-1-0', 'S-1-5-11', 'S-1-5-32-545')
-    $broadAllowRules = @($configAcl.Access | Where-Object {
-      $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and
-      $forbiddenSids -contains (Resolve-IdentitySid $_.IdentityReference.Value)
-    })
+    $broadAllowRules = @(Get-BroadAllowRules $configAcl)
     if ($broadAllowRules.Count -eq 0) {
       Add-CheckResult 'Configuration exposure' 'PASS' 'No allow rule grants runtime.env to Everyone, Users, or Authenticated Users.'
     } else {
@@ -412,16 +438,38 @@ if (Test-Path -LiteralPath $logDirectory -PathType Container) {
   try {
     $logAcl = Get-Acl -LiteralPath $logDirectory
     $logAccess = Test-AclPermission $logAcl @("NT SERVICE\$ServiceName") ([System.Security.AccessControl.FileSystemRights]::Modify)
-    if ($logAccess) {
-      Add-CheckResult 'Runtime log ACL' 'PASS' 'The service account can append runtime logs.'
+    $logSystemAccess = Test-AclPermission $logAcl @('NT AUTHORITY\SYSTEM', 'S-1-5-18') ([System.Security.AccessControl.FileSystemRights]::FullControl)
+    $logAdminAccess = Test-AclPermission $logAcl @('BUILTIN\Administrators', 'S-1-5-32-544') ([System.Security.AccessControl.FileSystemRights]::FullControl)
+    $logBroadRules = @(Get-BroadAllowRules $logAcl)
+    if ($logAcl.AreAccessRulesProtected -and $logAccess -and $logSystemAccess -and $logAdminAccess -and $logBroadRules.Count -eq 0) {
+      Add-CheckResult 'Runtime log ACL' 'PASS' 'Runtime logs are protected and writable only by the service and machine administrators.'
     } else {
-      Add-CheckResult 'Runtime log ACL' 'FAIL' 'The service account lacks modify access to the log directory.'
+      Add-CheckResult 'Runtime log ACL' 'FAIL' "Unsafe runtime log ACL (Protected=$($logAcl.AreAccessRulesProtected), ServiceModify=$logAccess, SYSTEM=$logSystemAccess, Admins=$logAdminAccess, BroadRules=$($logBroadRules.Count))."
     }
   } catch {
     Add-CheckResult 'Runtime log ACL' 'FAIL' "Could not inspect log ACL: $($_.Exception.Message)"
   }
 } else {
   Add-CheckResult 'Runtime log directory' 'FAIL' "Log directory is missing: '$logDirectory'."
+}
+
+if (Test-Path -LiteralPath $logFile -PathType Leaf) {
+  try {
+    $logFileAcl = Get-Acl -LiteralPath $logFile
+    $logFileServiceAccess = Test-AclPermission $logFileAcl @("NT SERVICE\$ServiceName") ([System.Security.AccessControl.FileSystemRights]::Modify)
+    $logFileSystemAccess = Test-AclPermission $logFileAcl @('NT AUTHORITY\SYSTEM', 'S-1-5-18') ([System.Security.AccessControl.FileSystemRights]::FullControl)
+    $logFileAdminAccess = Test-AclPermission $logFileAcl @('BUILTIN\Administrators', 'S-1-5-32-544') ([System.Security.AccessControl.FileSystemRights]::FullControl)
+    $logFileBroadRules = @(Get-BroadAllowRules $logFileAcl)
+    if ($logFileAcl.AreAccessRulesProtected -and $logFileServiceAccess -and $logFileSystemAccess -and $logFileAdminAccess -and $logFileBroadRules.Count -eq 0) {
+      Add-CheckResult 'Runtime log file ACL' 'PASS' 'The existing runtime log is protected from non-administrative users.'
+    } else {
+      Add-CheckResult 'Runtime log file ACL' 'FAIL' "Unsafe runtime log file ACL (Protected=$($logFileAcl.AreAccessRulesProtected), ServiceModify=$logFileServiceAccess, SYSTEM=$logFileSystemAccess, Admins=$logFileAdminAccess, BroadRules=$($logFileBroadRules.Count))."
+    }
+  } catch {
+    Add-CheckResult 'Runtime log file ACL' 'FAIL' "Could not inspect runtime log file ACL: $($_.Exception.Message)"
+  }
+} else {
+  Add-CheckResult 'Runtime log file' 'WARN' 'runtime.log does not exist yet; re-run after the service has emitted its first log entry.'
 }
 
 if ($null -ne $service -and $service.State -eq 'Running') {

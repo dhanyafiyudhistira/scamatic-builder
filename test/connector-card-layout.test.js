@@ -25,6 +25,21 @@ test('ThingsBoard account action uses the standard connector button tone', async
   assert.doesNotMatch(css, /\.sb-connector-card-actions \.sb-connector-auth-active/)
 })
 
+test('ThingsBoard account form keeps compact balanced actions in a narrow card', async () => {
+  const [css, connectorManager] = await Promise.all([
+    readFile(new URL('../src/builder.css', import.meta.url), 'utf8'),
+    readFile(new URL('../src/platform/ConnectorManager.jsx', import.meta.url), 'utf8'),
+  ])
+  const actions = rule(css, '.sb-connector-auth-actions')
+  const buttons = rule(css, '.sb-connector-auth-actions button')
+
+  assert.match(actions, /grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/)
+  assert.match(buttons, /min-width:\s*0/)
+  assert.match(buttons, /white-space:\s*nowrap/)
+  assert.match(connectorManager, /autoRefresh \? 'Reconnect' : 'Connect'/)
+  assert.doesNotMatch(connectorManager, /Connect & enable auto-refresh/)
+})
+
 test('connector information control stays compact and perfectly circular', async () => {
   const css = await readFile(new URL('../src/builder.css', import.meta.url), 'utf8')
   const infoButton = rule(css, '.sb-connector-info-trigger')

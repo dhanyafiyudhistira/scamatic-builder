@@ -206,7 +206,7 @@ export function ConnectorManager({ projectId, schema, onSchemaChange, canConfigu
                 <div className="sb-connector-auth-heading"><strong>{autoRefresh ? 'Reconnect ThingsBoard account' : 'Connect ThingsBoard account'}</strong><small>Builder exchanges these credentials once and stores only the encrypted token pair.</small></div>
                 <label><span>ThingsBoard email</span><input type="email" value={accountForm.username} onChange={event => setAccountForm(previous => ({ ...previous, username: event.target.value }))} autoComplete="username" required autoFocus /></label>
                 <label><span>Password</span><input type="password" value={accountForm.password} onChange={event => setAccountForm(previous => ({ ...previous, password: event.target.value }))} autoComplete="current-password" required /></label>
-                <div className="sb-connector-auth-actions"><button type="button" onClick={() => setAccountConnectorId(null)} disabled={busy}>Cancel</button><button type="submit" className="primary" disabled={busy}>{busy ? 'Connecting…' : 'Connect & enable auto-refresh'}</button></div>
+                <div className="sb-connector-auth-actions"><button type="button" onClick={() => setAccountConnectorId(null)} disabled={busy}>Cancel</button><button type="submit" className="primary" disabled={busy}>{busy ? 'Connecting…' : autoRefresh ? 'Reconnect' : 'Connect'}</button></div>
               </form>}
             </article>
           )

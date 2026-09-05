@@ -1049,7 +1049,7 @@ function RuntimeConnectionNotice({ state, profile, bridgeHealth }) {
           : { title: 'CONNECTING RUNTIME', detail: 'Session restored · validating telemetry transport…' }
   return (
     <section className={`sb-runtime-connection-notice ${ready ? 'is-ready' : 'is-recovering'}`} role="status" aria-live="polite" aria-atomic="true">
-      <span className={ready ? 'sb-runtime-connection-check' : 'sb-runtime-connection-spinner'} aria-hidden="true">{ready ? '✓' : ''}</span>
+      <span className={ready ? 'sb-runtime-connection-check' : 'sb-runtime-connection-spinner'} aria-hidden="true">{ready ? <img className="sb-check-icon" src="/check.svg" alt="" /> : ''}</span>
       <span className="sb-runtime-connection-copy">
         <strong>{content.title}</strong>
         <small>{content.detail}</small>

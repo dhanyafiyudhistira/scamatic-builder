@@ -68,10 +68,18 @@ export class ManagedConnectorWorker {
   }
 
   requestCommandPoll() {
+    return this.#sendControl(RUNTIME_CONTROL_TYPES.commandWake)
+  }
+
+  requestReload() {
+    return this.#sendControl(RUNTIME_CONTROL_TYPES.workerReload)
+  }
+
+  #sendControl(type) {
     const child = this.child
     if (this.stopping || !child || child.connected === false || typeof child.send !== 'function') return false
     try {
-      return child.send(runtimeControlMessage(RUNTIME_CONTROL_TYPES.commandWake), () => {}) !== false
+      return child.send(runtimeControlMessage(type), () => {}) !== false
     } catch {
       // The durable polling path remains authoritative if IPC is unavailable.
       return false

@@ -402,6 +402,27 @@ Rust toolchain. Shadow readiness is available through Express at
 health URL and observation counters. Set `SCADA_RUST_SHADOW_ENABLED=false` to
 roll back instantly to the Phase 1 Node-only behavior.
 
+### Runtime worker modes
+
+Workspace administrators configure each project from
+**Settings → Runtime worker mode**. The Windows Service and its supervisor stay
+available in every mode; the setting controls only the project's configured
+datasource connections:
+
+- `smart` is the default. Published projects remain connected, active runtime
+  sessions remain connected, and an unpublished draft stays warm for 30 minutes
+  after its latest save;
+- `always-on` keeps every enabled and valid datasource connection for the
+  project alive in the background;
+- `on-demand` connects only while an unexpired operational runtime session
+  exists. Session creation wakes the worker immediately, while the periodic
+  reconciliation remains the durable fallback.
+
+Missing or invalid legacy values resolve to `smart`. Every change requires
+`workspace.manage`, is recorded as `project.runtime-worker-mode.updated`, and
+does not alter immutable published versions. Isaac enablement is independent
+and remains disabled by the packaged service configuration.
+
 ### Runtime engine preference
 
 Projects can independently choose an operational runtime engine preference:
@@ -414,8 +435,7 @@ Isaac now has an opt-in Axum WebSocket canary. It is selected only when all of
 these checks pass:
 
 - `SCADA_RUST_SHADOW_ENABLED=true` and `SCADA_ISAAC_CANARY_ENABLED=true`;
-- a workspace OWNER or ADMIN enables the project from
-  **Settings → Isaac runtime setup**;
+- the project already carries explicitly provisioned canary eligibility;
 - the Rust worker reports that its gateway is ready;
 - `SCADA_ISAAC_STREAM_PUBLIC_URL` is a valid WebSocket URL (`wss:` is required
   in production).
@@ -436,8 +456,9 @@ ingestion and every RPC continue to use the existing Node path.
 To stop the canary immediately, set `SCADA_ISAAC_CANARY_ENABLED=false` and
 restart Express. Project preferences can remain set to Isaac; the server will
 select Standard and return `ISAAC_UNAVAILABLE` until the canary is available.
-Disabling an individual project from Settings also selects Standard and closes
-its existing Isaac sockets during the next bounded session revalidation.
+The canceled Builder rollout control is no longer exposed. Existing project
+eligibility metadata remains fail-safe behind the global flag and bounded
+session revalidation.
 
 ### Optional Caddy edge
 

@@ -9,7 +9,7 @@ import { runtimeProfileMetadata, runtimeUsesLiveTelemetry } from '../../shared/r
 import { validRuntimeResponderGeneration, validRuntimeResponderId } from '../../shared/runtime-responder.js'
 import { resolveRuntimeEngine } from '../../shared/runtime-engine.js'
 
-export default async function handler(req, res, { resolveIsaacCanary = () => null } = {}) {
+export default async function handler(req, res, { resolveIsaacCanary = () => null, onRuntimeSessionCreated = () => {} } = {}) {
   const principal = await requirePrincipal(req, res)
   if (!principal) return
   if (req.method !== 'POST') {
@@ -57,6 +57,7 @@ export default async function handler(req, res, { resolveIsaacCanary = () => nul
     await RuntimeStreamSession.create({ _id: digest(ticket), runtimeSessionId: runtimeSession.id, userId: principal.id, workspaceId: principal.workspaceId, projectId, versionId: project.activeVersionId, engine: engine.selected, expiresAt: streamExpiresAt })
     stream = { url: streamUrl, ticket, expiresAt: streamExpiresAt }
   }
+  try { onRuntimeSessionCreated({ projectId, workspaceId: principal.workspaceId, runtimeSessionId: runtimeSession.id }) } catch {}
   return res.status(201).json({
     token,
     expiresAt,

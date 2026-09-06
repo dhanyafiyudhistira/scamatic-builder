@@ -8,11 +8,12 @@ import { deleteProjectChartTelemetry } from '../_lib/chart-telemetry-store.js'
 import { loadWorkspaceChartStorage } from '../_lib/chart-storage-configuration.js'
 import { enforceRateLimit } from '../_lib/security.js'
 import { grantProjectUnlock, hashProjectPin, projectPinError, projectSecuritySnapshot, revokeProjectUnlock, revokeProjectUnlocks, unlockedProjectIds, verifyProjectPin } from '../_lib/project-pin.js'
-import { applyIsaacCanarySelection, runtimeEngine, validRuntimeEngine } from '../../shared/runtime-engine.js'
+import { runtimeEngine, validRuntimeEngine } from '../../shared/runtime-engine.js'
+import { runtimeWorkerMode, validRuntimeWorkerMode } from '../../shared/runtime-worker-mode.js'
 
 const slugPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 
-export default async function handler(req, res) {
+export default async function handler(req, res, { onRuntimeWorkerModeChanged = () => {} } = {}) {
   const principal = await requirePrincipal(req, res)
   if (!principal) return
 
@@ -185,30 +186,26 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true, project: toClientProject(project.toObject(), true) })
       }
 
-      if (action === 'set-isaac-canary') {
+      if (action === 'set-runtime-worker-mode') {
         if (!requireWorkspacePermission(principal, res, PERMISSIONS.WORKSPACE_MANAGE)) return
-        if (typeof req.body?.enabled !== 'boolean') {
-          return res.status(400).json({ error: 'Isaac canary enabled must be a boolean.', code: 'ISAAC_CANARY_INVALID' })
+        const mode = String(req.body?.runtimeWorkerMode || '').trim().toLowerCase()
+        if (!validRuntimeWorkerMode(mode)) {
+          return res.status(400).json({ error: 'Runtime worker mode must be smart, always-on, or on-demand.', code: 'RUNTIME_WORKER_MODE_INVALID' })
         }
-        const previousPreference = runtimeEngine(project)
-        const previousEnabled = project.isaacCanaryEnabled === true
-        applyIsaacCanarySelection(project, req.body.enabled)
+        const previousMode = runtimeWorkerMode(project)
+        project.runtimeWorkerMode = mode
         project.updatedBy = principal.id
         await project.save()
         await AuditEvent.create({
           workspaceId: principal.workspaceId,
           projectId,
           actorId: principal.id,
-          action: 'project.isaac-canary.updated',
+          action: 'project.runtime-worker-mode.updated',
           targetType: 'project',
           targetId: projectId,
-          metadata: {
-            previousEnabled,
-            isaacCanaryEnabled: project.isaacCanaryEnabled,
-            previousPreference,
-            runtimeEnginePreference: project.runtimeEnginePreference,
-          },
+          metadata: { previousMode, runtimeWorkerMode: mode },
         })
+        try { onRuntimeWorkerModeChanged({ projectId, workspaceId: principal.workspaceId, runtimeWorkerMode: mode }) } catch {}
         return res.status(200).json({ ok: true, project: toClientProject(project.toObject(), true) })
       }
 
@@ -308,6 +305,7 @@ function toClientProject(project, unlocked = false) {
     activeVersionId: project.activeVersionId,
     runtimeEnginePreference: runtimeEngine(project),
     isaacCanaryEnabled: project.isaacCanaryEnabled === true,
+    runtimeWorkerMode: runtimeWorkerMode(project),
     hiddenAt: project.hiddenAt || null,
     security: projectSecuritySnapshot(project, unlocked),
     createdAt: project.createdAt,

@@ -23,7 +23,7 @@ export function RuntimeEngineSelector({ value, onChange, disabled = false }) {
       <small id="runtime-engine-description">{selected.description}</small>
       <small id="runtime-engine-status" className={isaacPreferred ? 'sb-engine-fallback' : ''}>
         {isaacPreferred
-          ? 'Preference saved here. A workspace administrator approves operational rollout from Settings → Isaac runtime setup.'
+          ? 'Standard remains active unless the service explicitly enables the experimental Isaac canary.'
           : 'Active and backward-compatible for every existing project and runtime session.'}
       </small>
     </div>

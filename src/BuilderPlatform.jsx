@@ -19,7 +19,8 @@ import { assignControlToPopup, copySafeComponent, detachControlFromPopup, remove
 import { RUNTIME_PROFILES, runtimeProfileMetadata } from '../shared/runtime-profile.js'
 import { RuntimeProfileBanner, RuntimeProfileSelector } from './platform/RuntimeProfile.jsx'
 import { RuntimeEngineSelector } from './platform/RuntimeEngine.jsx'
-import { RUNTIME_ENGINES, isaacCanarySelected, runtimeEngine, runtimeEngineMetadata } from '../shared/runtime-engine.js'
+import { RUNTIME_ENGINES, runtimeEngine, runtimeEngineMetadata } from '../shared/runtime-engine.js'
+import { RUNTIME_WORKER_MODES, runtimeWorkerMode, runtimeWorkerModeMetadata } from '../shared/runtime-worker-mode.js'
 import { validationNoticeDetails } from '../shared/validation-notice.js'
 import { encodeHardPassword } from '../shared/hard-password.js'
 import { runtimeHrefWithMetrics } from '../shared/runtime-metrics-option.js'
@@ -560,7 +561,7 @@ export default function BuilderPlatform() {
       setNotice({
         type: 'success',
         text: nextEngine === 'isaac'
-          ? 'Isaac preference saved. Approve this project from Settings → Isaac runtime setup before operational rollout.'
+          ? 'Isaac preference saved. Standard remains active unless the service explicitly enables the experimental canary.'
           : 'Standard runtime selected for new sessions.',
       })
     } catch (error) {
@@ -1053,7 +1054,7 @@ function ProjectHome({ user, projects, busy, onOpen, onCreated, onProjectsChange
   const [showCreate, setShowCreate] = useState(false)
   const [showMembers, setShowMembers] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
-  const [showIsaacSetup, setShowIsaacSetup] = useState(false)
+  const [showRuntimeWorkerSetup, setShowRuntimeWorkerSetup] = useState(false)
   const [showHidden, setShowHidden] = useState(false)
   const [actionBusyId, setActionBusyId] = useState(null)
   const [pinRequest, setPinRequest] = useState(null)
@@ -1138,7 +1139,7 @@ function ProjectHome({ user, projects, busy, onOpen, onCreated, onProjectsChange
 
   return (
     <div className="sb-home">
-      <header className="sb-home-header"><div className="sb-home-brand"><img className="sb-home-brand-logo" src="/logo-sb.png" alt="" aria-hidden="true" /><div><span className="eyebrow">SCADA SCHEMATIC PLATFORM</span><h1>Scamatic<span>.Builder</span></h1></div></div><div className="sb-user-chip"><UserSettingsMenu user={user} onManageUsers={() => setShowMembers(true)} onIsaacSetup={() => setShowIsaacSetup(true)} onChangePassword={() => setShowPassword(true)} onSwitchWorkspace={onSwitchWorkspace} onLogout={onLogout} /></div></header>
+      <header className="sb-home-header"><div className="sb-home-brand"><img className="sb-home-brand-logo" src="/logo-sb.png" alt="" aria-hidden="true" /><div><span className="eyebrow">SCADA SCHEMATIC PLATFORM</span><h1>Scamatic<span>.Builder</span></h1></div></div><div className="sb-user-chip"><UserSettingsMenu user={user} onManageUsers={() => setShowMembers(true)} onRuntimeWorkerSetup={() => setShowRuntimeWorkerSetup(true)} onChangePassword={() => setShowPassword(true)} onSwitchWorkspace={onSwitchWorkspace} onLogout={onLogout} /></div></header>
       <main>
         <div className="sb-home-lead">
           <div><h2>{runtimeOnly ? 'Assigned runtimes' : 'Projects'}</h2><p>{runtimeOnly ? `Operator access in ${activeWorkspace?.name || 'the active workspace'}. Open a published project to start the runtime.` : 'Build schema-driven SCADA screens from sanitized SVG assets.'}</p></div>
@@ -1158,7 +1159,7 @@ function ProjectHome({ user, projects, busy, onOpen, onCreated, onProjectsChange
       </main>
       {showCreate && <CreateProjectModal onClose={() => setShowCreate(false)} onCreated={async project => { setShowCreate(false); await onCreated(project) }} />}
       {showMembers && <MemberAdminModal projects={projects} onClose={() => setShowMembers(false)} />}
-      {showIsaacSetup && <IsaacCanarySetupModal projects={projects} onProjectUpdated={onProjectUpdated} onClose={() => setShowIsaacSetup(false)} />}
+      {showRuntimeWorkerSetup && <RuntimeWorkerSetupModal projects={projects} onProjectUpdated={onProjectUpdated} onClose={() => setShowRuntimeWorkerSetup(false)} />}
       {showPassword && <ChangePasswordModal onClose={() => setShowPassword(false)} onChanged={() => { setShowPassword(false); onNotice({ type: 'success', text: 'Password changed successfully. Other signed-in devices have been logged out.' }) }} />}
       {pinRequest && <ProjectPinModal
         project={pinRequest.project}
@@ -1192,7 +1193,7 @@ function ProjectHome({ user, projects, busy, onOpen, onCreated, onProjectsChange
   )
 }
 
-function UserSettingsMenu({ user, onManageUsers, onIsaacSetup, onChangePassword, onSwitchWorkspace, onLogout }) {
+function UserSettingsMenu({ user, onManageUsers, onRuntimeWorkerSetup, onChangePassword, onSwitchWorkspace, onLogout }) {
   const [open, setOpen] = useState(false)
   const [switching, setSwitching] = useState(false)
   const rootRef = useRef(null)
@@ -1231,7 +1232,7 @@ function UserSettingsMenu({ user, onManageUsers, onIsaacSetup, onChangePassword,
         <div className="sb-settings-divider" role="separator" />
         <div className="sb-settings-actions">
           {user.capabilities?.includes('members.manage') && <button type="button" role="menuitem" onClick={() => act(onManageUsers)}>Manage users</button>}
-          {user.capabilities?.includes('workspace.manage') && <button type="button" role="menuitem" onClick={() => act(onIsaacSetup)}>Isaac runtime setup</button>}
+          {user.capabilities?.includes('workspace.manage') && <button type="button" role="menuitem" onClick={() => act(onRuntimeWorkerSetup)}>Runtime worker mode</button>}
           <button type="button" role="menuitem" onClick={() => act(onChangePassword)}>Change password</button>
           <button type="button" role="menuitem" className="danger" onClick={() => act(onLogout)}>Logout</button>
         </div>
@@ -1240,7 +1241,7 @@ function UserSettingsMenu({ user, onManageUsers, onIsaacSetup, onChangePassword,
   )
 }
 
-function IsaacCanarySetupModal({ projects, onProjectUpdated, onClose }) {
+function RuntimeWorkerSetupModal({ projects, onProjectUpdated, onClose }) {
   const [busyProjectId, setBusyProjectId] = useState(null)
   const [error, setError] = useState('')
   const [savedProjectId, setSavedProjectId] = useState(null)
@@ -1254,9 +1255,9 @@ function IsaacCanarySetupModal({ projects, onProjectUpdated, onClose }) {
   }, [])
   useEffect(() => {
     let disposed = false
-    apiRequest('/health/data-plane/shadow')
+    apiRequest('/health/data-plane/ready')
       .then(data => { if (!disposed) setHealth(data) })
-      .catch(() => { if (!disposed) setHealth({ ok: false, status: 'unavailable', gatewayReady: false }) })
+      .catch(() => { if (!disposed) setHealth({ ok: false, status: 'unavailable' }) })
     return () => { disposed = true }
   }, [])
   useEffect(() => {
@@ -1270,18 +1271,18 @@ function IsaacCanarySetupModal({ projects, onProjectUpdated, onClose }) {
     document.addEventListener('keydown', close)
     return () => { document.removeEventListener('pointerdown', close); document.removeEventListener('keydown', close) }
   }, [infoOpen])
-  const selectedCount = projects.filter(isaacCanarySelected).length
-  const gatewayChecking = health == null
-  const gatewayReady = health?.ok === true && health?.gatewayReady === true
-  const toggleProject = async project => {
-    const enabled = !isaacCanarySelected(project)
+  const alwaysOnCount = projects.filter(project => runtimeWorkerMode(project) === 'always-on').length
+  const workerChecking = health == null
+  const workerReady = health?.ok === true
+  const updateProjectMode = async (project, nextMode) => {
+    if (!RUNTIME_WORKER_MODES.includes(nextMode) || nextMode === runtimeWorkerMode(project)) return
     setBusyProjectId(project.id)
     setError('')
     setSavedProjectId(null)
     try {
       const data = await apiRequest(`/api/projects?id=${encodeURIComponent(project.id)}`, {
         method: 'PATCH',
-        body: JSON.stringify({ projectId: project.id, action: 'set-isaac-canary', enabled }),
+        body: JSON.stringify({ projectId: project.id, action: 'set-runtime-worker-mode', runtimeWorkerMode: nextMode }),
       })
       onProjectUpdated(data.project)
       setSavedProjectId(project.id)
@@ -1293,27 +1294,26 @@ function IsaacCanarySetupModal({ projects, onProjectUpdated, onClose }) {
   }
   return (
     <div className="sb-modal-backdrop" onMouseDown={() => { if (!busyProjectId) onClose() }}>
-      <section className="sb-create-modal sb-isaac-setup-modal" role="dialog" aria-modal="true" aria-labelledby="isaac-setup-title" onMouseDown={event => event.stopPropagation()}>
+      <section className="sb-create-modal sb-isaac-setup-modal" role="dialog" aria-modal="true" aria-labelledby="runtime-worker-setup-title" onMouseDown={event => event.stopPropagation()}>
         <header className="sb-isaac-setup-header">
-          <div className="sb-isaac-setup-heading"><span className="eyebrow">ISAAC · FAST RUNTIME</span><div className="sb-isaac-title-row"><h2 id="isaac-setup-title">Project rollout</h2><div className="sb-isaac-info" ref={infoRef}><button type="button" className="sb-isaac-info-button" aria-label="About Isaac project rollout" aria-expanded={infoOpen} onClick={() => setInfoOpen(value => !value)}>i</button>{infoOpen && <div className="sb-isaac-info-popover" role="note"><p>Select which projects may use the Axum stream engine during operation.</p><p>The server remains authoritative: global flags, edge readiness, authentication, and Standard fallback still apply.</p></div>}</div></div></div>
+          <div className="sb-isaac-setup-heading"><span className="eyebrow">BACKGROUND RUNTIME</span><div className="sb-isaac-title-row"><h2 id="runtime-worker-setup-title">Worker mode</h2><div className="sb-isaac-info" ref={infoRef}><button type="button" className="sb-isaac-info-button" aria-label="About runtime worker modes" aria-expanded={infoOpen} onClick={() => setInfoOpen(value => !value)}>i</button>{infoOpen && <div className="sb-isaac-info-popover" role="note"><p>The Windows Service and supervisor remain available in every mode. This setting controls each project's datasource connection lifecycle.</p>{RUNTIME_WORKER_MODES.map(modeId => { const modeInfo = runtimeWorkerModeMetadata(modeId); return <p key={modeId}><strong>{modeInfo.label}</strong><span>{modeInfo.description}</span></p> })}</div>}</div></div></div>
         </header>
-        <div className={`sb-isaac-gateway-state ${gatewayChecking ? 'is-checking' : gatewayReady ? 'is-ready' : 'is-fallback'}`}>
-          <strong>{gatewayChecking ? 'Checking Isaac gateway…' : gatewayReady ? 'Isaac gateway ready' : 'Standard fallback active'}</strong>
-          <b>{selectedCount}/{projects.length}</b>
+        <div className={`sb-isaac-gateway-state ${workerChecking ? 'is-checking' : workerReady ? 'is-ready' : 'is-fallback'}`}>
+          <strong>{workerChecking ? 'Checking runtime worker…' : workerReady ? 'Runtime worker ready' : 'Runtime worker unavailable'}</strong>
+          <b>{alwaysOnCount} always on</b>
         </div>
-        <div className="sb-isaac-project-list" aria-label="Isaac project selection">
+        <div className="sb-isaac-project-list" aria-label="Project runtime worker modes">
           {projects.map(project => {
-            const selected = isaacCanarySelected(project)
+            const mode = runtimeWorkerMode(project)
             const locked = project.security?.pinEnabled && !project.security?.unlocked
             const pending = busyProjectId === project.id
-            const preferenceOnly = !selected && runtimeEngine(project) === 'isaac'
-            return <article key={project.id} className={`sb-isaac-project-row ${selected ? 'is-selected' : ''} ${locked ? 'is-locked' : ''}`}>
-              <button type="button" role="switch" aria-checked={selected} aria-label={`${selected ? 'Disable' : 'Enable'} Isaac for ${project.name}`} className="sb-isaac-switch" disabled={Boolean(busyProjectId) || locked} onClick={() => void toggleProject(project)}><span /></button>
-              <div className="sb-isaac-project-name"><strong>{project.name}</strong><code>/{project.slug}</code><small>{locked ? 'Unlock the project before changing runtime rollout.' : preferenceOnly ? 'Isaac is preferred but still awaiting rollout approval.' : project.activeVersionId ? 'Published project' : 'Draft project · applies after publishing'}</small></div>
-              <div className="sb-isaac-project-status"><span>{pending ? 'Saving…' : savedProjectId === project.id ? 'Saved' : selected ? 'ISAAC' : preferenceOnly ? 'PREFERENCE' : 'STANDARD'}</span>{project.hiddenAt && <small>Hidden</small>}</div>
+            return <article key={project.id} className={`sb-isaac-project-row ${mode === 'always-on' ? 'is-selected' : ''} ${locked ? 'is-locked' : ''}`}>
+              <span className={`sb-runtime-worker-mode-mark mode-${mode}`} aria-hidden="true" />
+              <div className="sb-isaac-project-name"><strong>{project.name}</strong><code>/{project.slug}</code>{locked && <small>Unlock the project before changing its worker mode.</small>}</div>
+              <div className="sb-isaac-project-status"><select className="sb-runtime-worker-mode-select" aria-label={`Runtime worker mode for ${project.name}`} value={mode} disabled={Boolean(busyProjectId) || locked} onChange={event => void updateProjectMode(project, event.target.value)}>{RUNTIME_WORKER_MODES.map(modeId => <option key={modeId} value={modeId}>{runtimeWorkerModeMetadata(modeId).label}</option>)}</select><span>{pending ? 'Saving…' : savedProjectId === project.id ? 'Saved' : project.activeVersionId ? 'Published' : 'Draft'}</span>{project.hiddenAt && <small>Hidden</small>}</div>
             </article>
           })}
-          {projects.length === 0 && <div className="sb-isaac-empty">Create a project before configuring the Isaac rollout.</div>}
+          {projects.length === 0 && <div className="sb-isaac-empty">Create a project before configuring its runtime worker mode.</div>}
         </div>
         {error && <div className="sb-form-error" role="alert">{error}</div>}
         <footer className="sb-isaac-setup-footer"><button type="button" onClick={onClose} disabled={Boolean(busyProjectId)}>Done</button></footer>

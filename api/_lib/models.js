@@ -1,6 +1,7 @@
 import mongoose from 'mongoose'
 import { randomUUID } from 'node:crypto'
 import { RUNTIME_ENGINES, STANDARD_RUNTIME_ENGINE } from '../../shared/runtime-engine.js'
+import { DEFAULT_RUNTIME_WORKER_MODE, RUNTIME_WORKER_MODES } from '../../shared/runtime-worker-mode.js'
 
 // Every request path must establish a connection explicitly. Silent model
 // buffering hides connectivity failures and otherwise turns them into an
@@ -312,6 +313,7 @@ const projectSchema = new mongoose.Schema({
   activeVersionId: { type: String, default: null },
   runtimeEnginePreference: { type: String, enum: RUNTIME_ENGINES, default: STANDARD_RUNTIME_ENGINE },
   isaacCanaryEnabled: { type: Boolean, default: false },
+  runtimeWorkerMode: { type: String, enum: RUNTIME_WORKER_MODES, default: DEFAULT_RUNTIME_WORKER_MODE },
   hiddenAt: { type: Date, default: null, index: true },
   security: {
     pinEnabled: { type: Boolean, default: false },

@@ -110,7 +110,9 @@ app.all('/api/auth/google/start', safe(startGoogleAuth))
 app.all('/api/auth/callback/google', safe(callbackGoogleAuth))
 app.all('/api/auth',      safe(authHandler))
 app.all('/api/signup',    safe(signupHandler))
-app.all('/api/projects',  safe(projectsHandler))
+app.all('/api/projects',  safe((req, res) => projectsHandler(req, res, {
+  onRuntimeWorkerModeChanged: () => managedConnectorWorker?.requestReload(),
+})))
 app.all('/api/draft',     safe(draftHandler))
 app.all('/api/svg',       safe(svgHandler))
 app.all('/api/elements',  safe(elementsHandler))
@@ -118,6 +120,7 @@ app.all('/api/publish',   safe(publishHandler))
 app.all('/api/runtime',   safe(runtimeHandler))
 app.all('/api/runtime-session', safe((req, res) => runtimeSessionHandler(req, res, {
   resolveIsaacCanary: project => rustShadowWorker?.canary(project),
+  onRuntimeSessionCreated: () => managedConnectorWorker?.requestReload(),
 })))
 app.all('/api/runtime-telemetry', safe(runtimeTelemetryHandler))
 app.all('/api/commands',  safe((req, res) => commandsHandler(req, res, {

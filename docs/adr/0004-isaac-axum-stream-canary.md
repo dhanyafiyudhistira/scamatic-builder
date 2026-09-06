@@ -3,6 +3,9 @@
 - Status: Accepted
 - Date: 2026-08-28
 
+The Builder rollout control described below is superseded by ADR 0005. The
+technical canary remains dormant behind its global service flag.
+
 ## Context
 
 ADR 0003 introduced a Rust/Tokio observer while Node remained the active

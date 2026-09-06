@@ -12,6 +12,7 @@ export const RUNTIME_IPC_TYPES = Object.freeze({
 
 export const RUNTIME_CONTROL_TYPES = Object.freeze({
   commandWake: 'runtime.command.wake',
+  workerReload: 'runtime.worker.reload',
 })
 
 export function runtimeIpcMessage(type, payload = {}) {
@@ -58,10 +59,14 @@ export function isRuntimeControlMessage(message) {
   )
 }
 
-export function routeRuntimeControlMessage(message, { onCommandWake = () => {} } = {}) {
+export function routeRuntimeControlMessage(message, { onCommandWake = () => {}, onWorkerReload = () => {} } = {}) {
   if (!isRuntimeControlMessage(message)) return false
   if (message.type === RUNTIME_CONTROL_TYPES.commandWake) {
     try { onCommandWake() } catch {}
+    return true
+  }
+  if (message.type === RUNTIME_CONTROL_TYPES.workerReload) {
+    try { onWorkerReload() } catch {}
     return true
   }
   return false

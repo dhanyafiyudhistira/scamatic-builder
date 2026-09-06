@@ -54,11 +54,15 @@ test('managed worker IPC router rejects foreign frames and forwards valid batche
 
 test('worker control router accepts only versioned command wake messages and isolates callbacks', () => {
   let wakes = 0
+  let reloads = 0
   assert.equal(routeRuntimeControlMessage({ type: RUNTIME_CONTROL_TYPES.commandWake }, { onCommandWake: () => { wakes += 1 } }), false)
   assert.equal(routeRuntimeControlMessage(runtimeIpcMessage(RUNTIME_IPC_TYPES.command, {}), { onCommandWake: () => { wakes += 1 } }), false)
   assert.equal(routeRuntimeControlMessage(runtimeControlMessage(RUNTIME_CONTROL_TYPES.commandWake), { onCommandWake: () => { wakes += 1 } }), true)
+  assert.equal(routeRuntimeControlMessage(runtimeControlMessage(RUNTIME_CONTROL_TYPES.workerReload), { onWorkerReload: () => { reloads += 1 } }), true)
   assert.equal(wakes, 1)
+  assert.equal(reloads, 1)
   assert.doesNotThrow(() => routeRuntimeControlMessage(runtimeControlMessage(RUNTIME_CONTROL_TYPES.commandWake), { onCommandWake: () => { throw new Error('scheduler stopped') } }))
+  assert.doesNotThrow(() => routeRuntimeControlMessage(runtimeControlMessage(RUNTIME_CONTROL_TYPES.workerReload), { onWorkerReload: () => { throw new Error('reload stopped') } }))
 })
 
 test('managed worker reports readiness from a live private IPC heartbeat', async () => {
@@ -89,7 +93,9 @@ test('managed worker reports readiness from a live private IPC heartbeat', async
   assert.equal(worker.requestCommandPoll(), false)
   worker.start()
   assert.equal(worker.requestCommandPoll(), true)
+  assert.equal(worker.requestReload(), true)
   assert.equal(controlMessages[0].type, RUNTIME_CONTROL_TYPES.commandWake)
+  assert.equal(controlMessages[1].type, RUNTIME_CONTROL_TYPES.workerReload)
   assert.equal(routeRuntimeControlMessage(controlMessages[0], { onCommandWake: () => {} }), true)
   assert.equal(worker.health('readiness').ok, false)
   worker.restartAttempts = 2
@@ -108,6 +114,7 @@ test('managed worker reports readiness from a live private IPC heartbeat', async
   await worker.close()
   assert.deepEqual(kills, ['SIGTERM'])
   assert.equal(worker.requestCommandPoll(), false)
+  assert.equal(worker.requestReload(), false)
 })
 
 test('managed worker falls back safely on command wake backpressure or a closed IPC channel', async () => {

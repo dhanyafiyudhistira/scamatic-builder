@@ -1,6 +1,6 @@
 import 'dotenv/config'
 import { connectMongo, mongoConnectionStatus } from '../api/_lib/mongo.js'
-import { AuditEvent, ChartStorageConfiguration, ChartStorageSecret, CommandEvent, Connector, ConnectorEnvironment, ConnectorHealthEvent, Project, ProjectDraft, ProjectVersion, TagValueSnapshot } from '../api/_lib/models.js'
+import { AuditEvent, ChartStorageConfiguration, ChartStorageSecret, CommandEvent, Connector, ConnectorEnvironment, ConnectorHealthEvent, Project, ProjectDraft, ProjectVersion, RuntimeSession, TagValueSnapshot } from '../api/_lib/models.js'
 import { chartStorageSecretId, decryptChartStorageSecret } from '../api/_lib/connector-secrets.js'
 import { ConnectorRuntime } from './connectors/connector-runtime.js'
 import { createConnectorDriver } from './connectors/driver-registry.js'
@@ -23,6 +23,7 @@ import { createKeyedTaskQueue } from './connectors/keyed-task-queue.js'
 import { createWakeablePoller } from './connectors/wakeable-poller.js'
 import { createCommandVersionCache } from './connectors/command-version-cache.js'
 import { createRpcPerformanceTracker } from './connectors/rpc-performance.js'
+import { shouldRunProjectWorker } from '../shared/runtime-worker-mode.js'
 
 if (process.env.CONNECTOR_PLATFORM_ENABLED !== 'true') {
   console.error('[ConnectorWorker] CONNECTOR_PLATFORM_ENABLED is not true; refusing to start.')
@@ -221,18 +222,30 @@ async function main() {
   const reload = async () => {
     await connectMongo()
     await reloadWorkspaceChartWriters()
-    const connectors = await Connector.find({ enabled: true }).lean()
+    const now = new Date()
+    const [connectors, activeSessionProjectIds] = await Promise.all([
+      Connector.find({ enabled: true }).lean(),
+      RuntimeSession.distinct('projectId', { revokedAt: null, expiresAt: { $gt: now } }),
+    ])
+    const activeProjects = new Set(activeSessionProjectIds.map(String))
     const wanted = new Set()
     for (const connector of connectors) {
       const environment = await ConnectorEnvironment.findOne({ connectorId: connector._id, environmentRef }).lean()
       const project = environment && await Project.findOne({ _id: connector.projectId, workspaceId: connector.workspaceId }).lean()
       const version = project?.activeVersionId && await ProjectVersion.findById(project.activeVersionId).lean()
       let selection = selectConnectorRuntimeSchema({ connector, environmentRef, publishedVersion: version })
+      let draft = null
       if (!selection && project) {
-        const draft = await ProjectDraft.findById(project._id).lean()
+        draft = await ProjectDraft.findById(project._id).lean()
         selection = selectConnectorRuntimeSchema({ connector, environmentRef, publishedVersion: version, draft })
       }
       if (!environment?.secretConfiguredAt || !selection) continue
+      if (!shouldRunProjectWorker(project, {
+        hasActiveSession: activeProjects.has(String(project._id)),
+        selectionMode: selection.mode,
+        draftUpdatedAt: draft?.updatedAt,
+        now: now.getTime(),
+      })) continue
       const { source, bindings, mode } = selection
       let authentication
       try {
@@ -282,7 +295,12 @@ async function main() {
     for (const [id, runtime] of runtimes) if (!wanted.has(id)) { await runtime.stop(); runtimes.delete(id); healthSummaries.delete(id) }
   }
 
-  await reload()
+  let reloadInFlight = null
+  const requestReload = () => {
+    if (!reloadInFlight) reloadInFlight = reload().finally(() => { reloadInFlight = null })
+    return reloadInFlight
+  }
+  await requestReload()
   const terminalAuditRecovery = createAdaptiveRecoveryScheduler({
     recover: () => flushPendingTerminalCommandAudits(),
     activeDelayMs: boundedInteger(process.env.CONNECTOR_TERMINAL_AUDIT_ACTIVE_MS, 100, 60_000, 1_000),
@@ -308,7 +326,7 @@ async function main() {
   })
   startup.initialized = true
   startup.phase = 'ready'
-  const reloadTimer = setInterval(() => reload().catch(error => console.error('[ConnectorWorker] reload failed', error.message)), 10_000)
+  const reloadTimer = setInterval(() => requestReload().catch(error => console.error('[ConnectorWorker] reload failed', error.message)), 10_000)
   let lastCommandPollErrorAt = 0
   const commandPoller = createWakeablePoller({
     poll: () => dispatchCommands(runtimes, hub, commandHealthWriter, terminalAuditRecovery, commandQueue, commandVersionCache, rpcPerformance),
@@ -322,6 +340,7 @@ async function main() {
   })
   const onControlMessage = message => routeRuntimeControlMessage(message, {
     onCommandWake: () => commandPoller.request(),
+    onWorkerReload: () => requestReload().catch(error => console.error('[ConnectorWorker] reload failed', error.message)),
   })
   if (ipcTransport) process.on('message', onControlMessage)
   await commandPoller.start()

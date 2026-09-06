@@ -410,29 +410,21 @@ Projects can independently choose an operational runtime engine preference:
 project metadata, so changing it does not alter an immutable published screen
 or its checksum.
 
-The packaged local runtime starts the Isaac Axum gateway on fixed loopback by
-default. A project uses it only when all of these checks pass:
+Isaac now has an opt-in Axum WebSocket canary. It is selected only when all of
+these checks pass:
 
 - `SCADA_RUST_SHADOW_ENABLED=true` and `SCADA_ISAAC_CANARY_ENABLED=true`;
 - a workspace OWNER or ADMIN enables the project from
   **Settings → Isaac runtime setup**;
 - the Rust worker reports that its gateway is ready;
-- `SCADA_ISAAC_STREAM_PUBLIC_URL` is a valid WebSocket URL. Remote production
-  URLs require `wss:`; the packaged `ws://127.0.0.1:3003/isaac-stream` endpoint
-  is allowed because it cannot leave the device.
+- `SCADA_ISAAC_STREAM_PUBLIC_URL` is a valid WebSocket URL (`wss:` is required
+  in production).
 
 For a local canary behind Vite, use `/isaac-stream` on the frontend origin and
 set `SCADA_ISAAC_STREAM_PUBLIC_URL=ws://localhost:5173/isaac-stream`. For the
 included Caddy edge on port `8088`, use
 `ws://localhost:8088/isaac-stream` locally or the corresponding public `wss:`
 URL in production. Axum itself remains bound to `127.0.0.1:3003`.
-
-Fresh Windows installations write the fixed loopback URL and enable global
-canary availability. Existing protected `runtime.env` files are intentionally
-not overwritten during upgrade; set the three `SCADA_ISAAC_*` values from
-`src-tauri/runtime.env.example`, restart `SCAMATICRuntime`, and run
-`npm run desktop:verify-install`. The verification is successful only when the
-gateway reports both `active=true` and `gatewayReady=true`.
 
 Each Isaac ticket is single-use and engine-bound. Axum delegates ticket
 consumption and session authorization to a private loopback Node endpoint,

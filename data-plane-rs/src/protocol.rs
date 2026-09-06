@@ -30,13 +30,6 @@ struct Envelope<'a> {
     payload: Option<&'a RawValue>,
 }
 
-#[derive(Debug, Deserialize)]
-struct CommandStatusPayload {
-    event: Value,
-    #[serde(default)]
-    scope: Option<Value>,
-}
-
 pub fn handle_line(line: &str, state: &ShadowState) -> Result<ControlFlow, &'static str> {
     let started = Instant::now();
     if line.len() > MAX_LINE_BYTES {
@@ -75,22 +68,23 @@ pub fn handle_line(line: &str, state: &ShadowState) -> Result<ControlFlow, &'sta
             Ok(ControlFlow::Continue)
         }
         "shadow.command.status" => {
-            let payload: CommandStatusPayload = envelope
+            let payload: Value = envelope
                 .payload
                 .and_then(|payload| serde_json::from_str(payload.get()).ok())
                 .ok_or_else(|| reject(state, "INVALID_COMMAND_STATUS"))?;
-            if !valid_identifier(&payload.event, "requestId")
-                || !valid_identifier(&payload.event, "componentId")
-                || !valid_identifier(&payload.event, "status")
+            let event = payload
+                .get("event")
+                .ok_or_else(|| reject(state, "INVALID_COMMAND_STATUS"))?;
+            if !valid_identifier(event, "requestId")
+                || !valid_identifier(event, "componentId")
+                || !valid_identifier(event, "status")
             {
                 state.record_rejected();
                 return Err("INVALID_COMMAND_STATUS");
             }
             state.record_command();
-            if let Some(scope) = payload.scope.as_ref().and_then(CommandScope::from_value) {
-                state
-                    .publish_command(payload.event, scope)
-                    .map_err(|_| reject(state, "INVALID_COMMAND_STATUS"))?;
+            if let Some(scope) = payload.get("scope").and_then(CommandScope::from_value) {
+                state.publish_command(event.clone(), scope);
             }
             Ok(ControlFlow::Continue)
         }

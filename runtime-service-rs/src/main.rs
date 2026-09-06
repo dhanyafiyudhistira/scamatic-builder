@@ -60,7 +60,6 @@ mod windows_host {
     const POLL_INTERVAL: Duration = Duration::from_millis(250);
     const READINESS_ADDRESS: &str = "127.0.0.1:3001";
     const READINESS_PATH: &str = "/health/data-plane/ready";
-    const ISAAC_READINESS_PATH: &str = "/health/data-plane/shadow";
     const KEY_COMPATIBILITY_PATH: &str = "/health/data-plane/key-compatibility";
     const DEFAULT_READINESS_TIMEOUT: Duration = Duration::from_secs(60);
     const MAX_READINESS_TIMEOUT_SECONDS: u64 = 300;
@@ -176,10 +175,6 @@ mod windows_host {
                 let timeout = parse_readiness_timeout(args)?;
                 wait_until_ready(timeout)
             }
-            "wait-isaac-ready" => {
-                let timeout = parse_readiness_timeout(args)?;
-                wait_until_isaac_ready(timeout)
-            }
             "wait-key-compatible" => {
                 let timeout = parse_readiness_timeout(args)?;
                 wait_until_key_compatible(timeout)
@@ -226,7 +221,6 @@ mod windows_host {
         println!("  generate-master-key  Print a cryptographically random 32-byte key as hex");
         println!("  register-service  Create, configure, and start the Windows Service");
         println!("  wait-ready   Wait for the packaged data-plane readiness endpoint");
-        println!("  wait-isaac-ready  Wait until the local Isaac Axum gateway is active");
         println!("  wait-key-compatible  Verify the configured key can unwrap stored secrets");
         println!("  check-key-compatible  Run the compatibility probe once");
         println!("Options: --runtime-root <path> --config <path> --timeout-seconds <1-300>");
@@ -522,40 +516,6 @@ mod windows_host {
         }
     }
 
-    fn wait_until_isaac_ready(timeout: Duration) -> Result<(), DynError> {
-        let address: SocketAddr = READINESS_ADDRESS.parse()?;
-        let deadline = Instant::now() + timeout;
-        loop {
-            let state = query_service_state()?;
-            let last_failure = match (state, isaac_readiness_probe(address)) {
-                (ServiceState::Running, Ok(true)) => {
-                    println!(
-                        "SCAMATIC Isaac Axum gateway is active at http://{READINESS_ADDRESS}{ISAAC_READINESS_PATH}"
-                    );
-                    return Ok(());
-                }
-                (ServiceState::Stopped, _) => {
-                    return Err("SCAMATIC Windows Service stopped before Isaac Axum became active; inspect runtime.log".into());
-                }
-                (_, Ok(true)) => {
-                    format!("Isaac endpoint responded, but Windows Service is {state:?}")
-                }
-                (_, Ok(false)) => format!(
-                    "Windows Service is {state:?}; Isaac endpoint has not reported active=true"
-                ),
-                (_, Err(error)) => format!("Windows Service is {state:?}; {error}"),
-            };
-            if Instant::now() >= deadline {
-                return Err(format!(
-                    "SCAMATIC Isaac Axum gateway did not become active within {} seconds: {last_failure}",
-                    timeout.as_secs()
-                )
-                .into());
-            }
-            std::thread::sleep(Duration::from_millis(500));
-        }
-    }
-
     fn wait_until_key_compatible(timeout: Duration) -> Result<(), DynError> {
         let address: SocketAddr = READINESS_ADDRESS.parse()?;
         let deadline = Instant::now() + timeout;
@@ -633,10 +593,6 @@ mod windows_host {
 
     fn readiness_probe(address: SocketAddr) -> Result<bool, DynError> {
         http_json_probe(address, READINESS_PATH, br#""status":"ready""#)
-    }
-
-    fn isaac_readiness_probe(address: SocketAddr) -> Result<bool, DynError> {
-        http_json_probe(address, ISAAC_READINESS_PATH, br#""active":true""#)
     }
 
     fn compatibility_probe(address: SocketAddr) -> Result<bool, DynError> {
@@ -1255,16 +1211,6 @@ mod windows_host {
                 br#""check":"master-key-compatibility""#
             ));
             assert!(!response_reports_success(response, br#""status":"ready""#));
-        }
-
-        #[test]
-        fn isaac_probe_requires_an_active_gateway() {
-            let active =
-                b"HTTP/1.1 200 OK\r\n\r\n{\"ok\":true,\"active\":true,\"gatewayReady\":true}";
-            let shadow =
-                b"HTTP/1.1 200 OK\r\n\r\n{\"ok\":true,\"active\":false,\"gatewayReady\":false}";
-            assert!(response_reports_success(active, br#""active":true"#));
-            assert!(!response_reports_success(shadow, br#""active":true"#));
         }
 
         #[test]

@@ -44,8 +44,6 @@ pub struct ShadowSnapshot {
     pub gateway_subscribers: u64,
     pub gateway_encoded_bytes: u64,
     pub gateway_encode_nanoseconds: u64,
-    pub gateway_command_encoded_bytes: u64,
-    pub gateway_command_encode_nanoseconds: u64,
 }
 
 impl ShadowState {
@@ -103,15 +101,10 @@ impl ShadowState {
         }
     }
 
-    pub fn publish_command(
-        &self,
-        event: Value,
-        scope: CommandScope,
-    ) -> Result<(), serde_json::Error> {
+    pub fn publish_command(&self, event: Value, scope: CommandScope) {
         if let Some(gateway) = &self.gateway {
-            gateway.publish_command(event, scope)?;
+            gateway.publish_command(event, scope);
         }
-        Ok(())
     }
 
     pub fn record_rejected(&self) {
@@ -152,8 +145,6 @@ impl ShadowState {
             gateway_subscribers: gateway.subscribers,
             gateway_encoded_bytes: gateway.encoded_bytes,
             gateway_encode_nanoseconds: gateway.encode_nanoseconds,
-            gateway_command_encoded_bytes: gateway.command_encoded_bytes,
-            gateway_command_encode_nanoseconds: gateway.command_encode_nanoseconds,
         }
     }
 
@@ -192,11 +183,7 @@ impl ShadowState {
                 "# TYPE scamatic_isaac_gateway_encoded_bytes_total counter\n",
                 "scamatic_isaac_gateway_encoded_bytes_total {}\n",
                 "# TYPE scamatic_isaac_gateway_encode_nanoseconds_total counter\n",
-                "scamatic_isaac_gateway_encode_nanoseconds_total {}\n",
-                "# TYPE scamatic_isaac_gateway_command_encoded_bytes_total counter\n",
-                "scamatic_isaac_gateway_command_encoded_bytes_total {}\n",
-                "# TYPE scamatic_isaac_gateway_command_encode_nanoseconds_total counter\n",
-                "scamatic_isaac_gateway_command_encode_nanoseconds_total {}\n"
+                "scamatic_isaac_gateway_encode_nanoseconds_total {}\n"
             ),
             u8::from(snapshot.ok),
             snapshot.telemetry_batches,
@@ -214,8 +201,6 @@ impl ShadowState {
             snapshot.gateway_subscribers,
             snapshot.gateway_encoded_bytes,
             snapshot.gateway_encode_nanoseconds,
-            snapshot.gateway_command_encoded_bytes,
-            snapshot.gateway_command_encode_nanoseconds,
         )
     }
 

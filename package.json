@@ -34,7 +34,6 @@
     "rust:test":   "cargo test --manifest-path data-plane-rs/Cargo.toml",
     "rust:build":  "cargo build --release --manifest-path data-plane-rs/Cargo.toml",
     "bench:isaac": "cargo test --release -p scamatic-data-plane --test telemetry_perf -- --ignored --nocapture",
-    "bench:isaac-rpc": "cargo test --release -p scamatic-data-plane --test command_status_perf -- --ignored --nocapture",
     "bench:rpc": "node scripts/benchmark-local-rpc.js",
     "smoke:rust-shadow": "node scripts/smoke-rust-shadow.js",
     "smoke:isaac-canary": "node scripts/smoke-isaac-canary.js"

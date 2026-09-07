@@ -50,5 +50,15 @@ test('Builder replaces the Isaac rollout setup with audited runtime worker modes
   assert.match(styles, /sb-runtime-worker-mode-select[\s\S]*font: 800 9px\/1 Inter, ui-sans-serif/)
   assert.match(projectsHandler, /project\.runtime-worker-mode\.updated/)
   assert.match(projectsHandler, /onRuntimeWorkerModeChanged/)
+  const modeAction = projectsHandler.slice(
+    projectsHandler.indexOf("action === 'set-runtime-worker-mode'"),
+    projectsHandler.indexOf("action === 'rename'"),
+  )
+  assert.match(modeAction, /runMongoTransaction/)
+  assert.match(modeAction, /transactionalProject\.save\(\{ session \}\)/)
+  assert.match(modeAction, /AuditEvent\.create\(\[/)
+  assert.match(modeAction, /\], \{ session \}\)/)
+  assert.match(modeAction, /\{ requireTransaction: true \}/)
+  assert.ok(modeAction.indexOf('transactionalProject.save') < modeAction.indexOf('AuditEvent.create'))
   assert.doesNotMatch(projectsHandler, /action === 'set-isaac-canary'/)
 })

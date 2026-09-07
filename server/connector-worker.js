@@ -24,6 +24,7 @@ import { createWakeablePoller } from './connectors/wakeable-poller.js'
 import { createCommandVersionCache } from './connectors/command-version-cache.js'
 import { createRpcPerformanceTracker } from './connectors/rpc-performance.js'
 import { shouldRunProjectWorker } from '../shared/runtime-worker-mode.js'
+import { createTrailingTaskRunner } from './connectors/trailing-task-runner.js'
 
 if (process.env.CONNECTOR_PLATFORM_ENABLED !== 'true') {
   console.error('[ConnectorWorker] CONNECTOR_PLATFORM_ENABLED is not true; refusing to start.')
@@ -295,11 +296,8 @@ async function main() {
     for (const [id, runtime] of runtimes) if (!wanted.has(id)) { await runtime.stop(); runtimes.delete(id); healthSummaries.delete(id) }
   }
 
-  let reloadInFlight = null
-  const requestReload = () => {
-    if (!reloadInFlight) reloadInFlight = reload().finally(() => { reloadInFlight = null })
-    return reloadInFlight
-  }
+  const reloadRunner = createTrailingTaskRunner({ task: reload })
+  const requestReload = () => reloadRunner.request()
   await requestReload()
   const terminalAuditRecovery = createAdaptiveRecoveryScheduler({
     recover: () => flushPendingTerminalCommandAudits(),
@@ -350,7 +348,7 @@ async function main() {
     stopping = true
     if (ipcTransport) process.off('message', onControlMessage)
     clearInterval(reloadTimer)
-    await commandPoller.stop()
+    await Promise.all([reloadRunner.stop(), commandPoller.stop()])
     const commandQueueStats = await commandQueue.close({
       timeoutMs: boundedInteger(process.env.CONNECTOR_COMMAND_SHUTDOWN_MS, 1_000, 120_000, 35_000),
       cancelPending: true,

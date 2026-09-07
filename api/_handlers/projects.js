@@ -192,21 +192,26 @@ export default async function handler(req, res, { onRuntimeWorkerModeChanged = (
         if (!validRuntimeWorkerMode(mode)) {
           return res.status(400).json({ error: 'Runtime worker mode must be smart, always-on, or on-demand.', code: 'RUNTIME_WORKER_MODE_INVALID' })
         }
-        const previousMode = runtimeWorkerMode(project)
-        project.runtimeWorkerMode = mode
-        project.updatedBy = principal.id
-        await project.save()
-        await AuditEvent.create({
-          workspaceId: principal.workspaceId,
-          projectId,
-          actorId: principal.id,
-          action: 'project.runtime-worker-mode.updated',
-          targetType: 'project',
-          targetId: projectId,
-          metadata: { previousMode, runtimeWorkerMode: mode },
-        })
+        const updatedProject = await runMongoTransaction(async session => {
+          const transactionalProject = await Project.findOne({ _id: projectId, workspaceId: principal.workspaceId }).session(session)
+          if (!transactionalProject) throw new Error('Project disappeared while updating its runtime worker mode.')
+          const previousMode = runtimeWorkerMode(transactionalProject)
+          transactionalProject.runtimeWorkerMode = mode
+          transactionalProject.updatedBy = principal.id
+          await transactionalProject.save({ session })
+          await AuditEvent.create([{
+            workspaceId: principal.workspaceId,
+            projectId,
+            actorId: principal.id,
+            action: 'project.runtime-worker-mode.updated',
+            targetType: 'project',
+            targetId: projectId,
+            metadata: { previousMode, runtimeWorkerMode: mode },
+          }], { session })
+          return transactionalProject.toObject()
+        }, { requireTransaction: true })
         try { onRuntimeWorkerModeChanged({ projectId, workspaceId: principal.workspaceId, runtimeWorkerMode: mode }) } catch {}
-        return res.status(200).json({ ok: true, project: toClientProject(project.toObject(), true) })
+        return res.status(200).json({ ok: true, project: toClientProject(updatedProject, true) })
       }
 
       if (action === 'rename') {

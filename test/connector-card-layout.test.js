@@ -40,17 +40,20 @@ test('ThingsBoard account form keeps compact balanced actions in a narrow card',
   assert.doesNotMatch(connectorManager, /Connect & enable auto-refresh/)
 })
 
-test('connector information control stays compact and perfectly circular', async () => {
-  const css = await readFile(new URL('../src/builder.css', import.meta.url), 'utf8')
-  const infoButton = rule(css, '.sb-connector-info-trigger')
+test('connector information adopts the shared compact popover blueprint', async () => {
+  const [css, connectorManager] = await Promise.all([
+    readFile(new URL('../src/builder.css', import.meta.url), 'utf8'),
+    readFile(new URL('../src/platform/ConnectorManager.jsx', import.meta.url), 'utf8'),
+  ])
+  const infoButton = rule(css, '.sb-connector-info .sb-info-trigger')
 
   assert.match(infoButton, /width:\s*18px\s*!important/)
   assert.match(infoButton, /height:\s*18px\s*!important/)
-  assert.match(infoButton, /aspect-ratio:\s*1/)
-  assert.match(infoButton, /border-radius:\s*50%\s*!important/)
-  assert.match(infoButton, /background-image:\s*none\s*!important/)
-  assert.match(css, /\.sb-connector-info-trigger::before,\s*\.sb-connector-info-trigger::after\s*\{[^}]*left:\s*50%;[^}]*width:\s*1\.5px/)
-  assert.match(css, /\.sb-connector-info-trigger::after\s*\{[^}]*height:\s*5\.25px/)
+  assert.match(css, /(?:^|\n)\.sb-info-trigger\s*\{[^}]*border-radius:\s*50%\s*!important/s)
+  assert.match(css, /(?:^|\n)\.sb-info-trigger\s*\{[^}]*background-image:\s*none\s*!important/s)
+  assert.match(connectorManager, /<InfoPopover className="sb-connector-info"[\s\S]*align="end"/)
+  assert.match(connectorManager, /<InfoPopoverSection title="CONNECTION">/)
+  assert.doesNotMatch(connectorManager, /sb-connector-info-trigger/)
 })
 
 function rule(css, selector) {

@@ -46,7 +46,7 @@ test('Builder replaces the Isaac rollout setup with audited runtime worker modes
   assert.match(builder, /locked && <small>Unlock the project/)
   assert.doesNotMatch(builder, /const metadata = runtimeWorkerModeMetadata\(mode\)/)
   assert.match(styles, /sb-create-modal\.sb-isaac-setup-modal[\s\S]*font-family: Inter, ui-sans-serif/)
-  assert.match(styles, /sb-isaac-info-button[\s\S]*font: 900 12px\/1 Inter, ui-sans-serif/)
+  assert.match(styles, /sb-info-trigger[\s\S]*font: 900 12px\/1 Inter, ui-sans-serif/)
   assert.match(styles, /sb-runtime-worker-mode-select[\s\S]*font: 800 9px\/1 Inter, ui-sans-serif/)
   assert.match(projectsHandler, /project\.runtime-worker-mode\.updated/)
   assert.match(projectsHandler, /onRuntimeWorkerModeChanged/)

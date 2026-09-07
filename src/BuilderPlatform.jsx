@@ -28,6 +28,7 @@ import { validationSummary } from '../shared/validation-diagnostics.js'
 import { ValidationConsole } from './platform/ValidationConsole.jsx'
 import { AuthScreen } from './platform/AuthScreen.jsx'
 import { openApplicationRoute, resolveDesignAsset, resolveDesignAssets } from './platform/desktop.js'
+import { InfoPopover, InfoPopoverIntro, InfoPopoverSection } from './platform/InfoPopover.jsx'
 
 const makeId = prefix => `${prefix}_${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`
 const recoveryKey = projectId => `scamatic.recovery.${projectId}`
@@ -742,7 +743,7 @@ export default function BuilderPlatform() {
           <Panel title="Runtime engine" description={`${engine.label} · Operational preference`} collapsible defaultOpen={false} storageKey={`scamatic.panel.runtime-engine.${currentProject.id}`}>
             <RuntimeEngineSelector value={engine.id} onChange={changeRuntimeEngine} disabled={busy || !session.user.capabilities?.includes('project.manage')} />
           </Panel>
-          <Panel title="Published history" titleInfo="Published history is immutable. Restoring creates the next numbered snapshot and preserves its source." description={`${versions.length} snapshots · Publish and restore history`} collapsible defaultOpen={false} storageKey={`scamatic.panel.versions.${currentProject.id}`}><VersionList versions={versions} activeVersionId={currentProject.activeVersionId} canRestore={session.user.capabilities?.includes('project.publish')} busy={busy} onRestore={restoreVersion} /></Panel>
+          <Panel title="Published history" titleInfo={<><InfoPopoverIntro>Published snapshots are immutable and remain available as a durable project history.</InfoPopoverIntro><InfoPopoverSection title="RESTORE">Restoring creates the next numbered snapshot and preserves the selected source version unchanged.</InfoPopoverSection><InfoPopoverSection title="ACTIVE VERSION">The active snapshot is the version used by published operational runtimes.</InfoPopoverSection></>} description={`${versions.length} snapshots · Publish and restore history`} collapsible defaultOpen={false} storageKey={`scamatic.panel.versions.${currentProject.id}`}><VersionList versions={versions} activeVersionId={currentProject.activeVersionId} canRestore={session.user.capabilities?.includes('project.publish')} busy={busy} onRestore={restoreVersion} /></Panel>
           {session.user.capabilities?.includes('audit.read') && <Panel title="Recent audit" description={`${auditEvents.length} events · Security and command activity`} collapsible defaultOpen={false} storageKey={`scamatic.panel.audit.${currentProject.id}`}><AuditList events={auditEvents} /></Panel>}
           <Panel title="Shortcuts"><div className="sb-shortcuts"><span><kbd>Arrow</kbd> Nudge 1 px</span><span><kbd>Shift + Arrow</kbd> Nudge by grid</span><span><kbd>Shift + click</kbd> Multi-select</span><span><kbd>Ctrl Z/Y</kbd> Undo/redo</span><span><kbd>Ctrl X</kbd> Cut selection</span><span><kbd>Ctrl C/V</kbd> Copy/paste</span><span><kbd>Ctrl D</kbd> Duplicate</span><span><kbd>Delete</kbd> Remove</span></div></Panel>
         </aside>
@@ -1246,8 +1247,6 @@ function RuntimeWorkerSetupModal({ projects, onProjectUpdated, onClose }) {
   const [error, setError] = useState('')
   const [savedProjectId, setSavedProjectId] = useState(null)
   const [health, setHealth] = useState(null)
-  const [infoOpen, setInfoOpen] = useState(false)
-  const infoRef = useRef(null)
   useEffect(() => {
     const previousOverflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
@@ -1260,17 +1259,6 @@ function RuntimeWorkerSetupModal({ projects, onProjectUpdated, onClose }) {
       .catch(() => { if (!disposed) setHealth({ ok: false, status: 'unavailable' }) })
     return () => { disposed = true }
   }, [])
-  useEffect(() => {
-    if (!infoOpen) return
-    const close = event => {
-      if (event.type === 'keydown' && event.key !== 'Escape') return
-      if (event.type === 'pointerdown' && infoRef.current?.contains(event.target)) return
-      setInfoOpen(false)
-    }
-    document.addEventListener('pointerdown', close)
-    document.addEventListener('keydown', close)
-    return () => { document.removeEventListener('pointerdown', close); document.removeEventListener('keydown', close) }
-  }, [infoOpen])
   const alwaysOnCount = projects.filter(project => runtimeWorkerMode(project) === 'always-on').length
   const workerChecking = health == null
   const workerReady = health?.ok === true
@@ -1296,7 +1284,7 @@ function RuntimeWorkerSetupModal({ projects, onProjectUpdated, onClose }) {
     <div className="sb-modal-backdrop" onMouseDown={() => { if (!busyProjectId) onClose() }}>
       <section className="sb-create-modal sb-isaac-setup-modal" role="dialog" aria-modal="true" aria-labelledby="runtime-worker-setup-title" onMouseDown={event => event.stopPropagation()}>
         <header className="sb-isaac-setup-header">
-          <div className="sb-isaac-setup-heading"><span className="eyebrow">BACKGROUND RUNTIME</span><div className="sb-isaac-title-row"><h2 id="runtime-worker-setup-title">Worker mode</h2><div className="sb-isaac-info" ref={infoRef}><button type="button" className="sb-isaac-info-button" aria-label="About runtime worker modes" aria-expanded={infoOpen} onClick={() => setInfoOpen(value => !value)}>i</button>{infoOpen && <div className="sb-isaac-info-popover" role="note"><p>The Windows Service and supervisor remain available in every mode. This setting controls each project's datasource connection lifecycle.</p>{RUNTIME_WORKER_MODES.map(modeId => { const modeInfo = runtimeWorkerModeMetadata(modeId); return <p key={modeId}><strong>{modeInfo.label}</strong><span>{modeInfo.description}</span></p> })}</div>}</div></div></div>
+          <div className="sb-isaac-setup-heading"><span className="eyebrow">BACKGROUND RUNTIME</span><div className="sb-isaac-title-row"><h2 id="runtime-worker-setup-title">Worker mode</h2><InfoPopover className="sb-isaac-info" label="About runtime worker modes"><InfoPopoverIntro>The Windows Service and supervisor remain available in every mode. This setting controls each project's datasource connection lifecycle.</InfoPopoverIntro>{RUNTIME_WORKER_MODES.map(modeId => { const modeInfo = runtimeWorkerModeMetadata(modeId); return <InfoPopoverSection key={modeId} title={modeInfo.label}>{modeInfo.description}</InfoPopoverSection> })}</InfoPopover></div></div>
         </header>
         <div className={`sb-isaac-gateway-state ${workerChecking ? 'is-checking' : workerReady ? 'is-ready' : 'is-fallback'}`}>
           <strong>{workerChecking ? 'Checking runtime worker…' : workerReady ? 'Runtime worker ready' : 'Runtime worker unavailable'}</strong>
@@ -1710,20 +1698,10 @@ function MultiSelectionActions({ count, onArrange, onDuplicate, onDelete, onLock
   return <div className="sb-multi-actions"><p>{count} components selected. Drag one selected component to move the whole group.</p><div className="sb-arrange-grid">{controls.map(([action, icon, label]) => <button key={action} type="button" title={label} aria-label={label} disabled={action.startsWith('distribute') && count < 3} onClick={() => onArrange(action)}>{icon}</button>)}</div><button type="button" onClick={onDuplicate}>Duplicate selection</button><button type="button" onClick={onLock}>Lock selection</button><button type="button" onClick={onHide}>Hide selection</button><button type="button" className="danger" onClick={onDelete}>Delete selection</button></div>
 }
 function VersionList({ versions, activeVersionId, canRestore, busy = false, onRestore }) {
-  const [openVersionId, setOpenVersionId] = useState(null)
   const nextVersion = nextVersionNumber(versions)
-  useEffect(() => {
-    if (openVersionId && !versions.some(version => version.id === openVersionId)) setOpenVersionId(null)
-  }, [openVersionId, versions])
-  return <div className="sb-version-list" onKeyDown={event => {
-    if (event.key !== 'Escape' || !openVersionId) return
-    event.stopPropagation()
-    setOpenVersionId(null)
-  }}>{versions.map((version, index) => {
+  return <div className="sb-version-list">{versions.map(version => {
     const description = describeVersion(version, versions)
     const active = version.id === activeVersionId
-    const open = openVersionId === version.id
-    const detailsId = `sb-version-details-${index}`
     const createdAt = version.createdAt ? new Date(version.createdAt) : null
     const publishedAt = createdAt && Number.isFinite(createdAt.getTime()) ? createdAt : null
     return <div key={version.id} className={`sb-version-card ${active ? 'is-active' : ''} ${description.kind === 'restore' ? 'is-restore' : ''}`}>
@@ -1731,18 +1709,18 @@ function VersionList({ versions, activeVersionId, canRestore, busy = false, onRe
         <div className="sb-version-heading"><strong>v{version.version}</strong>{description.kind === 'restore' && <b>RESTORED</b>}</div>
         <div className="sb-version-card-actions">
           {active && <span className="sb-version-active-mark" role="img" aria-label="Active version" title="Active version" />}
-          <button type="button" className="sb-version-details-trigger" aria-label={`${open ? 'Hide' : 'Show'} information for version ${version.version}`} aria-expanded={open} aria-controls={detailsId} title={`${open ? 'Hide' : 'Show'} version information`} onClick={() => setOpenVersionId(current => current === version.id ? null : version.id)}><span aria-hidden="true">i</span></button>
+          <InfoPopover className="sb-version-info" label={`Information for version ${version.version}`} title="Version information" align="end" surfaceRole="dialog" dismissOnAction>
+            <InfoPopoverIntro>Published snapshot v{version.version} and its immutable history metadata.</InfoPopoverIntro>
+            <InfoPopoverSection title="SNAPSHOT">{description.label}</InfoPopoverSection>
+            <InfoPopoverSection title="PUBLISHED"><time dateTime={publishedAt?.toISOString()}>{publishedAt ? publishedAt.toLocaleString() : 'Legacy snapshot'}</time></InfoPopoverSection>
+            <InfoPopoverSection title="STATUS">
+              {active
+                ? <span className="sb-version-active-note">This snapshot is currently active.</span>
+                : canRestore && <button type="button" className="sb-version-restore" disabled={busy} title={`Create v${nextVersion} from v${version.version} and make it active`} onClick={() => onRestore(version)}>Restore → v{nextVersion}</button>}
+            </InfoPopoverSection>
+          </InfoPopover>
         </div>
       </div>
-      {open && <div className="sb-version-details" id={detailsId} role="region" aria-label={`Version ${version.version} information`}>
-        <dl>
-          <div><dt>Snapshot</dt><dd>{description.label}</dd></div>
-          <div><dt>Published</dt><dd><time dateTime={publishedAt?.toISOString()}>{publishedAt ? publishedAt.toLocaleString() : 'Legacy snapshot'}</time></dd></div>
-        </dl>
-        {active
-          ? <span className="sb-version-active-note">This snapshot is currently active.</span>
-          : canRestore && <button type="button" className="sb-version-restore" disabled={busy} title={`Create v${nextVersion} from v${version.version} and make it active`} onClick={() => { setOpenVersionId(null); onRestore(version) }}>Restore → v{nextVersion}</button>}
-      </div>}
     </div>
   })}{versions.length === 0 && <p className="sb-muted">No published versions.</p>}</div>
 }
@@ -1775,7 +1753,6 @@ function Panel({ title, titleInfo = '', description, children, collapsible = fal
     }
   })
   const [expanded, setExpanded] = useState(false)
-  const [titleInfoOpen, setTitleInfoOpen] = useState(false)
 
   useEffect(() => {
     if (!collapsible || !storageKey) return
@@ -1785,20 +1762,18 @@ function Panel({ title, titleInfo = '', description, children, collapsible = fal
   if (!collapsible) return <section className="sb-panel"><h3>{title}</h3>{children}</section>
   const toggleOpen = () => {
     if (open) setExpanded(false)
-    setTitleInfoOpen(false)
     setOpen(value => !value)
   }
   return <section className={`sb-panel sb-collapsible-panel ${open ? 'is-open' : 'is-closed'} ${expandable ? 'is-expandable' : ''} ${expanded ? 'is-floating' : ''}`}>
     <div className={`sb-panel-heading ${titleInfo ? 'has-title-info' : ''}`} onClick={titleInfo ? event => {
-      if (event.target.closest?.('.sb-panel-title-info-trigger, .sb-panel-expand')) return
+      if (event.target.closest?.('.sb-info-popover, .sb-panel-expand')) return
       toggleOpen()
     } : undefined}>
       {titleInfo
-        ? <><div className="sb-panel-heading-copy"><div className="sb-panel-title-line"><button type="button" className="sb-panel-title-toggle" aria-expanded={open}><strong>{title}</strong></button><button type="button" className="sb-panel-title-info-trigger" aria-label={`${titleInfoOpen ? 'Hide' : 'Show'} information about ${title}`} aria-expanded={titleInfoOpen} title={`${titleInfoOpen ? 'Hide' : 'Show'} information`} onClick={() => setTitleInfoOpen(value => !value)}><span aria-hidden="true">i</span></button></div>{description && <small>{description}</small>}</div><i className="sb-panel-chevron" aria-hidden="true" /></>
+        ? <><div className="sb-panel-heading-copy"><div className="sb-panel-title-line"><button type="button" className="sb-panel-title-toggle" aria-expanded={open}><strong>{title}</strong></button><InfoPopover className="sb-panel-title-info" label={`Information about ${title}`} title={`${title} information`} align="end">{titleInfo}</InfoPopover></div>{description && <small>{description}</small>}</div><i className="sb-panel-chevron" aria-hidden="true" /></>
         : <button type="button" className="sb-panel-toggle" aria-expanded={open} onClick={toggleOpen}><span><strong>{title}</strong>{description && <small>{description}</small>}</span><i aria-hidden="true" /></button>}
       {expandable && open && <button type="button" className="sb-panel-expand" aria-label={expanded ? `Return ${title} to sidebar` : `Expand ${title} into floating window`} aria-pressed={expanded} title={expanded ? 'Return to sidebar' : 'Expand into floating window'} onClick={() => setExpanded(value => !value)}><span className="sb-panel-expand-icon" aria-hidden="true" /></button>}
     </div>
-    {titleInfo && titleInfoOpen && <div className="sb-panel-title-info" role="note">{titleInfo}</div>}
     <div className="sb-panel-body" hidden={!open}>{children}</div>
   </section>
 }

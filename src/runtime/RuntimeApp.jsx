@@ -16,6 +16,7 @@ import { numericEngineering, resolveNumericRange } from '../../shared/numeric-ta
 import { createRuntimeTelemetryFrame } from '../../shared/runtime-telemetry-frame.js'
 import { AuthScreen } from '../platform/AuthScreen.jsx'
 import { connectRuntimeStream, resolveDesignAssets } from '../platform/desktop.js'
+import { InfoPopover, InfoPopoverSection } from '../platform/InfoPopover.jsx'
 
 export default function RuntimeApp({ slug, metricsEnabled = false }) {
   const [session, setSession] = useState({ loading: true, user: null })
@@ -1074,10 +1075,8 @@ function CommandNotice({ result, profile, metricsEnabled, bridge, bridgeHealth, 
       <header>
         <span>{simulationAcknowledged ? 'ACKNOWLEDGED LOCALLY' : result.presentation.label}</span>
         <div className="sb-runtime-message-actions">
-          <details className="sb-runtime-message-info">
-            <summary aria-label="Show command request details" title="Command request details">i</summary>
-            <div className="sb-runtime-message-info-popover">
-              <strong>COMMAND DETAILS</strong>
+          <InfoPopover className="sb-runtime-message-info" label="Show command request details" title="Command request details" align="end">
+            <InfoPopoverSection title="COMMAND DETAILS">
               <dl>
                 <div><dt>Request</dt><dd>{result.requestId || '—'}</dd></div>
                 <div><dt>Correlation</dt><dd>{result.correlationId || 'pending'}</dd></div>
@@ -1099,8 +1098,8 @@ function CommandNotice({ result, profile, metricsEnabled, bridge, bridgeHealth, 
                   {result.timing?.serverResponseReadyMs != null && <div><dt>Response ready</dt><dd>{formatRpcDuration(result.timing.serverResponseReadyMs)}</dd></div>}
                 </>}
               </dl>
-            </div>
-          </details>
+            </InfoPopoverSection>
+          </InfoPopover>
           <button type="button" onClick={onDismiss} aria-label="Dismiss command result">×</button>
         </div>
       </header>

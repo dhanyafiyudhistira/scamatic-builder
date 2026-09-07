@@ -4,6 +4,7 @@ import { connectorDeletionBlock, connectorSourceUsage, detachUnusedConnectorSour
 import { applyNodeRedImportPlan, createNodeRedImportPlan, NODE_RED_IMPORT_LIMITS, parseNodeRedFlow } from '../../shared/node-red-import.js'
 import { validateProjectSchema } from '../../shared/project-schema.js'
 import { apiRequest } from './api.js'
+import { InfoPopover, InfoPopoverIntro, InfoPopoverSection } from './InfoPopover.jsx'
 
 export function ConnectorManager({ projectId, schema, onSchemaChange, canConfigure, canRotateSecret, draftDirty = false, onNotice }) {
   const [connectors, setConnectors] = useState([])
@@ -11,7 +12,6 @@ export function ConnectorManager({ projectId, schema, onSchemaChange, canConfigu
   const [formExpanded, setFormExpanded] = useState(false)
   const [form, setForm] = useState({ name: '', serverUrl: '', deviceId: '', jwt: '', deviceToken: '', rpcMode: 'feedback-tag' })
   const [accountConnectorId, setAccountConnectorId] = useState(null)
-  const [infoConnectorId, setInfoConnectorId] = useState(null)
   const [accountForm, setAccountForm] = useState({ username: '', password: '' })
   const load = useCallback(async ({ notify = true } = {}) => {
     try { const data = await apiRequest(`/api/connectors?projectId=${encodeURIComponent(projectId)}&environmentRef=staging`); setConnectors(data.connectors || []) }
@@ -164,8 +164,6 @@ export function ConnectorManager({ projectId, schema, onSchemaChange, canConfigu
           const commandHealthLabel = commandHealth === 'unverified' ? 'unverified/timeout' : commandHealth
           const authentication = connector.environment?.authentication || { mode: 'unconfigured', state: 'unconfigured' }
           const autoRefresh = authentication.mode === 'refresh-token'
-          const infoOpen = infoConnectorId === connector.id
-          const infoPanelId = `connector-info-${String(connector.id).replace(/[^a-zA-Z0-9_-]/g, '')}`
           const deletionBlock = connectorDeletionBlock({ enabled: connector.enabled, draftAttached: attached, draftDirty })
           const deleteDisabled = busy || Boolean(deletionBlock)
           const deleteTitle = deletionBlock?.message || 'Delete connector and encrypted credentials'
@@ -174,22 +172,30 @@ export function ConnectorManager({ projectId, schema, onSchemaChange, canConfigu
               <header className="sb-connector-card-header">
                 <strong>{connector.name}</strong>
                 <div className="sb-connector-card-head-actions">
-                  <span className={`state-${health}`}>{health}</span>
-                  <button type="button" className="sb-connector-info-trigger" aria-label={`${infoOpen ? 'Hide' : 'Show'} connection information for ${connector.name}`} aria-expanded={infoOpen} aria-controls={infoPanelId} title="Connection information" onClick={() => setInfoConnectorId(current => current === connector.id ? null : connector.id)} />
+                  <span className={`sb-connector-health state-${health}`}>{health}</span>
+                  <InfoPopover className="sb-connector-info" label={`Connection information for ${connector.name}`} title="Connection information" align="end">
+                    <InfoPopoverIntro>{connector.name} connection status and protected credential readiness.</InfoPopoverIntro>
+                    <InfoPopoverSection title="CONNECTION">
+                      <dl>
+                        <div className="is-wide"><dt>Endpoint</dt><dd><code title={connector.environment?.config?.serverUrl || 'No endpoint'}>{connector.environment?.config?.serverUrl || 'No endpoint'}</code></dd></div>
+                        <div><dt>Environment</dt><dd>staging</dd></div>
+                        <div><dt>Source</dt><dd>{attached ? `Attached · ${usage.tagCount} tag${usage.tagCount === 1 ? '' : 's'}` : 'Not attached'}</dd></div>
+                      </dl>
+                    </InfoPopoverSection>
+                    <InfoPopoverSection title="CREDENTIALS">
+                      JWT {connector.environment?.secret?.configured ? 'configured' : 'missing'} · Device token {connector.environment?.simulationSecret?.configured ? 'configured' : 'missing'}
+                    </InfoPopoverSection>
+                    <InfoPopoverSection title="RUNTIME HEALTH">
+                      <dl>
+                        <div className="is-wide"><dt>JWT auto-refresh</dt><dd><b className={`state-text-${authentication.state}`}>{autoRefresh ? authentication.state : 'off'}</b>{autoRefresh && authentication.accessTokenExpiresAt ? ` · ${tokenExpiryLabel(authentication.accessTokenExpiresAt)}` : ''}</dd></div>
+                        <div className="is-wide"><dt>RPC acknowledgment</dt><dd><b className={`state-text-${commandHealth}`}>{commandHealthLabel}</b></dd></div>
+                      </dl>
+                      {authentication.message && <p>{authentication.message}</p>}
+                    </InfoPopoverSection>
+                  </InfoPopover>
                 </div>
               </header>
               <small className="sb-connector-card-summary">ThingsBoard · staging{attached && usage.tagCount ? ` · ${usage.tagCount} tag${usage.tagCount === 1 ? '' : 's'}` : ''}</small>
-              {infoOpen && <section id={infoPanelId} className="sb-connector-info-panel" aria-label={`Connection information for ${connector.name}`}>
-                <dl>
-                  <div className="is-wide"><dt>Endpoint</dt><dd><code title={connector.environment?.config?.serverUrl || 'No endpoint'}>{connector.environment?.config?.serverUrl || 'No endpoint'}</code></dd></div>
-                  <div><dt>Environment</dt><dd>staging</dd></div>
-                  <div><dt>Source</dt><dd>{attached ? `Attached · ${usage.tagCount} tag${usage.tagCount === 1 ? '' : 's'}` : 'Not attached'}</dd></div>
-                  <div className="is-wide"><dt>Credentials</dt><dd>JWT {connector.environment?.secret?.configured ? 'configured' : 'missing'} · Device token {connector.environment?.simulationSecret?.configured ? 'configured' : 'missing'}</dd></div>
-                  <div className="is-wide"><dt>JWT auto-refresh</dt><dd><b className={`state-text-${authentication.state}`}>{autoRefresh ? authentication.state : 'off'}</b>{autoRefresh && authentication.accessTokenExpiresAt ? ` · ${tokenExpiryLabel(authentication.accessTokenExpiresAt)}` : ''}</dd></div>
-                  <div className="is-wide"><dt>RPC acknowledgment</dt><dd><b className={`state-text-${commandHealth}`}>{commandHealthLabel}</b></dd></div>
-                </dl>
-                {authentication.message && <p>{authentication.message}</p>}
-              </section>}
               <div className="sb-connector-card-actions">
                 {attached
                   ? <button type="button" onClick={() => detach(connector)} disabled={busy || usage.tagCount > 0} title={usage.tagCount ? 'Move or delete tags using this source first.' : 'Detach source from draft'}>Detach source</button>

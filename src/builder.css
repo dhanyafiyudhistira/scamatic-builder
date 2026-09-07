@@ -2528,9 +2528,10 @@ body.sb-is-resizing-sidebar * {
   flex: 1 1 130px;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  gap: 5% 7%;
+  column-gap: 10px;
+  row-gap: 6px;
   align-items: center;
-  padding: .35% .8%;
+  padding: 7px 10px;
   border-right: 1px solid #303437;
 }
 
@@ -2548,6 +2549,8 @@ body.sb-is-resizing-sidebar * {
 }
 
 .sb-chart-legend i {
+  grid-row: 1 / span 2;
+  align-self: center;
   width: 1.7em;
   height: 0;
   border-top: 2px solid;
@@ -2557,7 +2560,7 @@ body.sb-is-resizing-sidebar * {
   min-width: 0;
   overflow: hidden;
   color: #a4aaad;
-  font: 700 clamp(6px, .58vw, 10px)/1 var(--sb-chart-font);
+  font: 700 clamp(6px, .58vw, 10px)/1.2 var(--sb-chart-font);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2568,8 +2571,12 @@ body.sb-is-resizing-sidebar * {
 
 .sb-chart-legend strong {
   grid-column: 2;
+  min-width: 0;
+  overflow: hidden;
   color: inherit;
-  font: 900 clamp(7px, .72vw, 13px)/1 var(--sb-chart-font);
+  font: 900 clamp(7px, .72vw, 13px)/1.25 var(--sb-chart-font);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sb-chart-plot {

@@ -2864,7 +2864,7 @@ dependencies = [
 
 [[package]]
 name = "scamatic-desktop"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
@@ -2881,7 +2881,7 @@ dependencies = [
 
 [[package]]
 name = "scamatic-runtime-service"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "windows-service",
  "windows-sys 0.61.2",

@@ -4813,6 +4813,10 @@ body.sb-is-resizing-sidebar * {
   z-index: 20;
 }
 
+.sb-info-portal {
+  display: contents;
+}
+
 .sb-info-trigger {
   --sb-button-depth: transparent;
   position: relative;
@@ -4851,10 +4855,8 @@ body.sb-is-resizing-sidebar * {
 }
 
 .sb-info-surface {
-  position: absolute;
-  z-index: 8;
-  top: calc(100% + 8px);
-  left: 0;
+  position: fixed;
+  z-index: 120;
   width: min(330px, calc(100vw - 64px));
   display: grid;
   gap: 8px;
@@ -4864,11 +4866,6 @@ body.sb-is-resizing-sidebar * {
   border-radius: 7px;
   background: color-mix(in srgb, var(--sb-panel) 96%, #000);
   box-shadow: 0 14px 35px #000c, inset 0 1px 0 #ffffff12;
-}
-
-.sb-info-surface.is-end {
-  right: 0;
-  left: auto;
 }
 
 .sb-info-intro {

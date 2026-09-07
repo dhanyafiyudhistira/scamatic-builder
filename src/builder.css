@@ -879,15 +879,12 @@ body.sb-is-resizing-sidebar * {
   gap: 2px;
 }
 
-.sb-panel-title-line {
-  min-width: 0;
+.sb-panel-heading-controls {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 6px;
-}
-
-.sb-panel-title-line .sb-info-popover {
-  margin-left: auto;
+  gap: 14px;
+  padding-right: 2px;
 }
 
 .sb-panel-title-toggle {

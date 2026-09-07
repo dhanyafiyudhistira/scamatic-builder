@@ -1770,7 +1770,7 @@ function Panel({ title, titleInfo = '', description, children, collapsible = fal
       toggleOpen()
     } : undefined}>
       {titleInfo
-        ? <><div className="sb-panel-heading-copy"><div className="sb-panel-title-line"><button type="button" className="sb-panel-title-toggle" aria-expanded={open}><strong>{title}</strong></button><InfoPopover className="sb-panel-title-info" label={`Information about ${title}`} title={`${title} information`} align="end">{titleInfo}</InfoPopover></div>{description && <small>{description}</small>}</div><i className="sb-panel-chevron" aria-hidden="true" /></>
+        ? <><div className="sb-panel-heading-copy"><button type="button" className="sb-panel-title-toggle" aria-expanded={open}><strong>{title}</strong></button>{description && <small>{description}</small>}</div><div className="sb-panel-heading-controls"><InfoPopover className="sb-panel-title-info" label={`Information about ${title}`} title={`${title} information`} align="end">{titleInfo}</InfoPopover><i className="sb-panel-chevron" aria-hidden="true" /></div></>
         : <button type="button" className="sb-panel-toggle" aria-expanded={open} onClick={toggleOpen}><span><strong>{title}</strong>{description && <small>{description}</small>}</span><i aria-hidden="true" /></button>}
       {expandable && open && <button type="button" className="sb-panel-expand" aria-label={expanded ? `Return ${title} to sidebar` : `Expand ${title} into floating window`} aria-pressed={expanded} title={expanded ? 'Return to sidebar' : 'Expand into floating window'} onClick={() => setExpanded(value => !value)}><span className="sb-panel-expand-icon" aria-hidden="true" /></button>}
     </div>

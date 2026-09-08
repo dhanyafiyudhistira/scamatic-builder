@@ -1,13 +1,22 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 
+const FOCUSABLE_SELECTOR = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+
 export function InfoPopover({ label, title = label, align = 'start', className = '', surfaceRole = 'note', dismissOnAction = false, children }) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef(null)
   const triggerRef = useRef(null)
   const surfaceRef = useRef(null)
+  const dialogFocusedRef = useRef(false)
   const panelId = useId()
   const [surfacePosition, setSurfacePosition] = useState(null)
+
+  const closePopover = useCallback(({ restoreFocus = false } = {}) => {
+    setOpen(false)
+    setSurfacePosition(null)
+    if (restoreFocus) triggerRef.current?.focus()
+  }, [])
 
   const placeSurface = useCallback(() => {
     const trigger = triggerRef.current
@@ -47,18 +56,42 @@ export function InfoPopover({ label, title = label, align = 'start', className =
   }, [open, placeSurface])
 
   useEffect(() => {
+    if (!open) {
+      dialogFocusedRef.current = false
+      return
+    }
+    if (surfaceRole !== 'dialog' || !surfacePosition || dialogFocusedRef.current) return
+    const surface = surfaceRef.current
+    const firstControl = surface?.querySelector(FOCUSABLE_SELECTOR)
+    ;(firstControl || surface)?.focus()
+    dialogFocusedRef.current = true
+  }, [open, surfacePosition, surfaceRole])
+
+  useEffect(() => {
     if (!open) return
     const close = event => {
       if (event.type === 'keydown') {
-        if (event.key !== 'Escape') return
-        setOpen(false)
-        setSurfacePosition(null)
-        triggerRef.current?.focus()
+        if (event.key === 'Escape') {
+          closePopover({ restoreFocus: true })
+          return
+        }
+        if (event.key !== 'Tab' || surfaceRole !== 'dialog') return
+        const surface = surfaceRef.current
+        if (!surface) return
+        const controls = [...surface.querySelectorAll(FOCUSABLE_SELECTOR)]
+        const firstControl = controls[0] || surface
+        const lastControl = controls.at(-1) || surface
+        const activeElement = document.activeElement
+        const focusEscaped = !surface.contains(activeElement)
+        const movingBeforeFirst = event.shiftKey && (activeElement === firstControl || activeElement === surface)
+        const movingAfterLast = !event.shiftKey && activeElement === lastControl
+        if (!focusEscaped && !movingBeforeFirst && !movingAfterLast) return
+        event.preventDefault()
+        ;(movingBeforeFirst ? lastControl : firstControl).focus()
         return
       }
       if (!rootRef.current?.contains(event.target) && !surfaceRef.current?.contains(event.target)) {
-        setOpen(false)
-        setSurfacePosition(null)
+        closePopover({ restoreFocus: true })
       }
     }
     document.addEventListener('pointerdown', close)
@@ -67,7 +100,7 @@ export function InfoPopover({ label, title = label, align = 'start', className =
       document.removeEventListener('pointerdown', close)
       document.removeEventListener('keydown', close)
     }
-  }, [open])
+  }, [closePopover, open, surfaceRole])
 
   const surface = open && <div
     ref={surfaceRef}
@@ -75,6 +108,7 @@ export function InfoPopover({ label, title = label, align = 'start', className =
     className={`sb-info-surface is-${align}`}
     role={surfaceRole}
     aria-label={surfaceRole === 'dialog' ? label : undefined}
+    tabIndex={surfaceRole === 'dialog' ? -1 : undefined}
     style={{
       left: surfacePosition?.left ?? 0,
       top: surfacePosition?.top ?? 0,
@@ -83,8 +117,7 @@ export function InfoPopover({ label, title = label, align = 'start', className =
     onClick={event => {
       event.stopPropagation()
       if (dismissOnAction && event.target.closest?.('button, a')) {
-        setOpen(false)
-        setSurfacePosition(null)
+        closePopover({ restoreFocus: true })
       }
     }}
   >{children}</div>
@@ -100,10 +133,7 @@ export function InfoPopover({ label, title = label, align = 'start', className =
         aria-controls={panelId}
         aria-haspopup={surfaceRole === 'dialog' ? 'dialog' : undefined}
         title={title}
-        onClick={() => setOpen(value => {
-          if (value) setSurfacePosition(null)
-          return !value
-        })}
+        onClick={() => open ? closePopover({ restoreFocus: true }) : setOpen(true)}
       >
         <span aria-hidden="true">i</span>
       </button>

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
-import { auditMasterKeyCompatibility } from '../api/_lib/master-key-compatibility.js'
+import { auditMasterKeyCompatibility, createMasterKeyCompatibilityCache } from '../api/_lib/master-key-compatibility.js'
 import {
   encryptChartStorageSecret,
   encryptConnectorSecret,
@@ -90,14 +90,88 @@ test('master-key rotation guards wrapping state and rejects lost updates', () =>
   )
 })
 
-function fakeModel(records) {
+test('master-key audit streams records through MongoDB cursors', async () => {
+  const originalPrimary = process.env.SCADA_CONNECTOR_MASTER_KEY
+  const cursorCalls = []
+  try {
+    process.env.SCADA_CONNECTOR_MASTER_KEY = Buffer.alloc(32, 5).toString('hex')
+    const result = await auditMasterKeyCompatibility({
+      connectorModel: fakeModel([], cursorCalls),
+      chartStorageModel: fakeModel([], cursorCalls),
+    })
+    assert.equal(result.checked, 0)
+    assert.equal(result.status, 'empty')
+    assert.deepEqual(cursorCalls, ['cursor', 'cursor'])
+  } finally {
+    if (originalPrimary == null) delete process.env.SCADA_CONNECTOR_MASTER_KEY
+    else process.env.SCADA_CONNECTOR_MASTER_KEY = originalPrimary
+  }
+})
+
+test('master-key health cache coalesces concurrent audits and expires cleanly', async () => {
+  let calls = 0
+  let currentTime = 1_000
+  let releaseAudit
+  const auditGate = new Promise(resolve => { releaseAudit = resolve })
+  const result = { ok: true, status: 'empty', checked: 0, compatible: 0, incompatible: 0, rotationRequired: 0 }
+  const cachedAudit = createMasterKeyCompatibilityCache({
+    ttlMs: 50,
+    now: () => currentTime,
+    audit: async () => {
+      calls += 1
+      if (calls === 1) await auditGate
+      return result
+    },
+  })
+
+  const first = cachedAudit()
+  const second = cachedAudit()
+  assert.strictEqual(first, second)
+  await Promise.resolve()
+  assert.equal(calls, 1)
+  releaseAudit()
+  assert.strictEqual(await first, result)
+  assert.strictEqual(await cachedAudit(), result)
+  assert.equal(calls, 1)
+
+  currentTime += 51
+  assert.strictEqual(await cachedAudit(), result)
+  assert.equal(calls, 2)
+})
+
+test('master-key health cache does not retain failed audits', async () => {
+  let calls = 0
+  const cachedAudit = createMasterKeyCompatibilityCache({
+    audit: async () => {
+      calls += 1
+      if (calls === 1) throw new Error('temporary failure')
+      return { ok: true }
+    },
+  })
+
+  await assert.rejects(cachedAudit(), /temporary failure/)
+  assert.deepEqual(await cachedAudit(), { ok: true })
+  assert.equal(calls, 2)
+})
+
+function fakeModel(records, cursorCalls = null) {
   return {
     find() {
-      return {
+      const query = {
         select() {
-          return { lean: async () => records }
+          return query
+        },
+        lean() {
+          return query
+        },
+        cursor() {
+          cursorCalls?.push('cursor')
+          return (async function * streamRecords() {
+            for (const record of records) yield record
+          })()
         },
       }
+      return query
     },
   }
 }

@@ -42,13 +42,36 @@ export function mongoConnectionStatus() {
   return { ready: readyState === 1, readyState, state: labels[readyState] || 'unknown' }
 }
 
-export async function pingMongo() {
+export async function pingMongo({ requireTransactions = false } = {}) {
   const timeoutMs = positiveInteger(process.env.MONGO_READINESS_TIMEOUT_MS, 2500)
   return withMongoDeadline((async () => {
     const connection = await connectMongo()
     await connection.connection.db.admin().command({ ping: 1 })
-    return mongoConnectionStatus()
+    const capability = requireTransactions
+      ? await assertMongoTransactionsSupported(connection)
+      : { transactions: 'not-required' }
+    return { ...mongoConnectionStatus(), transactions: capability.transactions }
   })(), timeoutMs)
+}
+
+export async function assertMongoTransactionsSupported(connection = null) {
+  const activeConnection = connection || await connectMongo()
+  const hello = await activeConnection.connection.db.admin().command({ hello: 1 })
+  const replicaSet = typeof hello?.setName === 'string' && hello.setName.trim().length > 0
+  const shardedCluster = hello?.msg === 'isdbgrid'
+  const sessions = Number.isFinite(hello?.logicalSessionTimeoutMinutes)
+  const supportedWireVersion = Number(hello?.maxWireVersion) >= (shardedCluster ? 8 : 7)
+  if ((!replicaSet && !shardedCluster) || !sessions || !supportedWireVersion) {
+    throw mongoTransactionsRequiredError()
+  }
+  return { topology: shardedCluster ? 'sharded' : 'replica-set', transactions: 'supported' }
+}
+
+export function mongoTransactionsRequiredError(cause = null) {
+  return Object.assign(
+    new Error('MongoDB transactions are required. Configure MongoDB Atlas or a transaction-capable replica set.'),
+    { code: 'MONGO_TRANSACTIONS_REQUIRED', statusCode: 503, ...(cause ? { cause } : {}) },
+  )
 }
 
 export async function withMongoDeadline(operation, timeoutMs) {
@@ -79,7 +102,8 @@ export async function runMongoTransaction(work, { requireTransaction = process.e
     return result
   } catch (error) {
     const unsupported = /Transaction numbers are only allowed|replica set|mongos/i.test(String(error?.message || ''))
-    if (!unsupported || requireTransaction) throw error
+    if (!unsupported) throw error
+    if (requireTransaction) throw mongoTransactionsRequiredError(error)
     // Local standalone MongoDB fallback. Production intentionally fails closed
     // unless a replica set/transaction-capable cluster is configured.
     return work(null)

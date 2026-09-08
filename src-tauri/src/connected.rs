@@ -243,7 +243,10 @@ impl DesktopApi {
             .join(path)
             .map_err(|_| "desktop API path is invalid".to_owned())?;
         if url.origin() != self.origin.origin()
-            || !(url.path() == "/health/data-plane/shadow" || url.path().starts_with("/api/"))
+            || !(matches!(
+                url.path(),
+                "/health/data-plane/ready" | "/health/data-plane/shadow"
+            ) || url.path().starts_with("/api/"))
         {
             return Err("desktop API path is outside the connected server scope".to_owned());
         }
@@ -481,6 +484,23 @@ mod tests {
         assert!(
             client
                 .resolve_asset_path("/api/elements?projectId=project/123&assetId=asset-456")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn connected_health_paths_are_explicit_and_exact() {
+        let client = DesktopApi::for_origin("https://scada.example").unwrap();
+        assert!(client.resolve_path("/health/data-plane/ready").is_ok());
+        assert!(client.resolve_path("/health/data-plane/shadow").is_ok());
+        assert!(
+            client
+                .resolve_path("/health/data-plane/ready/extra")
+                .is_err()
+        );
+        assert!(
+            client
+                .resolve_path("/health/data-plane/key-compatibility")
                 .is_err()
         );
     }

@@ -69,8 +69,6 @@ Function ScamaticRuntimeSetupCreate
     Abort
   ${EndIf}
 
-  StrCmp $ScamaticMongoUri "" 0 +2
-    StrCpy $ScamaticMongoUri "mongodb://127.0.0.1:27017/scamatic"
   StrCmp $ScamaticAdminEmail "" 0 +2
     StrCpy $ScamaticAdminEmail "admin@scada.local"
   StrCmp $ScamaticDeploymentMode "" 0 +2
@@ -112,7 +110,7 @@ Function ScamaticRuntimeSetupCreate
   ${NSD_CreatePassword} 0 115u 94% 13u "$ScamaticMasterKeyConfirm"
   Pop $ScamaticMasterKeyConfirmInput
 
-  ${NSD_CreateLabel} 0 140u 94% 10u "MongoDB URI utama"
+  ${NSD_CreateLabel} 0 140u 94% 10u "MongoDB Atlas / replica-set URI utama (transaction wajib)"
   Pop $ScamaticMongoLabel
   ${NSD_CreateText} 0 152u 94% 13u "$ScamaticMongoUri"
   Pop $ScamaticMongoInput
@@ -348,7 +346,7 @@ Function ScamaticRuntimeSetupLeave
   StrCmp $R0 "mongodb://" scamatic_uri_valid 0
   StrCpy $R0 $ScamaticMongoUri 14
   StrCmp $R0 "mongodb+srv://" scamatic_uri_valid 0
-  MessageBox MB_ICONEXCLAMATION|MB_OK "MongoDB URI harus dimulai dengan mongodb:// atau mongodb+srv://."
+  MessageBox MB_ICONEXCLAMATION|MB_OK "MongoDB URI harus dimulai dengan mongodb:// atau mongodb+srv:// dan menunjuk ke Atlas atau replica set yang mendukung transaction."
   Abort
 
   scamatic_uri_valid:
@@ -580,9 +578,19 @@ FunctionEnd
   StrCmp $0 0 0 scamatic_service_config_error
 
   DetailPrint "Checking SCAMATIC data-plane readiness..."
-  nsExec::ExecToLog '"$INSTDIR\scamatic-runtime-service.exe" wait-ready --timeout-seconds 60'
+  nsExec::ExecToStack '"$INSTDIR\scamatic-runtime-service.exe" wait-ready --timeout-seconds 60'
   Pop $0
+  Pop $1
   StrCmp $0 0 scamatic_service_ready 0
+  ${StrLoc} $R0 $1 "MONGO_TRANSACTIONS_REQUIRED" ">"
+  StrCmp $R0 "" scamatic_service_not_ready 0
+  DetailPrint "$1"
+  ${IfNot} ${Silent}
+    MessageBox MB_ICONEXCLAMATION|MB_OK "SCAMATIC berhasil dipasang, tetapi MongoDB tidak mendukung transaction. Gunakan MongoDB Atlas atau replica set yang transaction-capable, perbarui C:\ProgramData\SCAMATIC\runtime.env, lalu restart service."
+  ${EndIf}
+  Goto scamatic_service_done
+
+  scamatic_service_not_ready:
   ${IfNot} ${Silent}
     MessageBox MB_ICONEXCLAMATION|MB_OK "SCAMATIC berhasil dipasang, tetapi data-plane belum ready. Periksa koneksi MongoDB dan log di C:\ProgramData\SCAMATIC\logs\runtime.log. Service akan tetap mencoba berjalan di background."
   ${EndIf}

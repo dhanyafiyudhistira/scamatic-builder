@@ -18,9 +18,10 @@ test('local desktop installer inserts first-install commissioning before file in
 })
 
 test('commissioning writes protected machine configuration and verifies readiness', async () => {
-  const [hooks, service] = await Promise.all([
+  const [hooks, service, runtimeExample] = await Promise.all([
     read('../src-tauri/windows/service-hooks.nsh'),
     read('../runtime-service-rs/src/main.rs'),
+    read('../src-tauri/runtime.env.example'),
   ])
 
   assert.match(hooks, /IfFileExists "\$APPDATA\\SCAMATIC\\runtime\.env" 0 \+2\s+Abort/)
@@ -43,6 +44,10 @@ test('commissioning writes protected machine configuration and verifies readines
   assert.match(hooks, /CHART_MONGO_ALLOWED_HOSTS=\$ScamaticChartMongoAllowedHosts/)
   assert.match(hooks, /CHART_MONGO_ALLOWED_PRIVATE_HOSTS=\$ScamaticChartMongoAllowedPrivateHosts/)
   assert.match(hooks, /CHART_MONGO_ALLOW_SHARED_CLUSTER=false/)
+  assert.match(hooks, /MongoDB Atlas \/ replica-set URI utama \(transaction wajib\)/)
+  assert.doesNotMatch(hooks, /mongodb:\/\/127\.0\.0\.1:27017\/scamatic/)
+  assert.match(runtimeExample, /MONGO_URI=mongodb\+srv:\/\/USER:PASSWORD@HOST\/scamatic/)
+  assert.doesNotMatch(runtimeExample, /mongodb:\/\/127\.0\.0\.1:27017\/scamatic/)
   assert.doesNotMatch(hooks, /CONNECTOR_ALLOWED_PRIVATE_HOSTS=false/)
   assert.match(hooks, /generate-master-key/)
   assert.match(hooks, /SCADA_CONNECTOR_PREVIOUS_MASTER_KEYS=/)
@@ -59,7 +64,9 @@ test('commissioning writes protected machine configuration and verifies readines
   assert.match(hooks, /S-1-5-32-545/)
   assert.match(hooks, /S-1-5-18:\(F\)/)
   assert.match(hooks, /S-1-5-32-544:\(F\)/)
-  assert.match(hooks, /wait-ready --timeout-seconds 60/)
+  assert.match(hooks, /ExecToStack[^\n]*wait-ready --timeout-seconds 60/)
+  assert.match(hooks, /StrLoc[^\n]*MONGO_TRANSACTIONS_REQUIRED/)
+  assert.match(hooks, /MongoDB tidak mendukung transaction/)
   assert.match(hooks, /check-key-compatible/)
   assert.match(hooks, /Fresh silent or passive installation requires a pre-provisioned/)
   assert.match(hooks, /\$PassiveMode = 1/)

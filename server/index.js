@@ -31,8 +31,8 @@ import simulatorHandler from '../api/_handlers/simulator.js'
 import simulationSequenceHandler from '../api/_handlers/simulation-sequence.js'
 import { isDatabaseUnavailableError, requestId } from '../api/_lib/security.js'
 import { allowedOrigins } from '../api/_lib/auth.js'
-import { connectMongo, disconnectMongo } from '../api/_lib/mongo.js'
-import { auditMasterKeyCompatibility } from '../api/_lib/master-key-compatibility.js'
+import { assertMongoTransactionsSupported, connectMongo, disconnectMongo, pingMongo } from '../api/_lib/mongo.js'
+import { createMasterKeyCompatibilityCache } from '../api/_lib/master-key-compatibility.js'
 import { warmApiMongo } from './api-mongo-warmup.js'
 import { RuntimeStreamHub } from './connectors/runtime-stream-hub.js'
 import { ManagedConnectorWorker } from './connectors/managed-connector-worker.js'
@@ -57,6 +57,7 @@ let managedConnectorWorker = null
 let runtimeStreamHub = null
 let rustShadowWorker = null
 let commandRetentionJanitor = null
+const auditMasterKeyCompatibilityForHealth = createMasterKeyCompatibilityCache()
 app.disable('x-powered-by')
 app.set('trust proxy', 1)
 
@@ -134,20 +135,41 @@ app.all('/api/chart-storage', safe(chartStorageHandler))
 app.all('/api/simulator', safe(simulatorHandler))
 app.all('/api/simulation-sequence', safe(simulationSequenceHandler))
 
-app.get(['/health/data-plane/live', '/health/data-plane/ready'], (req, res) => {
+app.get(['/health/data-plane/live', '/health/data-plane/ready'], safe(async (req, res) => {
   const kind = req.path.endsWith('/ready') ? 'readiness' : 'liveness'
   const health = managedConnectorWorker?.health(kind) || {
     ok: false,
     status: embeddedConnectorStream ? 'starting' : 'disabled',
     mode: embeddedConnectorStream ? 'node-ipc' : 'standalone',
   }
-  return res.status(kind === 'liveness' || health.ok ? 200 : 503).json({ ...health, check: kind, ts: Date.now() })
-})
+  if (kind === 'liveness') return res.status(200).json({ ...health, check: kind, ts: Date.now() })
+  try {
+    const mongo = await pingMongo({ requireTransactions: production })
+    return res.status(health.ok ? 200 : 503).json({
+      ...health,
+      check: kind,
+      checks: { mongo: mongo.state, transactions: mongo.transactions },
+      ts: Date.now(),
+    })
+  } catch (error) {
+    const transactionsRequired = error?.code === 'MONGO_TRANSACTIONS_REQUIRED'
+    return res.status(503).json({
+      ...health,
+      ok: false,
+      status: 'not-ready',
+      check: kind,
+      checks: { mongo: transactionsRequired ? 'connected' : 'unavailable', transactions: transactionsRequired ? 'unsupported' : 'unknown' },
+      code: transactionsRequired ? error.code : 'DATABASE_UNAVAILABLE',
+      ...(transactionsRequired ? { error: error.message } : {}),
+      ts: Date.now(),
+    })
+  }
+}))
 app.get('/health/data-plane/key-compatibility', safe(async (req, res) => {
   if (!isLoopbackAddress(req.socket?.remoteAddress)) return res.status(404).json({ error: 'Not found.' })
   try {
     await connectMongo()
-    const result = await auditMasterKeyCompatibility()
+    const result = await auditMasterKeyCompatibilityForHealth()
     return res.status(result.ok ? 200 : 503).json({ ...result, check: 'master-key-compatibility', ts: Date.now() })
   } catch (error) {
     const code = ['CONNECTOR_KEY_MISSING', 'CONNECTOR_KEY_INVALID'].includes(error?.code) ? error.code : 'KEY_COMPATIBILITY_UNAVAILABLE'
@@ -220,6 +242,7 @@ httpServer.listen(PORT, HOST, () => {
   commandRetentionJanitor.start()
   void warmApiMongo({
     connect: connectMongo,
+    validate: production ? assertMongoTransactionsSupported : null,
     shouldRetry: isDatabaseUnavailableError,
     onState: state => {
       if (state.phase === 'retrying-mongodb') {

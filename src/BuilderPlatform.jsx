@@ -1254,10 +1254,22 @@ function RuntimeWorkerSetupModal({ projects, onProjectUpdated, onClose }) {
   }, [])
   useEffect(() => {
     let disposed = false
-    apiRequest('/health/data-plane/ready')
-      .then(data => { if (!disposed) setHealth(data) })
-      .catch(() => { if (!disposed) setHealth({ ok: false, status: 'unavailable' }) })
-    return () => { disposed = true }
+    let retryTimer = null
+    const refreshHealth = async () => {
+      try {
+        const data = await apiRequest('/health/data-plane/ready')
+        if (!disposed) setHealth(data)
+      } catch {
+        if (!disposed) setHealth({ ok: false, status: 'unavailable' })
+      } finally {
+        if (!disposed) retryTimer = window.setTimeout(refreshHealth, 5000)
+      }
+    }
+    void refreshHealth()
+    return () => {
+      disposed = true
+      if (retryTimer != null) window.clearTimeout(retryTimer)
+    }
   }, [])
   const alwaysOnCount = projects.filter(project => runtimeWorkerMode(project) === 'always-on').length
   const workerChecking = health == null

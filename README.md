@@ -69,7 +69,11 @@ endpoint in Node-RED before deploying the flow.
 
 ## Local setup
 
-Copy `.env.example` to `.env` and configure `MONGO_URI`. Local development has
+Copy `.env.example` to `.env` and configure `MONGO_URI`. Production deployments,
+including the packaged Windows runtime, require MongoDB Atlas or a
+transaction-capable replica set. Readiness fails with
+`MONGO_TRANSACTIONS_REQUIRED` when the configured deployment cannot atomically
+commit project changes and their audit events. Local development has
 an intentional fallback account when auth variables are omitted:
 
 ```text
@@ -201,7 +205,8 @@ generates a 32-byte connector master key with the Windows cryptographic RNG. An
 existing database requires the original master key (64-character hex or
 32-byte base64); creating a replacement key would make its encrypted Data
 Source and Chart credentials unreadable. The page also asks for the MongoDB
-URI, initial administrator email, a password of at least ten characters, and
+Atlas or transaction-capable replica-set URI, initial administrator email, a
+password of at least ten characters, and
 connector/archive hostname allowlists. It writes
 `C:\ProgramData\SCAMATIC\runtime.env`, and restricts the file to Local System,
 machine administrators, and read-only access for the dedicated
@@ -420,7 +425,11 @@ datasource connections:
 
 Missing or invalid legacy values resolve to `smart`. Every change requires
 `workspace.manage`, is recorded as `project.runtime-worker-mode.updated`, and
-does not alter immutable published versions. Isaac enablement is independent
+is committed in the same MongoDB transaction as its audit event. Production
+therefore requires MongoDB Atlas or a transaction-capable replica set; startup
+and readiness report `MONGO_TRANSACTIONS_REQUIRED` before an administrator can
+encounter a generic save failure. The change does not alter immutable published
+versions. Isaac enablement is independent
 and remains disabled by the packaged service configuration.
 
 ### Runtime engine preference

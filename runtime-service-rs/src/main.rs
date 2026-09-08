@@ -65,6 +65,13 @@ mod windows_host {
     const MAX_READINESS_TIMEOUT_SECONDS: u64 = 300;
     static CONSOLE_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum ReadinessProbeState {
+        Ready,
+        TransactionsRequired,
+        NotReady,
+    }
+
     define_windows_service!(ffi_service_main, service_main);
 
     type DynError = Box<dyn Error + Send + Sync>;
@@ -488,7 +495,7 @@ mod windows_host {
         loop {
             let state = query_service_state()?;
             let last_failure = match (state, readiness_probe(address)) {
-                (ServiceState::Running, Ok(true)) => {
+                (ServiceState::Running, Ok(ReadinessProbeState::Ready)) => {
                     println!(
                         "SCAMATIC data-plane is ready at http://{READINESS_ADDRESS}{READINESS_PATH}"
                     );
@@ -497,10 +504,13 @@ mod windows_host {
                 (ServiceState::Stopped, _) => {
                     return Err("SCAMATIC Windows Service stopped before becoming ready; check for a port 3001 conflict and inspect runtime.log".into());
                 }
-                (_, Ok(true)) => {
+                (_, Ok(ReadinessProbeState::TransactionsRequired)) => {
+                    return Err("MONGO_TRANSACTIONS_REQUIRED: configure MongoDB Atlas or a transaction-capable replica set, then restart the SCAMATIC service".into());
+                }
+                (_, Ok(ReadinessProbeState::Ready)) => {
                     format!("readiness endpoint responded, but Windows Service is {state:?}")
                 }
-                (_, Ok(false)) => format!(
+                (_, Ok(ReadinessProbeState::NotReady)) => format!(
                     "Windows Service is {state:?}; readiness endpoint returned a non-200 status"
                 ),
                 (_, Err(error)) => format!("Windows Service is {state:?}; {error}"),
@@ -591,8 +601,9 @@ mod windows_host {
         }
     }
 
-    fn readiness_probe(address: SocketAddr) -> Result<bool, DynError> {
-        http_json_probe(address, READINESS_PATH, br#""status":"ready""#)
+    fn readiness_probe(address: SocketAddr) -> Result<ReadinessProbeState, DynError> {
+        let response = http_json_response(address, READINESS_PATH)?;
+        Ok(classify_readiness_response(&response))
     }
 
     fn compatibility_probe(address: SocketAddr) -> Result<bool, DynError> {
@@ -608,6 +619,11 @@ mod windows_host {
         path: &str,
         expected_marker: &[u8],
     ) -> Result<bool, DynError> {
+        let response = http_json_response(address, path)?;
+        Ok(response_reports_success(&response, expected_marker))
+    }
+
+    fn http_json_response(address: SocketAddr, path: &str) -> Result<Vec<u8>, DynError> {
         let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))?;
         stream.set_read_timeout(Some(Duration::from_secs(2)))?;
         stream.set_write_timeout(Some(Duration::from_secs(2)))?;
@@ -618,12 +634,22 @@ mod windows_host {
         stream.flush()?;
         let mut response = Vec::with_capacity(1024);
         stream.take(64 * 1024).read_to_end(&mut response)?;
-        Ok(response_reports_success(&response, expected_marker))
+        Ok(response)
+    }
+
+    fn classify_readiness_response(response: &[u8]) -> ReadinessProbeState {
+        if response_reports_success(response, br#""status":"ready""#) {
+            ReadinessProbeState::Ready
+        } else if contains_bytes(response, br#""code":"MONGO_TRANSACTIONS_REQUIRED""#) {
+            ReadinessProbeState::TransactionsRequired
+        } else {
+            ReadinessProbeState::NotReady
+        }
     }
 
     #[cfg(test)]
     fn response_reports_ready(response: &[u8]) -> bool {
-        response_reports_success(response, br#""status":"ready""#)
+        classify_readiness_response(response) == ReadinessProbeState::Ready
     }
 
     fn response_reports_success(response: &[u8], expected_marker: &[u8]) -> bool {
@@ -1200,6 +1226,22 @@ mod windows_host {
                 b"HTTP/1.1 200 OK\r\n\r\n{\"ok\":true,\"status\":\"starting\"}"
             ));
             assert!(!response_reports_ready(b"not-http"));
+        }
+
+        #[test]
+        fn readiness_parser_identifies_a_transaction_capability_failure() {
+            assert_eq!(
+                classify_readiness_response(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\n\r\n{\"ok\":false,\"status\":\"not-ready\",\"code\":\"MONGO_TRANSACTIONS_REQUIRED\"}"
+                ),
+                ReadinessProbeState::TransactionsRequired
+            );
+            assert_eq!(
+                classify_readiness_response(
+                    b"HTTP/1.1 503 Service Unavailable\r\n\r\n{\"ok\":false,\"code\":\"DATABASE_UNAVAILABLE\"}"
+                ),
+                ReadinessProbeState::NotReady
+            );
         }
 
         #[test]

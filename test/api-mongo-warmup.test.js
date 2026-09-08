@@ -51,6 +51,25 @@ test('API MongoDB warm-up fails fast for a configuration error', async () => {
   assert.equal(states.at(-1).phase, 'failed')
 })
 
+test('API MongoDB warm-up validates transaction capability before reporting ready', async () => {
+  const states = []
+  const connection = { ready: true }
+  let validated = null
+  await assert.rejects(() => warmApiMongo({
+    connect: async () => connection,
+    validate: async value => {
+      validated = value
+      throw Object.assign(new Error('replica set required'), { code: 'MONGO_TRANSACTIONS_REQUIRED' })
+    },
+    shouldRetry: () => false,
+    onState: state => states.push(state),
+  }), error => error.code === 'MONGO_TRANSACTIONS_REQUIRED')
+
+  assert.equal(validated, connection)
+  assert.deepEqual(states.map(state => state.phase), ['connecting-mongodb', 'failed'])
+  assert.equal(states.at(-1).errorCode, 'MONGO_TRANSACTIONS_REQUIRED')
+})
+
 test('API MongoDB warm-up configuration is bounded and defaults to infinite retry', () => {
   assert.deepEqual(apiMongoWarmupConfig({}), {
     maxAttempts: 0,

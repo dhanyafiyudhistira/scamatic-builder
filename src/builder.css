@@ -4865,6 +4865,11 @@ body.sb-is-resizing-sidebar * {
   box-shadow: 0 14px 35px #000c, inset 0 1px 0 #ffffff12;
 }
 
+.sb-info-surface:focus-visible {
+  outline: 2px solid var(--sb-accent);
+  outline-offset: 2px;
+}
+
 .sb-info-intro {
   margin: 0;
   font-size: 10px;

@@ -295,6 +295,7 @@ export default async function handler(req, res, { onRuntimeWorkerModeChanged = (
     return res.status(405).json({ error: `Method ${req.method} not allowed` })
   } catch (error) {
     if (error?.code === 11000) return res.status(409).json({ error: 'Project slug already exists in this workspace.' })
+    if (error?.code === 'MONGO_TRANSACTIONS_REQUIRED') return res.status(503).json({ error: error.message, code: error.code })
     return res.status(500).json({ error: 'Unable to process project request.' })
   }
 }

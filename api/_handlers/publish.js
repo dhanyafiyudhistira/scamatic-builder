@@ -8,6 +8,7 @@ import { hasBlockingIssues, migrateProjectSchema, validateProjectSchema } from '
 import { runtimeProfile } from '../../shared/runtime-profile.js'
 import { connectorEnvironmentReadiness, connectorExecutionMode } from '../_lib/connector-execution.js'
 import { DESIGN_IMAGE_TYPE, referencedDesignAssetIds } from '../_lib/design-assets.js'
+import { projectRequiresSchematicAsset } from '../../shared/project-type.js'
 
 export default async function handler(req, res) {
   const principal = await requirePrincipal(req, res)
@@ -41,12 +42,14 @@ export default async function handler(req, res) {
     if (!draft) return res.status(404).json({ error: 'Project draft not found.' })
     if (draft.revision !== Number(expectedDraftRevision)) return res.status(409).json({ error: 'Draft changed before publish. Validate the latest revision.', code: 'DRAFT_CONFLICT', currentRevision: draft.revision })
     const migratedDraft = migrateProjectSchema(draft.schema)
-    const issues = validateProjectSchema(migratedDraft, { requireAsset: true })
+    const requiresSchematicAsset = projectRequiresSchematicAsset(migratedDraft)
+    const issues = validateProjectSchema(migratedDraft, { requireAsset: requiresSchematicAsset })
     if (hasBlockingIssues(issues)) return res.status(422).json({ error: 'Publish validation failed.', issues })
     const connectorIssues = await validateConnectorReadiness(migratedDraft, project, principal.workspaceId)
     if (connectorIssues.length) return res.status(422).json({ error: 'Connector readiness validation failed.', code: 'CONNECTOR_NOT_READY', issues: connectorIssues })
-    const asset = await ScadaAsset.findOne({ _id: migratedDraft.project.svgAssetId, projectId }).lean()
-    if (!asset) return res.status(422).json({
+    const assetId = migratedDraft.project.svgAssetId || null
+    const asset = assetId ? await ScadaAsset.findOne({ _id: assetId, projectId }).lean() : null
+    if ((requiresSchematicAsset || assetId) && !asset) return res.status(422).json({
       error: 'Sanitized SVG asset is missing.',
       issues: [...issues, { severity: 'error', code: 'asset.notFound', message: 'The selected sanitized SVG asset no longer exists in project storage.', path: 'project.svgAssetId' }],
     })
@@ -84,8 +87,8 @@ export default async function handler(req, res) {
         idempotencyKey,
         message: String(message).trim().slice(0, 200),
         draftRevision: currentDraft.revision,
-        assetId: asset._id,
-        assetChecksum: asset.checksum,
+        assetId: asset?._id || null,
+        assetChecksum: asset?.checksum || null,
         environmentRef: publishedEnvironmentRef(snapshot),
         createdBy: principal.id,
       }], options)

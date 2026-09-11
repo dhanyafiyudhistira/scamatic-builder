@@ -1,6 +1,7 @@
 import { fork } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { isRuntimeIpcMessage, runtimeControlMessage, RUNTIME_CONTROL_TYPES, RUNTIME_IPC_TYPES } from './runtime-ipc.js'
+import { normalizeCommandWakeId } from './command-wake.js'
 
 const DEFAULT_ENTRYPOINT = fileURLToPath(new URL('../connector-worker.js', import.meta.url))
 
@@ -67,19 +68,20 @@ export class ManagedConnectorWorker {
     }
   }
 
-  requestCommandPoll() {
-    return this.#sendControl(RUNTIME_CONTROL_TYPES.commandWake)
+  requestCommandPoll(commandId = null) {
+    const normalized = normalizeCommandWakeId(commandId)
+    return this.#sendControl(RUNTIME_CONTROL_TYPES.commandWake, normalized ? { commandId: normalized } : {})
   }
 
   requestReload() {
     return this.#sendControl(RUNTIME_CONTROL_TYPES.workerReload)
   }
 
-  #sendControl(type) {
+  #sendControl(type, payload = {}) {
     const child = this.child
     if (this.stopping || !child || child.connected === false || typeof child.send !== 'function') return false
     try {
-      return child.send(runtimeControlMessage(type), () => {}) !== false
+      return child.send(runtimeControlMessage(type, payload), () => {}) !== false
     } catch {
       // The durable polling path remains authoritative if IPC is unavailable.
       return false

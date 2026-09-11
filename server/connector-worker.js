@@ -25,6 +25,7 @@ import { createCommandVersionCache } from './connectors/command-version-cache.js
 import { createRpcPerformanceTracker } from './connectors/rpc-performance.js'
 import { shouldRunProjectWorker } from '../shared/runtime-worker-mode.js'
 import { createTrailingTaskRunner } from './connectors/trailing-task-runner.js'
+import { buildCommandCandidateFilter, createCommandWakeBuffer } from './connectors/command-wake.js'
 
 if (process.env.CONNECTOR_PLATFORM_ENABLED !== 'true') {
   console.error('[ConnectorWorker] CONNECTOR_PLATFORM_ENABLED is not true; refusing to start.')
@@ -48,9 +49,13 @@ async function main() {
   const rpcPerformance = createRpcPerformanceTracker({
     maxSamples: process.env.CONNECTOR_RPC_METRICS_CAPACITY,
   })
+  const commandWakeBuffer = createCommandWakeBuffer({
+    maxPending: process.env.CONNECTOR_COMMAND_MAX_PENDING,
+  })
   let commandQueue = null
   const healthProvider = kind => workerHealth(kind, startup, startedAt, environmentRef, {
     queue: commandQueue?.snapshot() || null,
+    targetedWake: commandWakeBuffer.snapshot(),
     publishedVersionCache: commandVersionCache.snapshot(),
     performance: rpcPerformance.snapshot(),
   })
@@ -327,7 +332,7 @@ async function main() {
   const reloadTimer = setInterval(() => requestReload().catch(error => console.error('[ConnectorWorker] reload failed', error.message)), 10_000)
   let lastCommandPollErrorAt = 0
   const commandPoller = createWakeablePoller({
-    poll: () => dispatchCommands(runtimes, hub, commandHealthWriter, terminalAuditRecovery, commandQueue, commandVersionCache, rpcPerformance),
+    poll: () => dispatchCommands(runtimes, hub, commandHealthWriter, terminalAuditRecovery, commandQueue, commandVersionCache, rpcPerformance, commandWakeBuffer),
     intervalMs: boundedInteger(process.env.CONNECTOR_COMMAND_POLL_MS, 50, 5_000, 250),
     onError: error => {
       const now = Date.now()
@@ -337,7 +342,10 @@ async function main() {
     },
   })
   const onControlMessage = message => routeRuntimeControlMessage(message, {
-    onCommandWake: () => commandPoller.request(),
+    onCommandWake: commandId => {
+      if (commandId) commandWakeBuffer.push(commandId)
+      commandPoller.request()
+    },
     onWorkerReload: () => requestReload().catch(error => console.error('[ConnectorWorker] reload failed', error.message)),
   })
   if (ipcTransport) process.on('message', onControlMessage)
@@ -454,13 +462,14 @@ function nonNegativeInteger(value, fallback) {
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback
 }
 
-async function dispatchCommands(runtimes, hub, commandHealthWriter, terminalAuditRecovery, commandQueue, commandVersionCache, rpcPerformance) {
+async function dispatchCommands(runtimes, hub, commandHealthWriter, terminalAuditRecovery, commandQueue, commandVersionCache, rpcPerformance, commandWakeBuffer = null) {
   const pendingIds = commandQueue.pendingIds()
-  const filter = { status: 'authorized', executionMode: 'worker' }
-  if (pendingIds.length) filter._id = { $nin: pendingIds }
   const queueStats = commandQueue.snapshot()
   const available = Math.min(20, Math.max(0, queueStats.capacity - queueStats.pending))
   if (!available) return 0
+  const targetedIds = commandWakeBuffer?.take(available) || []
+  const filter = buildCommandCandidateFilter({ pendingIds, targetedIds })
+  if (!filter) return 0
   const candidates = await CommandEvent.find(filter).sort({ createdAt: 1 }).limit(available).lean()
   const versionIds = [...new Set(candidates.map(candidate => candidate.versionId).filter(Boolean))]
   const versionsById = await commandVersionCache.load(

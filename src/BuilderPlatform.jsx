@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiRequest, logout } from './platform/api'
 import { RuntimeCanvas } from './platform/RuntimeCanvas'
-import { ThemeToneToggle, useThemeTone } from './platform/ThemeTone'
+import { ThemeToneToggle } from './platform/ThemeTone'
 import { BoardToneToggle, useBoardTone } from './platform/BoardTone'
 import { useEditorHistory } from './platform/useEditorHistory'
 import { ComponentInspector, ComponentLibrary, LayersPanel, MockControls, TagManager } from './platform/BuilderPanels'
@@ -29,6 +29,8 @@ import { ValidationConsole } from './platform/ValidationConsole.jsx'
 import { AuthScreen } from './platform/AuthScreen.jsx'
 import { openApplicationRoute, resolveDesignAsset, resolveDesignAssets } from './platform/desktop.js'
 import { InfoPopover, InfoPopoverIntro, InfoPopoverSection } from './platform/InfoPopover.jsx'
+import { IOT_DASHBOARD_PROJECT_TYPE, PROJECT_TYPES, isIotDashboardProject, projectRequiresSchematicAsset, projectTypeMetadata, projectTypeOf } from '../shared/project-type.js'
+import { DASHBOARD_BREAKPOINTS, dashboardBreakpointMetadata, responsivePositionPatch, resolveResponsiveDashboard } from '../shared/responsive-dashboard.js'
 
 const makeId = prefix => `${prefix}_${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`
 const recoveryKey = projectId => `scamatic.recovery.${projectId}`
@@ -89,7 +91,6 @@ export default function BuilderPlatform() {
   const [gridSize, setGridSize] = useState(20)
   const [zoom, setZoom] = useState(1)
   const [boardTone, setBoardTone] = useBoardTone()
-  const [themeTone, setThemeTone] = useThemeTone()
   const [autoSave, setAutoSave] = useState(true)
   const [commandMessage, setCommandMessage] = useState('')
   const [lastSavedAt, setLastSavedAt] = useState(null)
@@ -99,6 +100,7 @@ export default function BuilderPlatform() {
   const [validationConsoleOpen, setValidationConsoleOpen] = useState(false)
   const [validationConsoleMinimized, setValidationConsoleMinimized] = useState(false)
   const [validationConsoleSource, setValidationConsoleSource] = useState(null)
+  const [dashboardBreakpoint, setDashboardBreakpoint] = useState('desktop')
 
   useEffect(() => { draftRef.current = draft }, [draft])
   useEffect(() => { sidebarWidthsRef.current = sidebarWidths }, [sidebarWidths])
@@ -108,7 +110,10 @@ export default function BuilderPlatform() {
     const timer = window.setTimeout(() => setNotice(current => current === notice ? null : current), 2400)
     return () => window.clearTimeout(timer)
   }, [notice])
-  const issues = useMemo(() => draft ? validateProjectSchema(draft, { requireAsset: true }) : [], [draft])
+  const activeProjectType = projectTypeOf(draft)
+  const iotDashboard = isIotDashboardProject(draft)
+  const activeProjectTypeMetadata = projectTypeMetadata(draft)
+  const issues = useMemo(() => draft ? validateProjectSchema(draft, { requireAsset: projectRequiresSchematicAsset(draft) }) : [], [draft])
 
   const updateSidebarWidth = useCallback((side, width, persist = false) => {
     setSidebarWidths(previous => {
@@ -202,6 +207,7 @@ export default function BuilderPlatform() {
       setSvg(data.svg)
       setDesignAssets(await designAssetsPromise)
       setSelectedIds([])
+      setDashboardBreakpoint('desktop')
       setValidationConsoleOpen(false)
       setValidationConsoleSource(null)
       setDirty(recovered)
@@ -408,13 +414,20 @@ export default function BuilderPlatform() {
     if (selectedIds.length === 0) return
     changeDraft(previous => ({
       ...previous,
-      components: moveSelection(previous.components, selectedIds, dx, dy, previous.project.canvas),
+      components: isIotDashboardProject(previous) && dashboardBreakpoint !== 'desktop'
+        ? moveResponsiveSelection(previous, selectedIds, dx, dy, dashboardBreakpoint)
+        : moveSelection(previous.components, selectedIds, dx, dy, previous.project.canvas),
     }))
-  }, [changeDraft, selectedIds])
+  }, [changeDraft, dashboardBreakpoint, selectedIds])
   const arrangeSelected = useCallback(action => {
     if (selectedIds.length < 2) return
-    changeDraft(previous => ({ ...previous, components: arrangeSelection(previous.components, selectedIds, action) }))
-  }, [changeDraft, selectedIds])
+    changeDraft(previous => ({
+      ...previous,
+      components: isIotDashboardProject(previous) && dashboardBreakpoint !== 'desktop'
+        ? arrangeResponsiveSelection(previous, selectedIds, action, dashboardBreakpoint)
+        : arrangeSelection(previous.components, selectedIds, action),
+    }))
+  }, [changeDraft, dashboardBreakpoint, selectedIds])
 
   useEffect(() => {
     if (!draft || preview) return
@@ -490,7 +503,7 @@ export default function BuilderPlatform() {
   }, [autoSave, dirty, draft, currentProject, busy, saveDraft])
 
   const publish = async () => {
-    const preflightIssues = validateProjectSchema(draftRef.current, { requireAsset: true })
+    const preflightIssues = validateProjectSchema(draftRef.current, { requireAsset: projectRequiresSchematicAsset(draftRef.current) })
     if (hasBlockingIssues(preflightIssues)) {
       setNotice({ type: 'error', text: 'Publish validation failed. Review the Validation Console.', details: validationNoticeDetails(preflightIssues) })
       reviewValidation(null, 'Publish preflight')
@@ -576,7 +589,23 @@ export default function BuilderPlatform() {
     await logout().catch(() => { })
     setSession({ loading: false, user: null }); setCurrentProject(null); editor.replace(null)
   }
-  const closeProject = () => { setCurrentProject(null); editor.replace(null); setSelectedIds([]); setDesignAssets({}); setValidationConsoleOpen(false); setValidationConsoleSource(null) }
+  const closeProject = () => { setCurrentProject(null); editor.replace(null); setSelectedIds([]); setDesignAssets({}); setFlowImportOpen(false); setValidationConsoleOpen(false); setValidationConsoleSource(null); setDashboardBreakpoint('desktop') }
+
+  const resetDashboardBreakpoint = useCallback(() => {
+    if (!['tablet', 'mobile'].includes(dashboardBreakpoint)) return
+    changeDraft(previous => ({
+      ...previous,
+      components: previous.components.map(component => {
+        if (!component.responsivePositions?.[dashboardBreakpoint]) return component
+        const responsivePositions = { ...component.responsivePositions }
+        delete responsivePositions[dashboardBreakpoint]
+        const next = { ...component }
+        if (Object.keys(responsivePositions).length) next.responsivePositions = responsivePositions
+        else delete next.responsivePositions
+        return next
+      }),
+    }))
+  }, [changeDraft, dashboardBreakpoint])
   const handleWorkspaceSwitch = async workspaceId => {
     if (!workspaceId || workspaceId === session.user?.workspaceId) return
     setBusy(true)
@@ -620,15 +649,28 @@ export default function BuilderPlatform() {
 
   if (preview) {
     const previewProfile = runtimeProfileMetadata(draft)
-    return <div className="sb-preview-page"><div className="sb-runtime-toolbar"><div><strong>Draft Preview</strong><span>{previewProfile.label} · revision {revision}</span></div><div className="sb-runtime-toolbar-actions"><BoardToneToggle value={boardTone} onChange={setBoardTone} /><ThemeToneToggle /><button type="button" onClick={() => setPreview(false)}>Back to builder</button></div></div><RuntimeProfileBanner profile={previewProfile} preview /><RuntimeCanvas schema={draft} svg={svg} designAssets={designAssets} values={mockValues} boardTone={boardTone} actorRole={session.user.role} onCommand={previewProfile.commandEnabled ? runMockCommand : undefined} commandConnectionAvailable={previewProfile.commandEnabled} /><MockControls tags={draft.tags} values={mockValues} onChange={setMockValues} message={commandMessage} /></div>
+    return <div className={`sb-preview-page mode-${activeProjectType}`}><div className="sb-runtime-toolbar"><div><strong>{activeProjectTypeMetadata.builderLabel} Preview</strong><span>{previewProfile.label} · revision {revision}</span></div><div className="sb-runtime-toolbar-actions"><BoardToneToggle value={boardTone} onChange={setBoardTone} /><button type="button" onClick={() => setPreview(false)}>Back to builder</button></div></div><RuntimeProfileBanner profile={previewProfile} preview /><RuntimeCanvas schema={draft} svg={svg} designAssets={designAssets} values={mockValues} boardTone={boardTone} actorRole={session.user.role} onCommand={previewProfile.commandEnabled ? runMockCommand : undefined} commandConnectionAvailable={previewProfile.commandEnabled} /><MockControls tags={draft.tags} values={mockValues} onChange={setMockValues} message={commandMessage} /></div>
   }
 
   const selected = selectedIds.length === 1 ? draft.components.find(component => component.id === selectedIds[0]) : null
+  const currentDashboardLayout = iotDashboard ? resolveResponsiveDashboard(draft, dashboardBreakpoint) : null
+  const inspectedSelected = selected && currentDashboardLayout && dashboardBreakpoint !== 'desktop'
+    ? { ...selected, position: currentDashboardLayout.positions.get(selected.id) || selected.position }
+    : selected
+  const updateInspectedSelected = patch => {
+    if (!selected) return
+    if (iotDashboard && dashboardBreakpoint !== 'desktop' && patch.position) {
+      const { position, ...rest } = patch
+      updateComponent(selected.id, { ...rest, ...responsivePositionPatch(selected, dashboardBreakpoint, position) })
+      return
+    }
+    updateComponent(selected.id, patch)
+  }
   const profile = runtimeProfileMetadata(draft)
   const engine = runtimeEngineMetadata(currentProject)
 
   return (
-    <div className="sb-app">
+    <div className={`sb-app mode-${activeProjectType}`}>
       <header className="sb-topbar">
         <nav className="sb-header-menus" aria-label="Builder navigation and menus">
           <button type="button" className="sb-brand" onClick={closeProject} aria-label="Kembali ke daftar proyek" title="Kembali ke daftar proyek">
@@ -651,6 +693,7 @@ export default function BuilderPlatform() {
             canPublish={session.user.capabilities?.includes('project.publish')}
             onPublish={publish}
             runtimeHref={currentProject.activeVersionId ? `/runtime/${currentProject.slug}` : null}
+            nodeRedFlowEnabled={!iotDashboard}
           />
           <EditMenu
             canUndo={editor.canUndo}
@@ -664,8 +707,6 @@ export default function BuilderPlatform() {
           />
           <ViewMenu
             canvas={draft.project.canvas}
-            themeTone={themeTone}
-            onThemeToneChange={setThemeTone}
             boardTone={boardTone}
             onBoardToneChange={setBoardTone}
             gridSize={gridSize}
@@ -682,7 +723,7 @@ export default function BuilderPlatform() {
             onZoomChange={setZoom}
           />
         </nav>
-        <div className="sb-project-title"><strong>{currentProject.name}</strong><span>/{currentProject.slug}</span></div>
+        <div className="sb-project-title"><strong>{currentProject.name}</strong><span>/{currentProject.slug}</span><i className="sb-project-mode-chip">{activeProjectTypeMetadata.label}</i></div>
       </header>
       {notice && <div className={`sb-builder-notice ${notice.type} ${notice.details?.length ? 'has-details' : ''}`} role="status" aria-live={notice.type === 'error' ? 'assertive' : 'polite'}>
         <span>{notice.text}</span>
@@ -698,16 +739,16 @@ export default function BuilderPlatform() {
       >
         <aside className="sb-sidebar left">
           <Panel title="Components" description={`${componentTypeCount} component types · Controls and indicators`} collapsible expandable defaultOpen={false} storageKey={`scamatic.panel.components.${currentProject.id}`}><ComponentLibrary onAdd={addComponent} /></Panel>
-          <Panel title="Schematic Assets" description={`${Object.keys(designAssets).length} custom images · PNG, JPG, or SVG`}>
+          <Panel title={iotDashboard ? 'Dashboard Assets' : 'Schematic Assets'} description={`${Object.keys(designAssets).length} custom images · PNG, JPG, or SVG`}>
             <div className="sb-schematic-assets">
-              <span className="sb-asset-section-label">Base schematic</span>
-              <SvgUploader projectId={currentProject.id} beforeUpload={() => dirty ? saveDraft() : revision} onUploaded={({ svg: nextSvg, assetId, revision: nextRevision }) => { setSvg(nextSvg); setRevision(nextRevision); editor.mutate(previous => ({ ...previous, project: { ...previous.project, svgAssetId: assetId } })); setDirty(false); setNotice({ type: 'success', text: 'SVG sanitized and stored.' }) }} onError={text => setNotice({ type: 'error', text })} />
+              {!iotDashboard && <><span className="sb-asset-section-label">Base schematic</span>
+                <SvgUploader projectId={currentProject.id} beforeUpload={() => dirty ? saveDraft() : revision} onUploaded={({ svg: nextSvg, assetId, revision: nextRevision }) => { setSvg(nextSvg); setRevision(nextRevision); editor.mutate(previous => ({ ...previous, project: { ...previous.project, svgAssetId: assetId } })); setDirty(false); setNotice({ type: 'success', text: 'SVG sanitized and stored.' }) }} onError={text => setNotice({ type: 'error', text })} /></>}
               <span className="sb-asset-section-label">Design elements</span>
               <DesignElementUploader projectId={currentProject.id} onUploaded={addDesignElement} onError={text => setNotice({ type: 'error', text })} />
-              <small>Upload here or drop a file directly onto the board. Each image becomes a movable, resizable layer.</small>
+              <small>{iotDashboard ? 'Optional dashboard media can be uploaded or dropped directly onto the board. No base schematic is required.' : 'Upload here or drop a file directly onto the board. Each image becomes a movable, resizable layer.'}</small>
             </div>
           </Panel>
-          <Panel title="Data sources" description={`${draft.dataSources.length} sources · Connectors and configuration`} collapsible defaultOpen={false} storageKey={`scamatic.panel.sources.${currentProject.id}`}><ConnectorManager projectId={currentProject.id} schema={draft} onSchemaChange={changeDraft} canConfigure={session.user.capabilities?.includes('source.configure')} canRotateSecret={session.user.capabilities?.includes('secret.rotate')} draftDirty={dirty} onNotice={setNotice} /></Panel>
+          <Panel title={iotDashboard ? 'ThingsBoard data' : 'Data sources'} description={iotDashboard ? `${draft.dataSources.length} sources · Direct runtime connection` : `${draft.dataSources.length} sources · Connectors and configuration`} collapsible defaultOpen={false} storageKey={`scamatic.panel.sources.${currentProject.id}`}><ConnectorManager projectId={currentProject.id} schema={draft} onSchemaChange={changeDraft} canConfigure={session.user.capabilities?.includes('source.configure')} canRotateSecret={session.user.capabilities?.includes('secret.rotate')} draftDirty={dirty} directThingsBoard={iotDashboard} onNotice={setNotice} /></Panel>
           {session.user.capabilities?.includes('chart-storage.manage') && <Panel title="Chart storage" description="Isolated MongoDB · Encrypted workspace configuration" collapsible defaultOpen={false} storageKey={`scamatic.panel.chart-storage.${session.user.workspaceId}`}><ChartStorageManager onNotice={setNotice} /></Panel>}
           <Panel title="Tags & simulation" description={`${draft.tags.length} tags · ${profile.label} · Bindings and simulation`} collapsible defaultOpen={false} storageKey={`scamatic.panel.tags.${currentProject.id}`}>
             <div className="sb-tags-simulation-layout">
@@ -732,14 +773,15 @@ export default function BuilderPlatform() {
         />
 
         <main className="sb-workspace">
-          <RuntimeCanvas schema={draft} svg={svg} designAssets={designAssets} values={mockValues} selectedIds={selectedIds} editable boardTone={boardTone} zoom={zoom} gridSize={gridSize} snapToGrid={snapToGrid} showGrid={showGrid} showRulers={showRulers} smartGuides={smartGuides} onSelect={selectComponent} onChange={updateComponent} onTransformStart={editor.beginTransaction} onTransformEnd={finishComponentTransform} onDesignFileDrop={dropDesignElement} />
+          {iotDashboard && <DashboardBreakpointToolbar value={dashboardBreakpoint} schema={draft} onChange={setDashboardBreakpoint} onReset={resetDashboardBreakpoint} />}
+          <RuntimeCanvas schema={draft} svg={svg} designAssets={designAssets} values={mockValues} selectedIds={selectedIds} editable boardTone={boardTone} zoom={zoom} gridSize={gridSize} snapToGrid={snapToGrid} showGrid={showGrid} showRulers={showRulers} smartGuides={smartGuides} responsiveBreakpoint={iotDashboard ? dashboardBreakpoint : 'auto'} onSelect={selectComponent} onChange={updateComponent} onTransformStart={editor.beginTransaction} onTransformEnd={finishComponentTransform} onDesignFileDrop={!iotDashboard || dashboardBreakpoint === 'desktop' ? dropDesignElement : undefined} />
         </main>
 
         <aside className="sb-sidebar right">
           <Panel title={selectedIds.length > 1 ? `${selectedIds.length} components selected` : 'Properties'}>
-            {selected ? <ComponentInspector component={selected} components={draft.components} tags={draft.tags} onChange={patch => updateComponent(selected.id, patch)} onDelete={deleteSelected} onDuplicate={duplicateSelected} onAddPopupChild={addExistingPopupControl} onCreatePopupChild={createPopupControl} onDetachPopupChild={detachPopupControl} onReorderPopupChild={movePopupControl} onSelectChild={childId => selectComponent(childId)} /> : selectedIds.length > 1 ? <MultiSelectionActions count={selectedIds.length} onArrange={arrangeSelected} onDuplicate={duplicateSelected} onDelete={deleteSelected} onLock={() => batchPatch(selectedIds, { locked: true }, changeDraft)} onHide={() => batchPatch(selectedIds, { visible: false }, changeDraft)} /> : <p className="sb-muted">Select a component on the canvas or Layers panel.</p>}
+            {inspectedSelected ? <ComponentInspector component={inspectedSelected} components={draft.components} tags={draft.tags} directThingsBoard={iotDashboard} onChange={updateInspectedSelected} onDelete={deleteSelected} onDuplicate={duplicateSelected} onAddPopupChild={addExistingPopupControl} onCreatePopupChild={createPopupControl} onDetachPopupChild={detachPopupControl} onReorderPopupChild={movePopupControl} onSelectChild={childId => selectComponent(childId)} /> : selectedIds.length > 1 ? <MultiSelectionActions count={selectedIds.length} onArrange={arrangeSelected} onDuplicate={duplicateSelected} onDelete={deleteSelected} onLock={() => batchPatch(selectedIds, { locked: true }, changeDraft)} onHide={() => batchPatch(selectedIds, { visible: false }, changeDraft)} /> : <p className="sb-muted">Select a component on the canvas or Layers panel.</p>}
           </Panel>
-          <Panel title="Project schema"><dl className="sb-metadata"><div><dt>Version</dt><dd>{draft.schemaVersion}</dd></div><div><dt>Profile</dt><dd>{profile.label}</dd></div><div><dt>Engine</dt><dd>{engine.label}</dd></div><div><dt>Components</dt><dd>{draft.components.length}</dd></div><div><dt>Tags</dt><dd>{draft.tags.length}</dd></div><div><dt>Asset</dt><dd>{draft.project.svgAssetId ? 'Sanitized' : 'Missing'}</dd></div><div><dt>History</dt><dd>{editor.canUndo ? 'Available' : 'Clean'}</dd></div></dl></Panel>
+          <Panel title="Project schema"><dl className="sb-metadata"><div><dt>Version</dt><dd>{draft.schemaVersion}</dd></div><div><dt>Builder</dt><dd>{activeProjectTypeMetadata.label}</dd></div><div><dt>Profile</dt><dd>{profile.label}</dd></div><div><dt>Engine</dt><dd>{engine.label}</dd></div><div><dt>Components</dt><dd>{draft.components.length}</dd></div><div><dt>Tags</dt><dd>{draft.tags.length}</dd></div><div><dt>Asset</dt><dd>{draft.project.svgAssetId ? 'Sanitized' : iotDashboard ? 'Optional' : 'Missing'}</dd></div><div><dt>History</dt><dd>{editor.canUndo ? 'Available' : 'Clean'}</dd></div></dl></Panel>
           <Panel title="Runtime engine" description={`${engine.label} · Operational preference`} collapsible defaultOpen={false} storageKey={`scamatic.panel.runtime-engine.${currentProject.id}`}>
             <RuntimeEngineSelector value={engine.id} onChange={changeRuntimeEngine} disabled={busy || !session.user.capabilities?.includes('project.manage')} />
           </Panel>
@@ -760,7 +802,7 @@ export default function BuilderPlatform() {
           onKeyDown={event => resizeSidebarByKeyboard('right', event)}
         />
       </div>
-      {flowImportOpen && <FlowImportModal schema={draft} onClose={() => setFlowImportOpen(false)} onApply={plan => {
+      {!iotDashboard && flowImportOpen && <FlowImportModal schema={draft} onClose={() => setFlowImportOpen(false)} onApply={plan => {
         changeDraft(previous => applyNodeRedImportPlan(previous, plan))
         setMockValues(previous => ({ ...previous, ...Object.fromEntries(plan.tags.map(tag => [tag.id, initialMockValue(tag)])) }))
         setFlowImportOpen(false)
@@ -784,7 +826,72 @@ export default function BuilderPlatform() {
   )
 }
 
-function FileMenu({ autoSave, onAutoSaveChange, dirty, revision, lastSavedAt, busy, onSave, onPreview, canImportFlow, onImportFlow, exportFlowDisabled, onExportFlow, canPublish, onPublish, runtimeHref }) {
+function DashboardBreakpointToolbar({ value, schema, onChange, onReset }) {
+  const [open, setOpen] = useState(false)
+  const menuRef = useRef(null)
+  const metadata = dashboardBreakpointMetadata(value)
+  const configuration = schema.project.dashboardLayout?.breakpoints?.[value] || metadata
+  const overrideCount = value === 'desktop' ? 0 : schema.components.filter(component => component.responsivePositions?.[value]).length
+
+  useEffect(() => {
+    if (!open) return
+    const close = event => {
+      if (event.type === 'keydown' && event.key !== 'Escape') return
+      if (event.type === 'pointerdown' && menuRef.current?.contains(event.target)) return
+      setOpen(false)
+    }
+    document.addEventListener('pointerdown', close)
+    document.addEventListener('keydown', close)
+    return () => {
+      document.removeEventListener('pointerdown', close)
+      document.removeEventListener('keydown', close)
+    }
+  }, [open])
+
+  return <div className="sb-dashboard-breakpoint-toolbar" aria-label="Dashboard responsive breakpoint">
+    <div className={`sb-view-menu sb-dashboard-preference-menu ${open ? 'is-open' : ''}`} ref={menuRef}>
+      <HeaderMenuTrigger label="Preference" open={open} onToggle={setOpen} />
+      {open && <div className="sb-view-menu-popover" role="menu" aria-label="Responsive dashboard preference">
+        <div className="sb-view-menu-summary"><span>Current layout</span><strong>{metadata.label}</strong></div>
+        <div className="sb-view-menu-divider" role="separator" />
+        {DASHBOARD_BREAKPOINTS.map(breakpoint => {
+          const item = dashboardBreakpointMetadata(breakpoint)
+          const width = schema.project.dashboardLayout?.breakpoints?.[breakpoint]?.width || item.width
+          return <button type="button" key={breakpoint} className={`sb-dashboard-breakpoint-option ${value === breakpoint ? 'is-active' : ''}`} role="menuitemradio" aria-checked={value === breakpoint} onClick={() => { onChange(breakpoint); setOpen(false) }}><span><strong>{item.label}</strong><small>{width}px canvas</small></span>{value === breakpoint && <img className="sb-check-icon" src="/check.svg" alt="" />}</button>
+        })}
+      </div>}
+    </div>
+    <InfoPopover className="sb-dashboard-breakpoint-info" label="Responsive dashboard information" title="Responsive dashboard information" align="end" surfaceRole="dialog" dismissOnAction>
+      <InfoPopoverIntro>{metadata.label} preference controls the canvas used for responsive editing and preview.</InfoPopoverIntro>
+      <InfoPopoverSection title="LAYOUT"><dl><div><dt>Canvas</dt><dd>{configuration.width} × {configuration.height}</dd></div><div><dt>Columns</dt><dd>{configuration.columns}</dd></div><div><dt>Grid</dt><dd>{metadata.gridSize}px</dd></div></dl></InfoPopoverSection>
+      <InfoPopoverSection title="OVERRIDES"><span>{value === 'desktop' ? 'Desktop is the canonical base layout.' : `${overrideCount} component override${overrideCount === 1 ? '' : 's'} on ${metadata.label}.`}</span>{value !== 'desktop' && <button type="button" onClick={onReset} disabled={!overrideCount}>Reset {metadata.label} overrides</button>}</InfoPopoverSection>
+    </InfoPopover>
+  </div>
+}
+
+function moveResponsiveSelection(schema, selectedIds, dx, dy, breakpoint) {
+  const layout = resolveResponsiveDashboard(schema, breakpoint)
+  const rendered = schema.components.map(component => ({ ...component, position: layout.positions.get(component.id) || component.position }))
+  const moved = moveSelection(rendered, selectedIds, dx, dy, layout.canvas)
+  const movedById = new Map(moved.map(component => [component.id, component.position]))
+  const selected = new Set(selectedIds)
+  return schema.components.map(component => selected.has(component.id)
+    ? { ...component, ...responsivePositionPatch(component, breakpoint, movedById.get(component.id) || component.position) }
+    : component)
+}
+
+function arrangeResponsiveSelection(schema, selectedIds, action, breakpoint) {
+  const layout = resolveResponsiveDashboard(schema, breakpoint)
+  const rendered = schema.components.map(component => ({ ...component, position: layout.positions.get(component.id) || component.position }))
+  const arranged = arrangeSelection(rendered, selectedIds, action)
+  const arrangedById = new Map(arranged.map(component => [component.id, component.position]))
+  const selected = new Set(selectedIds)
+  return schema.components.map(component => selected.has(component.id)
+    ? { ...component, ...responsivePositionPatch(component, breakpoint, arrangedById.get(component.id) || component.position) }
+    : component)
+}
+
+function FileMenu({ autoSave, onAutoSaveChange, dirty, revision, lastSavedAt, busy, onSave, onPreview, canImportFlow, onImportFlow, exportFlowDisabled, onExportFlow, canPublish, onPublish, runtimeHref, nodeRedFlowEnabled = true }) {
   const [open, setOpen] = useState(false)
   const [runtimePromptOpen, setRuntimePromptOpen] = useState(false)
   const rootRef = useRef(null)
@@ -842,9 +949,11 @@ function FileMenu({ autoSave, onAutoSaveChange, dirty, revision, lastSavedAt, bu
           </div>
           <ViewMenuItem label="Autosave" value={autoSave ? 'On' : 'Off'} checked={autoSave} onClick={() => act(() => onAutoSaveChange(value => !value))} />
           <div className="sb-view-menu-divider" role="separator" />
-          {canImportFlow && <ViewMenuItem label="Import flow JSON" disabled={busy} onClick={() => act(onImportFlow)} />}
-          <ViewMenuItem label="Export flow JSON" disabled={busy || exportFlowDisabled} onClick={() => act(onExportFlow)} />
-          <div className="sb-view-menu-divider" role="separator" />
+          {nodeRedFlowEnabled && <>
+            {canImportFlow && <ViewMenuItem label="Import Node-RED JSON" disabled={busy} onClick={() => act(onImportFlow)} />}
+            <ViewMenuItem label="Export Node-RED JSON" disabled={busy || exportFlowDisabled} onClick={() => act(onExportFlow)} />
+            <div className="sb-view-menu-divider" role="separator" />
+          </>}
           <ViewMenuItem label="Save" disabled={busy || !dirty} onClick={() => act(onSave)} />
           <ViewMenuItem label="Preview" onClick={() => act(onPreview)} />
           {canPublish && <ViewMenuItem label="Publish" disabled={busy} onClick={() => act(onPublish)} />}
@@ -918,8 +1027,6 @@ function EditMenu({ canUndo, canRedo, canCut, canDuplicate, onUndo, onRedo, onCu
 
 function ViewMenu({
   canvas,
-  themeTone,
-  onThemeToneChange,
   boardTone,
   onBoardToneChange,
   gridSize,
@@ -970,11 +1077,6 @@ function ViewMenu({
             <span>Canvas</span>
             <strong>{canvas.width} × {canvas.height}</strong>
           </div>
-          <ViewMenuItem
-            label="Theme tone"
-            value={themeTone === 'cyan' ? 'Cyan' : 'Grey'}
-            onClick={() => act(() => onThemeToneChange(themeTone === 'cyan' ? 'grey' : 'cyan'))}
-          />
           <ViewMenuItem
             label="Board appearance"
             value={boardTone === 'dark' ? 'Dark' : 'Light'}
@@ -1078,7 +1180,7 @@ function ProjectHome({ user, projects, busy, onOpen, onCreated, onProjectsChange
     ? <>No projects are assigned in <strong>{activeWorkspace?.name || 'this workspace'}</strong>. Choose the linked workspace above if needed; otherwise ask an administrator to confirm the project assignment.</>
     : user.workspaces?.length > 1
       ? <>No projects exist in <strong>{activeWorkspace?.name || 'the active workspace'}</strong>. Choose another workspace above to see its projects.</>
-      : 'No projects yet. Create the first builder project.'
+      : 'No projects yet. Create the first SCADA or IoT Dashboard project.'
 
   const runAction = async (project, action) => {
     let payload = { projectId: project.id, action }
@@ -1140,10 +1242,10 @@ function ProjectHome({ user, projects, busy, onOpen, onCreated, onProjectsChange
 
   return (
     <div className="sb-home">
-      <header className="sb-home-header"><div className="sb-home-brand"><img className="sb-home-brand-logo" src="/logo-sb.png" alt="" aria-hidden="true" /><div><span className="eyebrow">SCADA SCHEMATIC PLATFORM</span><h1>Scamatic<span>.Builder</span></h1></div></div><div className="sb-user-chip"><UserSettingsMenu user={user} onManageUsers={() => setShowMembers(true)} onRuntimeWorkerSetup={() => setShowRuntimeWorkerSetup(true)} onChangePassword={() => setShowPassword(true)} onSwitchWorkspace={onSwitchWorkspace} onLogout={onLogout} /></div></header>
+      <header className="sb-home-header"><div className="sb-home-brand"><img className="sb-home-brand-logo" src="/logo-sb.png" alt="" aria-hidden="true" /><div><span className="eyebrow">SCADA + IOT VISUAL PLATFORM</span><h1>Scamatic<span>.Builder</span></h1></div></div><div className="sb-user-chip"><UserSettingsMenu user={user} onManageUsers={() => setShowMembers(true)} onRuntimeWorkerSetup={() => setShowRuntimeWorkerSetup(true)} onChangePassword={() => setShowPassword(true)} onSwitchWorkspace={onSwitchWorkspace} onLogout={onLogout} /></div></header>
       <main>
         <div className="sb-home-lead">
-          <div><h2>{runtimeOnly ? 'Assigned runtimes' : 'Projects'}</h2><p>{runtimeOnly ? `Operator access in ${activeWorkspace?.name || 'the active workspace'}. Open a published project to start the runtime.` : 'Build schema-driven SCADA screens from sanitized SVG assets.'}</p></div>
+          <div><h2>{runtimeOnly ? 'Assigned runtimes' : 'Projects'}</h2><p>{runtimeOnly ? `Operator access in ${activeWorkspace?.name || 'the active workspace'}. Open a published project to start the runtime.` : 'Build industrial SCADA screens or direct ThingsBoard IoT dashboards on one shared runtime.'}</p></div>
           <div className="sb-home-actions">
             {user.workspaces?.length > 1 && <label className="sb-home-workspace-select"><span>Active workspace</span><select value={user.workspaceId} onChange={chooseWorkspace} disabled={busy || workspaceSwitching}>{user.workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.name} · {workspace.role}</option>)}</select></label>}
             {canManage && hiddenCount > 0 && <button type="button" className={showHidden ? 'is-active' : ''} onClick={() => setShowHidden(value => !value)}>{showHidden ? 'Hide hidden projects' : `Show hidden (${hiddenCount})`}</button>}
@@ -1337,10 +1439,13 @@ function ProjectCard({ project, runtimeOnly = false, disabled, canManage, canDel
     return () => { document.removeEventListener('pointerdown', close); document.removeEventListener('keydown', close) }
   }, [menuOpen])
   const act = action => { setMenuOpen(false); void onAction(project, action) }
+  const type = projectTypeOf(project)
+  const typeMetadata = projectTypeMetadata(type)
   return (
-    <article className={`sb-project-card ${project.hiddenAt ? 'is-hidden' : ''}`} ref={rootRef}>
+    <article className={`sb-project-card mode-${type} ${project.hiddenAt ? 'is-hidden' : ''}`} ref={rootRef}>
       <button type="button" className="sb-project-card-open" onClick={() => onOpen(project)} disabled={disabled || (runtimeOnly && !project.activeVersionId)}>
         <span className="sb-project-icon" aria-hidden="true"><img src="/logo-sb.png" alt="" /></span>
+        <span className="sb-project-type-badge">{typeMetadata.label}</span>
         <strong>{project.name}</strong>
         <code>/{project.slug}</code>
         <span>{project.canvas.width} × {project.canvas.height}</span>
@@ -1585,10 +1690,23 @@ function MemberAdminModal({ projects, onClose }) {
 }
 
 function CreateProjectModal({ onClose, onCreated }) {
-  const [form, setForm] = useState({ name: 'WTP Mixer', slug: 'wtp-mixer', description: '', width: 1920, height: 1080 }); const [error, setError] = useState(''); const [busy, setBusy] = useState(false)
+  const [form, setForm] = useState(() => starterProjectForm('scada')); const [error, setError] = useState(''); const [busy, setBusy] = useState(false)
   const submit = async event => { event.preventDefault(); setBusy(true); setError(''); try { const data = await apiRequest('/api/projects', { method: 'POST', body: JSON.stringify(form) }); await onCreated(data.project) } catch (requestError) { setError(requestError.message) } finally { setBusy(false) } }
   const set = (key, value) => setForm(previous => ({ ...previous, [key]: value }))
-  return <div className="sb-modal-backdrop" onMouseDown={onClose}><form className="sb-create-modal" onSubmit={submit} onMouseDown={event => event.stopPropagation()}><div><span className="eyebrow">NEW PROJECT</span><h2>Create SCADA project</h2></div><label>Name<input value={form.name} onChange={event => { set('name', event.target.value); set('slug', slugify(event.target.value)) }} /></label><label>Slug<input value={form.slug} onChange={event => set('slug', event.target.value)} /></label><label>Description<textarea value={form.description} onChange={event => set('description', event.target.value)} /></label><div className="sb-form-grid"><label>Canvas width<input type="number" value={form.width} onChange={event => set('width', Number(event.target.value))} /></label><label>Canvas height<input type="number" value={form.height} onChange={event => set('height', Number(event.target.value))} /></label></div>{error && <div className="sb-form-error">{error}</div>}<div className="sb-modal-actions"><button type="button" onClick={onClose}>Cancel</button><button type="submit" className="primary" disabled={busy}>{busy ? 'Creating…' : 'Create project'}</button></div></form></div>
+  const chooseType = projectType => setForm(previous => {
+    const next = starterProjectForm(projectType)
+    const untouchedStarter = ['WTP Mixer', 'Fleet Overview'].includes(previous.name)
+    return { ...previous, projectType, width: next.width, height: next.height, name: untouchedStarter ? next.name : previous.name, slug: untouchedStarter ? next.slug : previous.slug }
+  })
+  const typeMetadata = projectTypeMetadata(form.projectType)
+  return <div className="sb-modal-backdrop" onMouseDown={onClose}><form className={`sb-create-modal sb-project-create-modal mode-${form.projectType}`} onSubmit={submit} onMouseDown={event => event.stopPropagation()}><div><span className="eyebrow">NEW PROJECT</span><h2>Create {typeMetadata.label} project</h2><p>Both builders share the same secure runtime and component engine.</p></div><fieldset className="sb-project-type-picker"><legend>Builder type</legend>{PROJECT_TYPES.map(type => { const metadata = projectTypeMetadata(type); const selected = form.projectType === type; return <button key={type} type="button" className={selected ? 'is-selected' : ''} aria-pressed={selected} onClick={() => chooseType(type)}><span><strong>{metadata.builderLabel}</strong><small>{metadata.description}</small></span><i aria-hidden="true">{selected ? <img className="sb-check-icon" src="/check.svg" alt="" /> : ''}</i></button> })}</fieldset><label>Name<input value={form.name} onChange={event => { set('name', event.target.value); set('slug', slugify(event.target.value)) }} /></label><label>Slug<input value={form.slug} onChange={event => set('slug', event.target.value)} /></label><label>Description<textarea value={form.description} onChange={event => set('description', event.target.value)} /></label><div className="sb-form-grid"><label>Canvas width<input type="number" value={form.width} onChange={event => set('width', Number(event.target.value))} /></label><label>Canvas height<input type="number" value={form.height} onChange={event => set('height', Number(event.target.value))} /></label></div>{form.projectType === IOT_DASHBOARD_PROJECT_TYPE && <div className="sb-iot-create-note">Direct ThingsBoard mode · Node-RED tools stay disabled · base SVG is optional.</div>}{error && <div className="sb-form-error">{error}</div>}<div className="sb-modal-actions"><button type="button" onClick={onClose}>Cancel</button><button type="submit" className="primary" disabled={busy}>{busy ? 'Creating…' : `Create ${typeMetadata.label}`}</button></div></form></div>
+}
+
+function starterProjectForm(projectType) {
+  const metadata = projectTypeMetadata(projectType)
+  const iot = projectType === IOT_DASHBOARD_PROJECT_TYPE
+  const name = iot ? 'Fleet Overview' : 'WTP Mixer'
+  return { name, slug: slugify(name), description: '', projectType, width: metadata.canvas.width, height: metadata.canvas.height }
 }
 
 function ChangePasswordModal({ onClose, onChanged }) {

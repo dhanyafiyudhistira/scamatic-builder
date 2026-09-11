@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { connectMongo } from '../_lib/mongo.js'
+import { connectMongo, runMongoTransaction } from '../_lib/mongo.js'
 import { AuditEvent, CommandEvent, Connector, ConnectorEnvironment, Project, ProjectVersion, RuntimeSession, TagValueSnapshot } from '../_lib/models.js'
 import { requireCsrf, requirePrincipal } from '../_lib/auth.js'
 import { PERMISSIONS, requireProjectPermission, roleMeetsRequirement } from '../_lib/authorization.js'
@@ -184,27 +184,60 @@ export default async function handler(req, res, { onWorkerCommandAuthorized = nu
     return executeServerlessCommand({ event, evaluated, principal, res, version, component, connector, environment })
   }
   if (environment.health?.state !== 'online') return finishUnavailable(event, res, 'Connector is not online.', 'CONNECTOR_OFFLINE')
-  await persistWorkerCommandAuthorization({
-    event,
-    audit: () => auditCommandAuthorized({ principal, projectId, componentId, correlationId, requestId, tagId: tag.id, sourceId: source.id }),
-    onAuthorized: onWorkerCommandAuthorized,
-  })
-  return res.status(202).json(commandResponse(event.toObject(), false))
+  let authorizedEvent
+  try {
+    authorizedEvent = await persistWorkerCommandAuthorization({
+      event,
+      audit: session => auditCommandAuthorized({ principal, projectId, componentId, correlationId, requestId, tagId: tag.id, sourceId: source.id }, { session }),
+      onAuthorized: onWorkerCommandAuthorized,
+    })
+  } catch (error) {
+    if (error?.code === 'MONGO_TRANSACTIONS_REQUIRED') {
+      return res.status(503).json({ error: error.message, code: error.code, correlationId })
+    }
+    throw error
+  }
+  return res.status(202).json(commandResponse(authorizedEvent, false))
 }
 
-export async function persistWorkerCommandAuthorization({ event, audit, onAuthorized = null, now = () => new Date() } = {}) {
-  if (!event || typeof event.save !== 'function') throw new TypeError('A command event with save() is required.')
+export async function persistWorkerCommandAuthorization({
+  event,
+  audit,
+  onAuthorized = null,
+  now = () => new Date(),
+  transaction = runMongoTransaction,
+  authorize = authorizeWorkerCommand,
+} = {}) {
+  if (!event?._id) throw new TypeError('A persisted command event is required.')
   if (typeof audit !== 'function') throw new TypeError('An authorization audit callback is required.')
-  event.status = 'authorized'
-  event.authorizedAt = now()
-  await event.save()
-  await audit()
+  if (typeof transaction !== 'function' || typeof authorize !== 'function') throw new TypeError('Transactional command authorization is required.')
+  const authorizedAt = now()
+  let authorizedEvent = null
+  await transaction(async session => {
+    await audit(session)
+    authorizedEvent = await authorize(event, authorizedAt, session)
+    if (!authorizedEvent) {
+      throw Object.assign(new Error('Command authorization state changed before it could be committed.'), {
+        code: 'COMMAND_AUTHORIZATION_STATE_CONFLICT',
+        statusCode: 409,
+      })
+    }
+  })
   if (typeof onAuthorized === 'function') {
-    try { onAuthorized() } catch {
+    try { onAuthorized(authorizedEvent) } catch {
       // Worker wake-up is best-effort; the durable polling fallback remains active.
     }
   }
-  return event
+  return authorizedEvent
+}
+
+async function authorizeWorkerCommand(event, authorizedAt, session) {
+  const options = { new: true, ...(session ? { session } : {}) }
+  return CommandEvent.findOneAndUpdate(
+    { _id: event._id, status: 'requested', executionMode: 'worker' },
+    { $set: { status: 'authorized', authorizedAt } },
+    options,
+  ).lean()
 }
 
 async function commandStatus(req, res, principal) {
@@ -446,8 +479,9 @@ async function finishUnavailable(event, res, message, code) {
   return res.status(409).json(commandResponse(event.toObject(), false))
 }
 
-function auditCommandAuthorized({ principal, projectId, componentId, correlationId, requestId, tagId, sourceId }) {
-  return AuditEvent.create({ workspaceId: principal.workspaceId, projectId, actorId: principal.id, action: 'command.authorized', targetType: 'component', targetId: componentId, correlationId, metadata: { requestId, tagId, sourceId } })
+function auditCommandAuthorized({ principal, projectId, componentId, correlationId, requestId, tagId, sourceId }, { session = null } = {}) {
+  const event = new AuditEvent({ workspaceId: principal.workspaceId, projectId, actorId: principal.id, action: 'command.authorized', targetType: 'component', targetId: componentId, correlationId, metadata: { requestId, tagId, sourceId } })
+  return event.save(session ? { session } : undefined)
 }
 
 async function reject(res, principal, project, details) {

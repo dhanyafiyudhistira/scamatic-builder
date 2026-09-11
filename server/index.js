@@ -125,7 +125,7 @@ app.all('/api/runtime-session', safe((req, res) => runtimeSessionHandler(req, re
 })))
 app.all('/api/runtime-telemetry', safe(runtimeTelemetryHandler))
 app.all('/api/commands',  safe((req, res) => commandsHandler(req, res, {
-  onWorkerCommandAuthorized: commandWakeEnabled ? () => managedConnectorWorker?.requestCommandPoll() : null,
+  onWorkerCommandAuthorized: commandWakeEnabled ? event => managedConnectorWorker?.requestCommandPoll(event?._id) : null,
 })))
 app.all('/api/versions',  safe(versionsHandler))
 app.all('/api/audit',     safe(auditHandler))

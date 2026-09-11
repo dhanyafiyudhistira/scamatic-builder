@@ -5,6 +5,7 @@ import { requireCsrf, requirePrincipal } from '../_lib/auth.js'
 import { PERMISSIONS, requireProjectPermission } from '../_lib/authorization.js'
 import { requestId } from '../_lib/security.js'
 import { migrateProjectSchema } from '../../shared/project-schema.js'
+import { projectRequiresSchematicAsset } from '../../shared/project-type.js'
 
 export default async function handler(req, res) {
   const principal = await requirePrincipal(req, res)
@@ -29,8 +30,8 @@ export default async function handler(req, res) {
     const previous = await ProjectVersion.findOne({ _id: sourceVersionId, projectId }).lean()
     if (!previous) return res.status(404).json({ error: 'Version not found.' })
     const sourceAssetId = previous.assetId || previous.schema?.project?.svgAssetId
-    const asset = await ScadaAsset.findOne({ _id: sourceAssetId, projectId }).lean()
-    if (!asset || (previous.assetChecksum && asset.checksum !== previous.assetChecksum)) return res.status(409).json({ error: 'Version asset integrity check failed.', code: 'ASSET_MISMATCH' })
+    const asset = sourceAssetId ? await ScadaAsset.findOne({ _id: sourceAssetId, projectId }).lean() : null
+    if ((projectRequiresSchematicAsset(previous.schema) || sourceAssetId || previous.assetChecksum) && (!asset || (previous.assetChecksum && asset.checksum !== previous.assetChecksum))) return res.status(409).json({ error: 'Version asset integrity check failed.', code: 'ASSET_MISMATCH' })
     const existing = await ProjectVersion.findOne({ projectId, idempotencyKey }).lean()
     if (existing) return res.status(200).json({ ok: true, replayed: true, version: publicVersion(existing) })
     const latestVersion = await ProjectVersion.findOne({ projectId }).sort({ version: -1 }).select({ version: 1 }).lean()
@@ -44,7 +45,7 @@ export default async function handler(req, res) {
       const allocated = await Project.findOneAndUpdate({ _id: projectId }, { $inc: { lastVersionNumber: 1 }, $set: { updatedBy: principal.id } }, { new: true, ...options })
       const snapshot = migrateProjectSchema(previous.schema)
       const checksum = createHash('sha256').update(JSON.stringify(snapshot)).digest('hex')
-      const [created] = await ProjectVersion.create([{ projectId, version: allocated.lastVersionNumber, schema: snapshot, checksum, validationSummary: previous.validationSummary || { issues: [] }, idempotencyKey, message: String(req.body?.message || `Restored from v${previous.version}`).slice(0, 200), draftRevision: previous.draftRevision || 1, assetId: sourceAssetId, assetChecksum: asset.checksum, restoredFromVersionId: previous._id, restoredFromVersion: previous.version, environmentRef: previous.environmentRef || 'mock', createdBy: principal.id }], options)
+      const [created] = await ProjectVersion.create([{ projectId, version: allocated.lastVersionNumber, schema: snapshot, checksum, validationSummary: previous.validationSummary || { issues: [] }, idempotencyKey, message: String(req.body?.message || `Restored from v${previous.version}`).slice(0, 200), draftRevision: previous.draftRevision || 1, assetId: sourceAssetId || null, assetChecksum: asset?.checksum || null, restoredFromVersionId: previous._id, restoredFromVersion: previous.version, environmentRef: previous.environmentRef || 'mock', createdBy: principal.id }], options)
       await Project.updateOne({ _id: projectId }, { $set: { activeVersionId: created.id } }, options)
       await AuditEvent.create([{ workspaceId: principal.workspaceId, projectId, actorId: principal.id, action: 'project.rollback', targetType: 'version', targetId: created.id, correlationId, metadata: { version: created.version, restoredFromVersion: previous.version } }], options)
       return created.toObject()

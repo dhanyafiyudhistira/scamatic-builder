@@ -10,6 +10,8 @@ import { GAUGE_START_ANGLE, GAUGE_SWEEP_ANGLE, gaugeAngleFor, gaugeArcPath, gaug
 import { numericDisplayProperties, numericDisplayUnit, numericEngineering, numericValueOutOfRange, resolveGaugeZones, resolveNumericRange } from '../../shared/numeric-tag-config.js'
 import { evaluateAlarmState } from '../../shared/alarm.js'
 import { CHART_XLSX_MIME_TYPE, chartExportCsv, chartExportFileName, chartExportWorkbook, createChartExportData } from '../../shared/chart-export.js'
+import { DASHBOARD_BREAKPOINTS, dashboardBreakpointForWidth, responsiveDashboardEnabled, responsivePositionPatch, resolveResponsiveDashboard } from '../../shared/responsive-dashboard.js'
+import { isIotDashboardProject } from '../../shared/project-type.js'
 
 export function RuntimeCanvas({
   schema,
@@ -38,7 +40,9 @@ export function RuntimeCanvas({
   onCommand,
   commandResults = {},
   commandConnectionAvailable = true,
+  responsiveBreakpoint = 'auto',
 }) {
+  const shellRef = useRef(null)
   const canvasRef = useRef(null)
   const [guides, setGuides] = useState({ x: null, y: null })
   const [coordinate, setCoordinate] = useState(null)
@@ -47,12 +51,19 @@ export function RuntimeCanvas({
   const [openPopupId, setOpenPopupId] = useState(null)
   const [fileDragOver, setFileDragOver] = useState(false)
   const [operationModes, setOperationModes] = useState({})
+  const [automaticBreakpoint, setAutomaticBreakpoint] = useState('desktop')
   const coordinateFrameRef = useRef(null)
   const pendingCoordinateRef = useRef(null)
   const popupReturnFocusRef = useRef(null)
   const commandHandlerRef = useRef(onCommand)
   commandHandlerRef.current = onCommand
-  const canvas = schema?.project?.canvas || { width: 1920, height: 1080, background: '#101418' }
+  const responsive = responsiveDashboardEnabled(schema)
+  const explicitBreakpoint = DASHBOARD_BREAKPOINTS.includes(responsiveBreakpoint) ? responsiveBreakpoint : null
+  const activeBreakpoint = responsive ? (explicitBreakpoint || automaticBreakpoint) : 'desktop'
+  const responsiveLayout = useMemo(() => resolveResponsiveDashboard(schema, activeBreakpoint), [activeBreakpoint, schema])
+  const canvas = responsiveLayout.canvas
+  const componentPositions = responsiveLayout.positions
+  const activeGridSize = responsive && activeBreakpoint !== 'desktop' ? responsiveLayout.gridSize : gridSize
   const tags = useMemo(() => new Map((schema?.tags || []).map(tag => [tag.id, tag])), [schema?.tags])
   const components = schema?.components || []
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds])
@@ -61,6 +72,23 @@ export function RuntimeCanvas({
   const expandedChart = (schema?.components || []).find(component => component.id === expandedChartId && component.type === 'chart' && component.visible !== false)
   const openPopup = componentById.get(openPopupId)
   const operationShifters = useMemo(() => components.filter(component => component.type === 'operation-shifter'), [components])
+  useEffect(() => {
+    if (!responsive || explicitBreakpoint || !shellRef.current) return undefined
+    const node = shellRef.current
+    const update = width => setAutomaticBreakpoint(previous => {
+      const next = dashboardBreakpointForWidth(width)
+      return previous === next ? previous : next
+    })
+    update(node.getBoundingClientRect().width)
+    if (typeof globalThis.ResizeObserver === 'function') {
+      const observer = new globalThis.ResizeObserver(entries => update(entries[0]?.contentRect?.width || node.getBoundingClientRect().width))
+      observer.observe(node)
+      return () => observer.disconnect()
+    }
+    const onResize = () => update(node.getBoundingClientRect().width)
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [explicitBreakpoint, responsive])
   const operationOwnerByComponent = useMemo(() => {
     const owners = new Map()
     for (const shifter of operationShifters) {
@@ -134,6 +162,12 @@ export function RuntimeCanvas({
     return () => window.removeEventListener('keydown', closeOnEscape)
   }, [expandedChartId])
 
+  const changeRenderedPosition = useCallback((component, position, options) => {
+    onChange?.(component.id, responsive && activeBreakpoint !== 'desktop'
+      ? responsivePositionPatch(component, activeBreakpoint, position)
+      : { position }, options)
+  }, [activeBreakpoint, onChange, responsive])
+
   const startTransform = useCallback((event, component, mode) => {
     if (!editable || component.locked || !canvasRef.current) return
     event.preventDefault()
@@ -152,11 +186,11 @@ export function RuntimeCanvas({
       : new Set([component.id])
     const originals = allComponents
       .filter(item => groupIds.has(item.id) && !item.locked)
-      .map(item => ({ id: item.id, position: { ...item.position } }))
+      .map(item => ({ id: item.id, component: item, position: { ...(componentPositions.get(item.id) || item.position) } }))
     const groupBounds = selectionBounds(originals.map(item => ({ position: item.position })))
     const targetBounds = allComponents
       .filter(item => !groupIds.has(item.id) && item.visible !== false)
-      .map(item => item.position)
+      .map(item => componentPositions.get(item.id) || item.position)
     targetBounds.push({ x: 0, y: 0, width: canvas.width, height: canvas.height })
 
     let pointerFrame = null
@@ -164,7 +198,7 @@ export function RuntimeCanvas({
     const applyMove = pointer => {
       const rawDx = (pointer.clientX - startX) * (canvas.width / rect.width)
       const rawDy = (pointer.clientY - startY) * (canvas.height / rect.height)
-      const snap = value => snapToGrid ? snapValue(value, gridSize) : value
+      const snap = value => snapToGrid ? snapValue(value, activeGridSize) : value
       scheduleCoordinate(pointerToLogical(pointer, rect, canvas))
 
       if (resizing) {
@@ -172,12 +206,12 @@ export function RuntimeCanvas({
         const configuredAspectLock = component.type === 'design-image' && component.properties?.lockAspectRatio !== false
         const next = resizeComponentBounds(original, mode.slice('resize-'.length), rawDx, rawDy, canvas, {
           minSize: 24,
-          gridSize,
+          gridSize: activeGridSize,
           snapToGrid,
           lockAspect: pointer.shiftKey ? !configuredAspectLock : configuredAspectLock,
         })
         setTransformHud({ ...next, mode: 'resize' })
-        onChange?.(component.id, { position: next }, { transient: true })
+        changeRenderedPosition(component, next, { transient: true })
         return
       }
 
@@ -196,7 +230,7 @@ export function RuntimeCanvas({
       nextBounds = offsetBounds(groupBounds, dx, dy)
       setTransformHud({ ...nextBounds, mode: originals.length > 1 ? 'group' : 'move' })
       for (const original of originals) {
-        onChange?.(original.id, { position: { ...original.position, x: clean(original.position.x + dx), y: clean(original.position.y + dy) } }, { transient: true })
+        changeRenderedPosition(original.component, { ...original.position, x: clean(original.position.x + dx), y: clean(original.position.y + dy) }, { transient: true })
       }
     }
     const move = pointer => {
@@ -225,7 +259,7 @@ export function RuntimeCanvas({
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', stop)
     window.addEventListener('pointercancel', stop)
-  }, [canvas, editable, gridSize, onChange, onSelect, onTransformEnd, onTransformStart, scheduleCoordinate, schema?.components, selectedIds, selectedIdSet, smartGuides, snapToGrid])
+  }, [activeGridSize, canvas, changeRenderedPosition, componentPositions, editable, onSelect, onTransformEnd, onTransformStart, scheduleCoordinate, schema?.components, selectedIds, selectedIdSet, smartGuides, snapToGrid])
 
   const launchPopup = useCallback((componentId, trigger) => {
     popupReturnFocusRef.current = trigger || null
@@ -238,20 +272,20 @@ export function RuntimeCanvas({
   }
 
   return (
-    <div className="sb-canvas-shell">
+    <div ref={shellRef} className={`sb-canvas-shell ${responsive ? `is-responsive-dashboard breakpoint-${activeBreakpoint}` : ''}`}>
       <div
         ref={canvasRef}
         className={`sb-logical-canvas ${editable ? 'is-editable' : ''} ${editable && showGrid ? 'show-grid' : ''} ${fileDragOver ? 'is-file-dragover' : ''} ${boardTone ? `board-tone-${boardTone}` : ''}`}
         style={{
           aspectRatio: `${canvas.width}/${canvas.height}`,
           background: boardTone ? (boardTone === 'light' ? '#f2f3ef' : '#101418') : canvas.background,
-          '--grid-x': `${Math.max(4, gridSize) / canvas.width * 100}%`,
-          '--grid-y': `${Math.max(4, gridSize) / canvas.height * 100}%`,
-          '--major-grid-x': `${Math.max(4, gridSize) * 5 / canvas.width * 100}%`,
-          '--major-grid-y': `${Math.max(4, gridSize) * 5 / canvas.height * 100}%`,
+          '--grid-x': `${Math.max(4, activeGridSize) / canvas.width * 100}%`,
+          '--grid-y': `${Math.max(4, activeGridSize) / canvas.height * 100}%`,
+          '--major-grid-x': `${Math.max(4, activeGridSize) * 5 / canvas.width * 100}%`,
+          '--major-grid-y': `${Math.max(4, activeGridSize) * 5 / canvas.height * 100}%`,
           width: `${Math.max(.35, Math.min(2.5, zoom)) * 100}%`,
-          maxWidth: zoom > 1 ? 'none' : '1500px',
-          maxHeight: zoom > 1 ? 'none' : '100%',
+          maxWidth: zoom > 1 ? 'none' : responsive ? `${canvas.width}px` : '1500px',
+          maxHeight: zoom > 1 || (responsive && activeBreakpoint !== 'desktop') ? 'none' : '100%',
         }}
         onPointerDown={event => { if (event.target === event.currentTarget) onSelect?.(null, { additive: false }) }}
         onPointerMove={event => editable && scheduleCoordinate(pointerToLogical(event, event.currentTarget.getBoundingClientRect(), canvas))}
@@ -273,7 +307,7 @@ export function RuntimeCanvas({
       >
         {svg
           ? <div className="sb-svg-background" aria-hidden="true" dangerouslySetInnerHTML={{ __html: svg }} />
-          : <div className="sb-empty-canvas">Upload an SVG schematic to begin</div>}
+          : <div className="sb-empty-canvas">{isIotDashboardProject(schema) ? 'Add widgets or connect ThingsBoard telemetry to begin' : 'Upload an SVG schematic to begin'}</div>}
         {editable && fileDragOver && <div className="sb-canvas-file-drop" aria-hidden="true"><strong>DROP IMAGE HERE</strong><span>PNG, JPG, or SVG · positioned at your cursor</span></div>}
 
         {rootComponents.map(component => {
@@ -284,6 +318,7 @@ export function RuntimeCanvas({
           return <RuntimeOverlay
             key={component.id}
             component={component}
+            layoutPosition={componentPositions.get(component.id)}
             designAsset={designAssets[component.properties?.assetId]}
             canvas={canvas}
             tags={tags}
@@ -305,7 +340,7 @@ export function RuntimeCanvas({
             onSelect={onSelect}
           />
         })}
-        {editable && showRulers && <CanvasRulers canvas={canvas} gridSize={gridSize} />}
+        {editable && showRulers && <CanvasRulers canvas={canvas} gridSize={activeGridSize} />}
         {editable && guides.x !== null && <span className="sb-smart-guide vertical" style={{ left: `${guides.x / canvas.width * 100}%` }} />}
         {editable && guides.y !== null && <span className="sb-smart-guide horizontal" style={{ top: `${guides.y / canvas.height * 100}%` }} />}
         {editable && transformHud && <CoordinateHud data={transformHud} />}
@@ -344,6 +379,7 @@ export function RuntimeCanvas({
 
 const RuntimeOverlay = memo(function RuntimeOverlay({
   component,
+  layoutPosition,
   designAsset,
   canvas,
   tags,
@@ -364,7 +400,7 @@ const RuntimeOverlay = memo(function RuntimeOverlay({
   onStartTransform,
   onSelect,
 }) {
-  const position = component.position
+  const position = layoutPosition || component.position
   const tag = tags.get(component.binding?.tagId)
   const chartTags = useMemo(
     () => (component.binding?.tagIds || []).map(tagId => tags.get(tagId)).filter(Boolean),

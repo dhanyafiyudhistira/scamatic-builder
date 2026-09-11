@@ -10,6 +10,7 @@ import { enforceRateLimit } from '../_lib/security.js'
 import { grantProjectUnlock, hashProjectPin, projectPinError, projectSecuritySnapshot, revokeProjectUnlock, revokeProjectUnlocks, unlockedProjectIds, verifyProjectPin } from '../_lib/project-pin.js'
 import { runtimeEngine, validRuntimeEngine } from '../../shared/runtime-engine.js'
 import { runtimeWorkerMode, validRuntimeWorkerMode } from '../../shared/runtime-worker-mode.js'
+import { DEFAULT_PROJECT_TYPE, projectTypeMetadata, projectTypeOf, validProjectType } from '../../shared/project-type.js'
 
 const slugPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 
@@ -37,11 +38,16 @@ export default async function handler(req, res, { onRuntimeWorkerModeChanged = (
 
     if (req.method === 'POST') {
       if (!requireWorkspacePermission(principal, res, PERMISSIONS.PROJECT_CREATE) || !requireCsrf(req, res, principal)) return
-      const { name, slug, description = '', width = 1920, height = 1080 } = req.body || {}
+      const { name, slug, description = '', projectType = DEFAULT_PROJECT_TYPE, width, height } = req.body || {}
       const normalizedName = String(name || '').trim()
       const normalizedSlug = String(slug || '').trim().toLowerCase()
-      const canvasWidth = Number(width)
-      const canvasHeight = Number(height)
+      if (!validProjectType(projectType)) {
+        return res.status(400).json({ error: 'Project type must be scada or iot-dashboard.', code: 'PROJECT_TYPE_INVALID' })
+      }
+      const normalizedProjectType = projectTypeOf(projectType)
+      const typeMetadata = projectTypeMetadata(normalizedProjectType)
+      const canvasWidth = Number(width ?? typeMetadata.canvas.width)
+      const canvasHeight = Number(height ?? typeMetadata.canvas.height)
       if (normalizedName.length < 2 || normalizedName.length > 80) {
         return res.status(400).json({ error: 'Project name must contain 2–80 characters.' })
       }
@@ -56,14 +62,15 @@ export default async function handler(req, res, { onRuntimeWorkerModeChanged = (
         workspaceId: principal.workspaceId,
         name: normalizedName,
         slug: normalizedSlug,
+        projectType: normalizedProjectType,
         description: String(description).slice(0, 500),
-        canvas: { width: canvasWidth, height: canvasHeight, background: '#101418' },
+        canvas: { width: canvasWidth, height: canvasHeight, background: typeMetadata.canvas.background },
         createdBy: principal.id,
         updatedBy: principal.id,
       })
-      const schema = createProjectSchema({ id: project.id, name: project.name, slug: project.slug, width: canvasWidth, height: canvasHeight })
+      const schema = createProjectSchema({ id: project.id, name: project.name, slug: project.slug, projectType: normalizedProjectType, width: canvasWidth, height: canvasHeight })
       await ProjectDraft.create({ _id: project.id, schema, revision: 1, updatedBy: principal.id })
-      await AuditEvent.create({ workspaceId: principal.workspaceId, projectId: project.id, actorId: principal.id, action: 'project.create', targetType: 'project', targetId: project.id })
+      await AuditEvent.create({ workspaceId: principal.workspaceId, projectId: project.id, actorId: principal.id, action: 'project.create', targetType: 'project', targetId: project.id, metadata: { projectType: normalizedProjectType } })
       return res.status(201).json({ project: toClientProject(project.toObject(), true), revision: 1 })
     }
 
@@ -305,6 +312,7 @@ function toClientProject(project, unlocked = false) {
     id: project._id,
     name: project.name,
     slug: project.slug,
+    projectType: projectTypeOf(project),
     description: project.description,
     canvas: project.canvas,
     svgAssetId: project.svgAssetId,

@@ -254,7 +254,7 @@ export function LayersPanel({ components, selectedIds, onSelect, onPatch, onReor
   )
 }
 
-export function ComponentInspector({ component, components = [], tags, onChange, onDelete, onDuplicate, onAddPopupChild, onCreatePopupChild, onDetachPopupChild, onReorderPopupChild, onSelectChild }) {
+export function ComponentInspector({ component, components = [], tags, directThingsBoard = false, onChange, onDelete, onDuplicate, onAddPopupChild, onCreatePopupChild, onDetachPopupChild, onReorderPopupChild, onSelectChild }) {
   const setPosition = (key, value) => onChange({ position: { ...component.position, [key]: Number(value) } })
   const setProperty = (key, value) => onChange({ properties: { ...component.properties, [key]: value } })
   const setProperties = patch => onChange({ properties: { ...component.properties, ...patch } })
@@ -284,7 +284,7 @@ export function ComponentInspector({ component, components = [], tags, onChange,
       {component.type === 'gauge' && <GaugeProperties component={component} tag={boundTag} setProperty={setProperty} setProperties={setProperties} />}
       {component.type === 'control-button' && <ButtonProperties component={component} tags={tags} setProperty={setProperty} />}
       {component.type === 'tuning-slider' && <TuningProperties component={component} tag={boundTag} tags={tags} setProperty={setProperty} setProperties={setProperties} />}
-      {component.type === 'operation-shifter' && <OperationShifterProperties component={component} components={components} tags={tags} setProperty={setProperty} />}
+      {component.type === 'operation-shifter' && <OperationShifterProperties component={component} components={components} tags={tags} directThingsBoard={directThingsBoard} setProperty={setProperty} />}
       {component.type === 'control-popup' && <PopupProperties component={component} components={components} setProperty={setProperty} onAddChild={onAddPopupChild} onCreateChild={onCreatePopupChild} onDetachChild={onDetachPopupChild} onReorderChild={onReorderPopupChild} onSelectChild={onSelectChild} />}
       {component.type === 'chart' && <ChartProperties component={component} tags={availableTags} setProperty={setProperty} onChange={onChange} />}
       {component.type === 'text-label' && <TextProperties component={component} setProperty={setProperty} />}
@@ -514,7 +514,7 @@ function TuningProperties({ component, tag, tags, setProperty, setProperties }) 
   )
 }
 
-function OperationShifterProperties({ component, components, tags, setProperty }) {
+function OperationShifterProperties({ component, components, tags, directThingsBoard, setProperty }) {
   const properties = component.properties || {}
   const controls = components.filter(item => ['control-button', 'tuning-slider'].includes(item.type))
   const buttons = controls.filter(item => item.type === 'control-button')
@@ -583,7 +583,7 @@ function OperationShifterProperties({ component, components, tags, setProperty }
         </div>
       </InspectorGroup>
       <InspectorGroup title="Auto sequence recipe">
-        <p className="sb-muted">SIMULATION runs this recipe through the isolated simulation-sequence route. REAL PLC sends the complete recipe to Node-RED/PLC; browser timing is never used for real equipment.</p>
+        <p className="sb-muted">SIMULATION runs this recipe through the isolated simulation-sequence route. REAL PLC sends the complete recipe through {directThingsBoard ? 'the managed ThingsBoard/edge runtime' : 'Node-RED/PLC'}; browser timing is never used for real equipment.</p>
         <div className="sb-operation-sequence-list">
           {sequence.map((step, index) => (
             <div className="sb-operation-sequence-step" key={step.id}>

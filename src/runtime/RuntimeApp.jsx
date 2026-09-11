@@ -17,6 +17,7 @@ import { createRuntimeTelemetryFrame } from '../../shared/runtime-telemetry-fram
 import { AuthScreen } from '../platform/AuthScreen.jsx'
 import { connectRuntimeStream, resolveDesignAssets } from '../platform/desktop.js'
 import { InfoPopover, InfoPopoverSection } from '../platform/InfoPopover.jsx'
+import { projectTypeMetadata, projectTypeOf } from '../../shared/project-type.js'
 
 export default function RuntimeApp({ slug, metricsEnabled = false }) {
   const [session, setSession] = useState({ loading: true, user: null })
@@ -1008,12 +1009,14 @@ export default function RuntimeApp({ slug, metricsEnabled = false }) {
     && simulationCommandConnectionAvailable(profile.id, state)
     && !runtimeConnecting
     && profile.commandEnabled
+  const projectType = projectTypeOf(runtime.schema)
+  const typeMetadata = projectTypeMetadata(projectType)
   return (
-    <div className="sb-published-runtime">
+    <div className={`sb-published-runtime mode-${projectType}`}>
       <div className="sb-runtime-toolbar">
         <div className="sb-runtime-project">
           <strong>{runtime.schema.project.name}</strong>
-          <span>Published v{runtime.version} · {runtime.environment.toUpperCase()}</span>
+          <span>{typeMetadata.label} · Published v{runtime.version} · {runtime.environment.toUpperCase()}</span>
         </div>
         <div className={`sb-runtime-state state-${localSimulationOnly ? 'degraded' : state}`}>{localSimulationOnly ? 'LOCAL ONLY' : statusLabel} / {profileStatusLabel}</div>
         <div className="sb-runtime-toolbar-actions">

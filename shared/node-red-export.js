@@ -2,6 +2,7 @@ import { COMPONENT_REGISTRY } from './component-registry.js'
 import { numericDisplayUnit, numericEngineering, numericFormatMode, numericWriteConstraints, resolveGaugeZones, resolveNumericRange } from './numeric-tag-config.js'
 import { migrateProjectSchema } from './project-schema.js'
 import { numericAlarmRule } from './alarm.js'
+import { isIotDashboardProject } from './project-type.js'
 
 export const NODE_RED_EXPORT_VERSION = 1
 export const NODE_RED_EXPORT_MARKER = 'SCAMATIC_BUILDER_EXPORT_V1'
@@ -16,6 +17,7 @@ const SAFE_RULE_OPERATORS = new Set(['truthy', 'eq', 'neq', 'gt', 'gte', 'lt', '
 export function createNodeRedExport(schema) {
   if (!schema || typeof schema !== 'object' || Array.isArray(schema)) throw new Error('A valid Builder project schema is required.')
   schema = migrateProjectSchema(schema)
+  if (isIotDashboardProject(schema)) throw new Error('Node-RED export is unavailable for IoT Dashboard projects. Use the direct ThingsBoard connector instead.')
   const project = sanitizeProject({ ...schema.project, schemaVersion: schema.schemaVersion })
   const sourceTypes = new Map((Array.isArray(schema.dataSources) ? schema.dataSources : []).map(source => [safeText(source?.id, 200), safeSourceType(source?.type)]))
   const tags = (Array.isArray(schema.tags) ? schema.tags : []).map(tag => sanitizeTag(tag, sourceTypes)).filter(Boolean)

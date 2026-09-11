@@ -2,6 +2,7 @@ import mongoose from 'mongoose'
 import { randomUUID } from 'node:crypto'
 import { RUNTIME_ENGINES, STANDARD_RUNTIME_ENGINE } from '../../shared/runtime-engine.js'
 import { DEFAULT_RUNTIME_WORKER_MODE, RUNTIME_WORKER_MODES } from '../../shared/runtime-worker-mode.js'
+import { DEFAULT_PROJECT_TYPE, PROJECT_TYPES } from '../../shared/project-type.js'
 
 // Every request path must establish a connection explicitly. Silent model
 // buffering hides connectivity failures and otherwise turns them into an
@@ -307,6 +308,7 @@ const projectSchema = new mongoose.Schema({
   workspaceId: { type: String, default: 'default', index: true },
   name: { type: String, required: true, trim: true },
   slug: { type: String, required: true, trim: true },
+  projectType: { type: String, enum: PROJECT_TYPES, default: DEFAULT_PROJECT_TYPE, index: true },
   description: { type: String, default: '' },
   canvas: { width: Number, height: Number, background: String },
   svgAssetId: { type: String, default: null },
@@ -359,8 +361,8 @@ const versionSchema = new mongoose.Schema({
   idempotencyKey: { type: String, required: true },
   message: { type: String, default: '' },
   draftRevision: { type: Number, required: true },
-  assetId: { type: String, required: true },
-  assetChecksum: { type: String, required: true },
+  assetId: { type: String, default: null },
+  assetChecksum: { type: String, default: null },
   restoredFromVersionId: { type: String, default: null },
   restoredFromVersion: { type: Number, default: null },
   environmentRef: { type: String, default: 'mock' },

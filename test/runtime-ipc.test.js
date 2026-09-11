@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { IpcRuntimeEventSink, routeRuntimeControlMessage, runtimeControlMessage, runtimeIpcMessage, RUNTIME_CONTROL_TYPES, RUNTIME_IPC_TYPES } from '../server/connectors/runtime-ipc.js'
 import { ManagedConnectorWorker, routeRuntimeIpcMessage } from '../server/connectors/managed-connector-worker.js'
+import { buildCommandCandidateFilter, createCommandWakeBuffer, normalizeCommandWakeId } from '../server/connectors/command-wake.js'
 
 test('IPC event sink coalesces telemetry and keeps command status on the immediate path', async () => {
   const messages = []
@@ -53,13 +54,14 @@ test('managed worker IPC router rejects foreign frames and forwards valid batche
 })
 
 test('worker control router accepts only versioned command wake messages and isolates callbacks', () => {
-  let wakes = 0
+  const wakes = []
   let reloads = 0
-  assert.equal(routeRuntimeControlMessage({ type: RUNTIME_CONTROL_TYPES.commandWake }, { onCommandWake: () => { wakes += 1 } }), false)
-  assert.equal(routeRuntimeControlMessage(runtimeIpcMessage(RUNTIME_IPC_TYPES.command, {}), { onCommandWake: () => { wakes += 1 } }), false)
-  assert.equal(routeRuntimeControlMessage(runtimeControlMessage(RUNTIME_CONTROL_TYPES.commandWake), { onCommandWake: () => { wakes += 1 } }), true)
+  assert.equal(routeRuntimeControlMessage({ type: RUNTIME_CONTROL_TYPES.commandWake }, { onCommandWake: id => { wakes.push(id) } }), false)
+  assert.equal(routeRuntimeControlMessage(runtimeIpcMessage(RUNTIME_IPC_TYPES.command, {}), { onCommandWake: id => { wakes.push(id) } }), false)
+  assert.equal(routeRuntimeControlMessage(runtimeControlMessage(RUNTIME_CONTROL_TYPES.commandWake, { commandId: 'command-1' }), { onCommandWake: id => { wakes.push(id) } }), true)
+  assert.equal(routeRuntimeControlMessage(runtimeControlMessage(RUNTIME_CONTROL_TYPES.commandWake), { onCommandWake: id => { wakes.push(id) } }), true)
   assert.equal(routeRuntimeControlMessage(runtimeControlMessage(RUNTIME_CONTROL_TYPES.workerReload), { onWorkerReload: () => { reloads += 1 } }), true)
-  assert.equal(wakes, 1)
+  assert.deepEqual(wakes, ['command-1', null])
   assert.equal(reloads, 1)
   assert.doesNotThrow(() => routeRuntimeControlMessage(runtimeControlMessage(RUNTIME_CONTROL_TYPES.commandWake), { onCommandWake: () => { throw new Error('scheduler stopped') } }))
   assert.doesNotThrow(() => routeRuntimeControlMessage(runtimeControlMessage(RUNTIME_CONTROL_TYPES.workerReload), { onWorkerReload: () => { throw new Error('reload stopped') } }))
@@ -92,9 +94,10 @@ test('managed worker reports readiness from a live private IPC heartbeat', async
   })
   assert.equal(worker.requestCommandPoll(), false)
   worker.start()
-  assert.equal(worker.requestCommandPoll(), true)
+  assert.equal(worker.requestCommandPoll('command-123'), true)
   assert.equal(worker.requestReload(), true)
   assert.equal(controlMessages[0].type, RUNTIME_CONTROL_TYPES.commandWake)
+  assert.deepEqual(controlMessages[0].payload, { commandId: 'command-123' })
   assert.equal(controlMessages[1].type, RUNTIME_CONTROL_TYPES.workerReload)
   assert.equal(routeRuntimeControlMessage(controlMessages[0], { onCommandWake: () => {} }), true)
   assert.equal(worker.health('readiness').ok, false)
@@ -115,6 +118,37 @@ test('managed worker reports readiness from a live private IPC heartbeat', async
   assert.deepEqual(kills, ['SIGTERM'])
   assert.equal(worker.requestCommandPoll(), false)
   assert.equal(worker.requestReload(), false)
+})
+
+test('targeted command wake buffering is bounded, deduplicated, and query-safe', () => {
+  assert.equal(normalizeCommandWakeId(' command-1 '), 'command-1')
+  assert.equal(normalizeCommandWakeId({ $ne: null }), null)
+  assert.equal(normalizeCommandWakeId('unsafe command'), null)
+
+  const buffer = createCommandWakeBuffer({ maxPending: 2 })
+  assert.equal(buffer.push('command-1'), true)
+  assert.equal(buffer.push('command-1'), true)
+  assert.equal(buffer.push({ $ne: null }), false)
+  assert.equal(buffer.push('command-2'), true)
+  assert.equal(buffer.push('command-3'), true)
+  assert.deepEqual(buffer.snapshot(), { pending: 2, capacity: 2, received: 4, duplicates: 1, dropped: 1, invalid: 1 })
+  assert.deepEqual(buffer.take(2), ['command-2', 'command-3'])
+  assert.equal(buffer.snapshot().pending, 0)
+
+  assert.deepEqual(buildCommandCandidateFilter({
+    pendingIds: ['command-2'],
+    targetedIds: ['command-2', 'command-3'],
+  }), {
+    status: 'authorized',
+    executionMode: 'worker',
+    _id: { $in: ['command-3'] },
+  })
+  assert.deepEqual(buildCommandCandidateFilter({ pendingIds: ['command-2'] }), {
+    status: 'authorized',
+    executionMode: 'worker',
+    _id: { $nin: ['command-2'] },
+  })
+  assert.equal(buildCommandCandidateFilter({ pendingIds: ['command-2'], targetedIds: ['command-2'] }), null)
 })
 
 test('managed worker falls back safely on command wake backpressure or a closed IPC channel', async () => {

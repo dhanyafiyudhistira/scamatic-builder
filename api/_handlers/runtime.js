@@ -9,6 +9,7 @@ import { loadWorkspaceChartStorage } from '../_lib/chart-storage-configuration.j
 import { runtimeProfileMetadata, runtimeUsesLiveTelemetry } from '../../shared/runtime-profile.js'
 import { simulationCommandState } from '../../shared/simulation-command-state.js'
 import { DESIGN_IMAGE_TYPE, publicDesignAssets, referencedDesignAssetIds } from '../_lib/design-assets.js'
+import { projectRequiresSchematicAsset } from '../../shared/project-type.js'
 
 export default async function handler(req, res) {
   const principal = await requirePrincipal(req, res)
@@ -26,9 +27,9 @@ export default async function handler(req, res) {
     const version = await ProjectVersion.findById(project.activeVersionId).lean()
     if (!version) return res.status(409).json({ error: 'Active published version is unavailable.', code: 'VERSION_MISSING' })
     const assetId = version.assetId || version.schema?.project?.svgAssetId
-    const asset = await ScadaAsset.findOne({ _id: assetId, projectId: project.id }).lean()
-    if (!asset) return res.status(409).json({ error: 'Published SVG asset is unavailable.', code: 'ASSET_MISSING' })
-    if (version.assetChecksum && asset.checksum !== version.assetChecksum) return res.status(409).json({ error: 'Published asset integrity check failed.', code: 'ASSET_MISMATCH' })
+    const asset = assetId ? await ScadaAsset.findOne({ _id: assetId, projectId: project.id }).lean() : null
+    if ((projectRequiresSchematicAsset(version.schema) || assetId) && !asset) return res.status(409).json({ error: 'Published SVG asset is unavailable.', code: 'ASSET_MISSING' })
+    if (version.assetChecksum && (!asset || asset.checksum !== version.assetChecksum)) return res.status(409).json({ error: 'Published asset integrity check failed.', code: 'ASSET_MISMATCH' })
     const designAssetIds = referencedDesignAssetIds(version.schema)
     const designAssetRecords = designAssetIds.length
       ? await ScadaAsset.find({ _id: { $in: designAssetIds }, projectId: project.id, kind: DESIGN_IMAGE_TYPE }).select({ content: 0 }).lean()
@@ -94,7 +95,7 @@ export default async function handler(req, res) {
       }
     }
     res.setHeader('Cache-Control', 'private, no-store')
-    return res.status(200).json({ projectId: project.id, schema: version.schema, svg: asset.content, designAssets: publicDesignAssets(designAssetRecords), versionId: version._id, version: version.version, checksum: version.checksum, environment: version.environmentRef || 'mock', profile, values, simulationTargets, history, historyStorage })
+    return res.status(200).json({ projectId: project.id, schema: version.schema, svg: asset?.content || null, designAssets: publicDesignAssets(designAssetRecords), versionId: version._id, version: version.version, checksum: version.checksum, environment: version.environmentRef || 'mock', profile, values, simulationTargets, history, historyStorage })
   } catch {
     return res.status(500).json({ error: 'Unable to load published runtime.' })
   }

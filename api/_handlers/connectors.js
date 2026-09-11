@@ -9,6 +9,8 @@ import { enforceRateLimit, redactMetadata, requestId } from '../_lib/security.js
 import { usesServerlessConnectorExecution } from '../_lib/connector-execution.js'
 import { loginThingsBoardAccount, mergeThingsBoardSecret, thingsBoardAuthenticationMetadata, withThingsBoardAccessToken } from '../_lib/thingsboard-auth.js'
 import { connectorDeletionBlock } from '../../shared/connector-lifecycle.js'
+import { isIotDashboardProject } from '../../shared/project-type.js'
+import { discoverThingsBoardTelemetry, getThingsBoardDevice, listThingsBoardDevices } from '../_lib/thingsboard-catalog.js'
 
 const ENVIRONMENTS = new Set(['development', 'staging', 'production'])
 
@@ -30,8 +32,8 @@ export default async function handler(req, res) {
   try {
     if (req.method === 'GET') return listConnectors(res, principal, projectId, req.query?.environmentRef)
     if (req.method === 'POST' && req.body?.action) return connectorAction(req, res, principal, projectId)
-    if (req.method === 'POST') return createConnector(req, res, principal, projectId)
-    if (req.method === 'PUT') return updateConnector(req, res, principal, projectId)
+    if (req.method === 'POST') return createConnector(req, res, principal, projectId, project)
+    if (req.method === 'PUT') return updateConnector(req, res, principal, projectId, project)
     if (req.method === 'DELETE') return deleteConnector(req, res, principal, projectId)
     res.setHeader('Allow', 'GET, POST, PUT, DELETE')
     return res.status(405).json({ error: `Method ${req.method} not allowed` })
@@ -49,13 +51,13 @@ async function listConnectors(res, principal, projectId, environmentRef = 'stagi
   return res.status(200).json({ connectors: connectors.map(item => publicConnector(item, byConnector.get(item._id))), environmentRef: environment })
 }
 
-async function createConnector(req, res, principal, projectId) {
+async function createConnector(req, res, principal, projectId, project) {
   const name = String(req.body?.name || '').trim()
   const type = String(req.body?.type || '')
   const environmentRef = validEnvironment(req.body?.environmentRef || 'staging')
   if (name.length < 2 || name.length > 80) return res.status(400).json({ error: 'Connector name must contain 2–80 characters.' })
   if (type !== 'thingsboard') return res.status(400).json({ error: 'The first vertical slice supports only ThingsBoard.' })
-  const config = sanitizeThingsBoardConfig(req.body?.config)
+  const config = sanitizeThingsBoardConfig(req.body?.config, { deviceRequired: !isIotDashboardProject(project) })
   try {
     const connector = await Connector.create({ workspaceId: principal.workspaceId, projectId, name, type, enabled: false, createdBy: principal.id, updatedBy: principal.id })
     const connectorEnvironment = await ConnectorEnvironment.create({ connectorId: connector.id, workspaceId: principal.workspaceId, projectId, environmentRef, config, updatedBy: principal.id })
@@ -67,19 +69,20 @@ async function createConnector(req, res, principal, projectId) {
   }
 }
 
-async function updateConnector(req, res, principal, projectId) {
+async function updateConnector(req, res, principal, projectId, project) {
   const connector = await ownedConnector(req.body?.connectorId, principal, projectId)
   if (!connector) return res.status(404).json({ error: 'Connector not found.' })
   const environmentRef = validEnvironment(req.body?.environmentRef || 'staging')
   const name = req.body?.name == null ? connector.name : String(req.body.name).trim()
   if (name.length < 2 || name.length > 80) return res.status(400).json({ error: 'Connector name must contain 2–80 characters.' })
+  const config = sanitizeThingsBoardConfig(req.body?.config, { deviceRequired: !isIotDashboardProject(project) || Boolean(req.body?.enabled) })
   connector.name = name
   connector.enabled = Boolean(req.body?.enabled)
   connector.updatedBy = principal.id
   await connector.save()
   const environment = await ConnectorEnvironment.findOneAndUpdate(
     { connectorId: connector.id, environmentRef },
-    { $set: { config: sanitizeThingsBoardConfig(req.body?.config), updatedBy: principal.id }, $setOnInsert: { workspaceId: principal.workspaceId, projectId } },
+    { $set: { config, updatedBy: principal.id }, $setOnInsert: { workspaceId: principal.workspaceId, projectId } },
     { new: true, upsert: true, setDefaultsOnInsert: true }
   )
   await audit(principal, projectId, 'connector.update', connector.id, { environmentRef, enabled: connector.enabled })
@@ -93,7 +96,7 @@ async function connectorAction(req, res, principal, projectId) {
   const environment = await ConnectorEnvironment.findOne({ connectorId: connector.id, environmentRef })
   if (!environment) return res.status(404).json({ error: 'Connector environment not found.' })
   const action = String(req.body.action)
-  if (['rotate-secret', 'connect-account', 'test'].includes(action) && !(await enforceRateLimit(req, res, `connector-${action}`, { limit: action === 'connect-account' ? 5 : 8, windowMs: 60_000, identity: `${principal.id}:${projectId}:${connector.id}` }))) return
+  if (['rotate-secret', 'connect-account', 'test', 'browse-devices', 'discover-device-telemetry', 'select-device'].includes(action) && !(await enforceRateLimit(req, res, `connector-${action}`, { limit: action === 'connect-account' ? 5 : action === 'browse-devices' ? 20 : 8, windowMs: 60_000, identity: `${principal.id}:${projectId}:${connector.id}` }))) return
   if (action === 'connect-account') {
     if (!roleCan(principal.role, PERMISSIONS.SECRET_ROTATE)) return res.status(403).json({ error: 'Insufficient permission.', code: 'PERMISSION_DENIED' })
     const username = String(req.body?.username || '').trim()
@@ -187,6 +190,37 @@ async function connectorAction(req, res, principal, projectId) {
     await audit(principal, projectId, result.ok ? 'connector.test.succeeded' : 'connector.test.failed', connector.id, { environmentRef, code: result.code })
     return res.status(result.ok ? 200 : 422).json({ ok: result.ok, message: result.message, connector: publicConnector(connector.toObject(), environment.toObject()) })
   }
+  if (action === 'browse-devices') {
+    const catalog = await withThingsBoardAccessToken(
+      { connectorId: connector.id, environmentRef },
+      jwt => listThingsBoardDevices({ serverUrl: environment.config?.serverUrl, jwt, page: req.body?.page, pageSize: 20, textSearch: req.body?.textSearch }),
+    )
+    return res.status(200).json(catalog)
+  }
+  if (action === 'discover-device-telemetry') {
+    const deviceId = String(req.body?.deviceId || environment.config?.deviceId || '')
+    const discovery = await withThingsBoardAccessToken(
+      { connectorId: connector.id, environmentRef },
+      jwt => discoverThingsBoardTelemetry({ serverUrl: environment.config?.serverUrl, jwt, deviceId }),
+    )
+    return res.status(200).json(discovery)
+  }
+  if (action === 'select-device') {
+    const deviceId = String(req.body?.deviceId || '').trim()
+    if (connector.enabled && environment.config?.deviceId !== deviceId) return res.status(409).json({ error: 'Disable the connector before switching its ThingsBoard device.', code: 'CONNECTOR_DEVICE_SWITCH_REQUIRES_DISABLE' })
+    const device = await withThingsBoardAccessToken(
+      { connectorId: connector.id, environmentRef },
+      jwt => getThingsBoardDevice({ serverUrl: environment.config?.serverUrl, jwt, deviceId }),
+    )
+    const changedAt = new Date()
+    environment.config = { ...environment.config, deviceId: device.id }
+    environment.health = { state: 'degraded', message: 'ThingsBoard device selected; test or enable the connector.', checkedAt: changedAt }
+    environment.commandHealth = { state: 'unknown', message: 'No RPC result observed for the selected device.', checkedAt: changedAt }
+    environment.updatedBy = principal.id
+    await environment.save()
+    await audit(principal, projectId, 'connector.device.selected', connector.id, { environmentRef, deviceId: device.id })
+    return res.status(200).json({ device, connector: publicConnector(connector.toObject(), environment.toObject()) })
+  }
   return res.status(400).json({ error: 'Unsupported connector action.' })
 }
 
@@ -228,10 +262,10 @@ async function testConnection(connector, environment) {
   }
 }
 
-export function sanitizeThingsBoardConfig(input = {}) {
+export function sanitizeThingsBoardConfig(input = {}, { deviceRequired = true } = {}) {
   const serverUrl = normalizeConnectorServerUrl(input?.serverUrl)
   const deviceId = String(input?.deviceId || '').trim()
-  if (!/^[a-zA-Z0-9-]{8,100}$/.test(deviceId)) throw Object.assign(new Error('A valid ThingsBoard deviceId is required.'), { statusCode: 400 })
+  if ((deviceRequired || deviceId) && !/^[a-zA-Z0-9-]{8,100}$/.test(deviceId)) throw Object.assign(new Error('A valid ThingsBoard deviceId is required.'), { statusCode: 400 })
   return { serverUrl, deviceId, rpcMode: input?.rpcMode === 'two-way' ? 'two-way' : 'feedback-tag', commandTimeoutMs: boundedNumber(input?.commandTimeoutMs, 1000, 30000, 5000) }
 }
 

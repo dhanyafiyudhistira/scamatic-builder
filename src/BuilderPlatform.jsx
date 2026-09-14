@@ -5,7 +5,7 @@ import { ThemeToneToggle } from './platform/ThemeTone'
 import { BoardToneToggle, useBoardTone } from './platform/BoardTone'
 import { useEditorHistory } from './platform/useEditorHistory'
 import { ComponentInspector, ComponentLibrary, LayersPanel, MockControls, TagManager } from './platform/BuilderPanels'
-import { COMPONENT_REGISTRY, compatibleTags, createComponentInstance } from '../shared/component-registry.js'
+import { COMPONENT_REGISTRY, compatibleTags, componentAvailableForProject, componentDefinitionsForProject, createComponentInstance } from '../shared/component-registry.js'
 import { executeMockCommand, initialMockValue } from '../shared/runtime-evaluator.js'
 import { hasBlockingIssues, validateProjectSchema } from '../shared/project-schema.js'
 import { applyNodeRedImportPlan } from '../shared/node-red-import.js'
@@ -34,7 +34,6 @@ import { DASHBOARD_BREAKPOINTS, dashboardBreakpointMetadata, responsivePositionP
 
 const makeId = prefix => `${prefix}_${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`
 const recoveryKey = projectId => `scamatic.recovery.${projectId}`
-const componentTypeCount = Object.values(COMPONENT_REGISTRY).filter(definition => definition.library !== false).length
 const sidebarLayoutKey = 'scamatic.builder.sidebar-widths'
 const SIDEBAR_LIMITS = Object.freeze({
   left: { min: 260, max: 650 },
@@ -113,6 +112,7 @@ export default function BuilderPlatform() {
   const activeProjectType = projectTypeOf(draft)
   const iotDashboard = isIotDashboardProject(draft)
   const activeProjectTypeMetadata = projectTypeMetadata(draft)
+  const componentTypeCount = useMemo(() => componentDefinitionsForProject(activeProjectType).length, [activeProjectType])
   const issues = useMemo(() => draft ? validateProjectSchema(draft, { requireAsset: projectRequiresSchematicAsset(draft) }) : [], [draft])
 
   const updateSidebarWidth = useCallback((side, width, persist = false) => {
@@ -276,6 +276,7 @@ export default function BuilderPlatform() {
   const addComponent = useCallback(type => {
     if (!draftRef.current) return
     const schema = draftRef.current
+    if (!componentAvailableForProject(type, projectTypeOf(schema))) return
     const candidates = compatibleTags(type, schema.tags)
     const tag = ['control-button', 'tuning-slider', 'operation-shifter'].includes(type)
       ? candidates.find(item => ['write', 'read-write'].includes(item.access))
@@ -738,7 +739,7 @@ export default function BuilderPlatform() {
         }}
       >
         <aside className="sb-sidebar left">
-          <Panel title="Components" description={`${componentTypeCount} component types · Controls and indicators`} collapsible expandable defaultOpen={false} storageKey={`scamatic.panel.components.${currentProject.id}`}><ComponentLibrary onAdd={addComponent} /></Panel>
+          <Panel title="Components" description={`${componentTypeCount} component types · Controls and indicators`} collapsible expandable defaultOpen={false} storageKey={`scamatic.panel.components.${currentProject.id}`}><ComponentLibrary projectType={activeProjectType} onAdd={addComponent} /></Panel>
           <Panel title={iotDashboard ? 'Dashboard Assets' : 'Schematic Assets'} description={`${Object.keys(designAssets).length} custom images · PNG, JPG, or SVG`}>
             <div className="sb-schematic-assets">
               {!iotDashboard && <><span className="sb-asset-section-label">Base schematic</span>

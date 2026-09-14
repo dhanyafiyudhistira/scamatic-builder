@@ -12,6 +12,7 @@ import { evaluateAlarmState } from '../../shared/alarm.js'
 import { CHART_XLSX_MIME_TYPE, chartExportCsv, chartExportFileName, chartExportWorkbook, createChartExportData } from '../../shared/chart-export.js'
 import { DASHBOARD_BREAKPOINTS, dashboardBreakpointForWidth, responsiveDashboardEnabled, responsivePositionPatch, resolveResponsiveDashboard } from '../../shared/responsive-dashboard.js'
 import { isIotDashboardProject } from '../../shared/project-type.js'
+import { PROCESS_EQUIPMENT_TYPES } from '../../shared/component-registry.js'
 
 export function RuntimeCanvas({
   schema,
@@ -536,6 +537,14 @@ function RuntimeComponent({ component, designAsset, tag, value, quality, chartTa
     )
   }
 
+  if (PROCESS_EQUIPMENT_TYPES.includes(component.type)) {
+    return <ProcessEquipmentComponent component={component} tag={tag} value={value} quality={quality} />
+  }
+
+  if (component.type === 'pipe') {
+    return <PipeComponent component={component} tag={tag} value={value} quality={quality} />
+  }
+
   if (component.type === 'alarm') {
     return <AlarmComponent component={component} tag={tag} value={value} quality={quality} editable={editable} />
   }
@@ -667,6 +676,131 @@ function RuntimeComponent({ component, designAsset, tag, value, quality, chartTa
       : <div className="sb-design-image-missing" role="status">IMAGE UNAVAILABLE</div>
   }
   return <div className="sb-invalid-component">Unsupported component</div>
+}
+
+function ProcessEquipmentComponent({ component, tag, value, quality }) {
+  const properties = component.properties || {}
+  const active = Boolean(tag) && quality === 'good' && evaluateRule(value, properties.rule)
+  const stateLabel = !tag
+    ? 'UNBOUND'
+    : quality !== 'good'
+      ? quality.toUpperCase()
+      : active
+        ? properties.activeText || (component.type === 'valve' ? 'OPEN' : 'RUNNING')
+        : properties.inactiveText || (component.type === 'valve' ? 'CLOSED' : 'STOPPED')
+  const className = [
+    'sb-process-equipment',
+    `type-${component.type}`,
+    active ? 'is-active' : 'is-idle',
+    active && properties.glow !== false ? 'has-glow' : '',
+    active && properties.animate !== false ? 'is-animated' : '',
+    component.type === 'valve' && properties.orientation === 'vertical' ? 'is-vertical' : '',
+    `quality-${quality}`,
+  ].filter(Boolean).join(' ')
+  return (
+    <div
+      className={className}
+      role="status"
+      aria-label={`${properties.label || component.name}: ${stateLabel}`}
+      title={`${tag?.name || 'Unbound'}: ${String(value ?? '--')} · ${quality}`}
+      style={{
+        '--equipment-color': active ? properties.activeColor || '#22c55e' : properties.idleColor || '#64748b',
+        '--equipment-active-color': properties.activeColor || '#22c55e',
+      }}
+    >
+      <svg viewBox="0 0 180 100" aria-hidden="true">
+        {component.type === 'valve' && <ValveSymbol />}
+        {component.type === 'motor' && <MotorSymbol />}
+        {component.type === 'pump' && <PumpSymbol />}
+        {component.type === 'fan' && <FanSymbol />}
+      </svg>
+      <span className="sb-equipment-caption"><strong>{properties.label || component.name}</strong><small>{stateLabel}</small></span>
+    </div>
+  )
+}
+
+function ValveSymbol() {
+  return (
+    <g className="sb-equipment-orientation">
+      <path className="sb-equipment-pipe" d="M8 51h47m70 0h47" />
+      <path className="sb-equipment-body" d="M55 25l35 26-35 25zm70 0L90 51l35 25z" />
+      <path className="sb-equipment-detail" d="M90 49V16m-18 0h36" />
+      <rect className="sb-equipment-actuator" x="74" y="7" width="32" height="15" rx="2" />
+    </g>
+  )
+}
+
+function MotorSymbol() {
+  return (
+    <>
+      <path className="sb-equipment-pipe" d="M137 49h35" />
+      <path className="sb-equipment-base" d="M45 78h90m-77 0v9m64-9v9" />
+      <rect className="sb-equipment-body" x="43" y="22" width="96" height="57" rx="8" />
+      <path className="sb-equipment-detail" d="M56 29v43m14-43v43m50-43v43" />
+      <g className="sb-equipment-motion"><circle cx="91" cy="50" r="20" /><path d="M91 30v8m0 24v8m-20-20h8m24 0h8" /></g>
+      <text className="sb-equipment-letter" x="91" y="56">M</text>
+    </>
+  )
+}
+
+function PumpSymbol() {
+  return (
+    <>
+      <path className="sb-equipment-pipe" d="M8 57h42m80 0h42m-42 0V20h30" />
+      <circle className="sb-equipment-body" cx="90" cy="57" r="40" />
+      <g className="sb-equipment-motion"><path d="M70 70c4-27 34-33 47-12-18-8-28 4-29 17z" /><circle cx="90" cy="57" r="6" /></g>
+      <path className="sb-equipment-base" d="M57 91h67" />
+    </>
+  )
+}
+
+function FanSymbol() {
+  return (
+    <>
+      <circle className="sb-equipment-body" cx="90" cy="50" r="43" />
+      <g className="sb-equipment-motion">
+        <path d="M90 48c-8-15-5-30 8-34 12 11 10 25-3 37z" />
+        <path d="M92 50c15-8 30-5 34 8-11 12-25 10-37-3z" />
+        <path d="M90 52c8 15 5 30-8 34-12-11-10-25 3-37z" />
+        <path d="M88 50c-15 8-30 5-34-8 11-12 25-10 37 3z" />
+      </g>
+      <circle className="sb-equipment-hub" cx="90" cy="50" r="7" />
+      <path className="sb-equipment-base" d="M61 94h58" />
+    </>
+  )
+}
+
+function PipeComponent({ component, tag, value, quality }) {
+  const properties = component.properties || {}
+  const active = Boolean(tag) && quality === 'good' && evaluateRule(value, properties.rule)
+  const stateLabel = !tag ? 'UNBOUND' : quality !== 'good' ? quality.toUpperCase() : active ? properties.activeText || 'FLOW ACTIVE' : properties.inactiveText || 'NO FLOW'
+  const className = [
+    'sb-pipe-component',
+    active ? 'is-active' : 'is-idle',
+    active && properties.glow !== false ? 'has-glow' : '',
+    active && properties.animate !== false ? 'is-animated' : '',
+    properties.direction === 'reverse' ? 'is-reverse' : '',
+    `quality-${quality}`,
+  ].filter(Boolean).join(' ')
+  return (
+    <div
+      className={className}
+      role="status"
+      aria-label={`${properties.label || component.name}: ${stateLabel}`}
+      title={`${tag?.name || 'Unbound'}: ${String(value ?? '--')} · ${quality}`}
+      style={{
+        '--pipe-color': active ? properties.activeColor || '#20c4d9' : properties.idleColor || '#475569',
+        '--pipe-active-color': properties.activeColor || '#20c4d9',
+      }}
+    >
+      <svg viewBox="0 0 300 54" preserveAspectRatio="none" aria-hidden="true">
+        <path className="sb-pipe-casing" d="M5 27h290" />
+        <path className="sb-pipe-fill" d="M5 27h290" />
+        <path className="sb-pipe-stream" d="M5 27h290" />
+      </svg>
+      <span className="sb-pipe-caption"><strong>{properties.label || component.name}</strong><small><i aria-hidden="true" />{stateLabel}</small></span>
+    </div>
+  )
 }
 
 export function AlarmComponent({ component, tag, value, quality = 'good', editable = false }) {
@@ -1042,7 +1176,7 @@ function ExpandedChart({ component, tags, histories, historyStorage, onLoadHisto
           <span>{rangeId === 'live' ? 'LIVE TELEMETRY' : 'HISTORICAL TELEMETRY'} · {status}</span>
           <strong>{component.properties?.label || component.name || 'TELEMETRY CHART'}</strong>
         </div>
-        <button ref={closeRef} type="button" onClick={onClose} aria-label="Minimize chart"><span aria-hidden="true">—</span> Minimize</button>
+        <button ref={closeRef} type="button" onClick={onClose} aria-label="Minimize chart" title="Minimize chart"><span aria-hidden="true">—</span></button>
       </header>
       <div className="sb-chart-history-toolbar" aria-label="Chart time range">
         <div

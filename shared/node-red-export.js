@@ -1,4 +1,4 @@
-import { COMPONENT_REGISTRY } from './component-registry.js'
+import { COMPONENT_REGISTRY, SCADA_PROCESS_COMPONENT_TYPES } from './component-registry.js'
 import { numericDisplayUnit, numericEngineering, numericFormatMode, numericWriteConstraints, resolveGaugeZones, resolveNumericRange } from './numeric-tag-config.js'
 import { migrateProjectSchema } from './project-schema.js'
 import { numericAlarmRule } from './alarm.js'
@@ -10,7 +10,7 @@ export const NODE_RED_EXPORT_LIMITS = Object.freeze({ maxNodes: 5000, maxMetadat
 
 const DATA_TYPES = new Set(['boolean', 'number', 'string', 'enum', 'datetime'])
 const ACCESS_MODES = new Set(['read', 'write', 'read-write'])
-const DASHBOARD_COMPONENT_TYPES = new Set(['indicator-lamp', 'alarm', 'value-span', 'gauge', 'control-button', 'tuning-slider', 'operation-shifter', 'chart'])
+const DASHBOARD_COMPONENT_TYPES = new Set(['indicator-lamp', 'alarm', 'value-span', 'gauge', 'control-button', 'tuning-slider', 'operation-shifter', 'chart', ...SCADA_PROCESS_COMPONENT_TYPES])
 const IMPORTABLE_COMPONENT_TYPES = new Set(Object.keys(COMPONENT_REGISTRY).filter(type => !['text-label', 'design-image', 'control-popup'].includes(type)))
 const SAFE_RULE_OPERATORS = new Set(['truthy', 'eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'between', 'outside', 'contains'])
 
@@ -291,6 +291,22 @@ function exportComponentProperties(component) {
     const pulseMs = Number(properties.pulseMs)
     if (Number.isInteger(pulseMs) && pulseMs >= 100 && pulseMs <= 5000) result.pulseMs = pulseMs
   }
+  if (SCADA_PROCESS_COMPONENT_TYPES.includes(component?.type)) {
+    const rule = safeComponentRule(properties.rule)
+    if (rule) result.rule = rule
+    for (const key of ['activeColor', 'idleColor']) {
+      const color = safeHexColor(properties[key])
+      if (color) result[key] = color
+    }
+    for (const key of ['activeText', 'inactiveText']) {
+      const text = safeText(properties[key], 40)
+      if (text) result[key] = text
+    }
+    if (typeof properties.glow === 'boolean') result.glow = properties.glow
+    if (typeof properties.animate === 'boolean') result.animate = properties.animate
+    if (component.type === 'valve' && ['horizontal', 'vertical'].includes(properties.orientation)) result.orientation = properties.orientation
+    if (component.type === 'pipe' && ['forward', 'reverse'].includes(properties.direction)) result.direction = properties.direction
+  }
   return result
 }
 
@@ -393,6 +409,7 @@ function dashboardNode(component, tags, context) {
   }
   if (component.type === 'indicator-lamp') return { ...common, type: 'ui_text', format: '{{msg.payload}}', layout: 'row-spread' }
   if (component.type === 'alarm') return { ...common, type: 'ui_text', format: '{{msg.payload}}', layout: 'row-spread' }
+  if (SCADA_PROCESS_COMPONENT_TYPES.includes(component.type)) return { ...common, type: 'ui_text', format: '{{msg.payload}}', layout: 'row-spread' }
   if (component.type === 'value-span') return tag.dataType === 'number'
     ? { ...common, type: 'ui_gauge', gtype: 'gage', title: common.label, format: `{{value}}${unit}`, min: engineering.min, max: engineering.max, colors: ['#00b500', '#e6e600', '#ca3838'], seg1: '', seg2: '' }
     : { ...common, type: 'ui_text', format: '{{msg.payload}}', layout: 'row-spread' }

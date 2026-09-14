@@ -1,4 +1,4 @@
-import { COMPONENT_REGISTRY, createComponentInstance } from './component-registry.js'
+import { COMPONENT_REGISTRY, SCADA_PROCESS_COMPONENT_TYPES, createComponentInstance } from './component-registry.js'
 import { NODE_RED_EXPORT_MARKER } from './node-red-export.js'
 import { DEFAULT_ENGINEERING, DEFAULT_WRITE_CONSTRAINTS } from './numeric-tag-config.js'
 import { numericAlarmRule } from './alarm.js'
@@ -396,6 +396,22 @@ function safeImportedComponentProperties(type, value) {
     if (Number.isFinite(volume) && volume >= 0 && volume <= 0.5) result.volume = volume
     const pulseMs = Number(value.pulseMs)
     if (Number.isInteger(pulseMs) && pulseMs >= 100 && pulseMs <= 5000) result.pulseMs = pulseMs
+  }
+  if (SCADA_PROCESS_COMPONENT_TYPES.includes(type)) {
+    const rule = safeImportedRule(value.rule)
+    if (rule) result.rule = rule
+    for (const key of ['activeColor', 'idleColor']) {
+      const color = safeHexColor(value[key])
+      if (color) result[key] = color
+    }
+    for (const key of ['activeText', 'inactiveText']) {
+      const text = safeText(value[key], 40)
+      if (text) result[key] = text
+    }
+    if (typeof value.glow === 'boolean') result.glow = value.glow
+    if (typeof value.animate === 'boolean') result.animate = value.animate
+    if (type === 'valve' && ['horizontal', 'vertical'].includes(value.orientation)) result.orientation = value.orientation
+    if (type === 'pipe' && ['forward', 'reverse'].includes(value.direction)) result.direction = value.direction
   }
   if (type === 'control-button') {
     const action = safeText(value.action, 40)

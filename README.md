@@ -10,8 +10,9 @@ Schema-driven SCADA schematic builder built from the original WTP Mixer HMI.
    event handlers, external resources, `foreignObject`, JavaScript URLs, and
    XML entities.
 4. Create a mock boolean tag.
-5. Add Indicator Lamp, Value Span, Control Button, Tuning Slider, Text Label,
-   Chart, and Control Pop-up components through the shared registry.
+5. Add Indicator Lamp, Valve, Motor, Pump, Fan, active-flow Pipe, Value Span,
+   Control Button, Tuning Slider, Text Label, Chart, and Control Pop-up
+   components through the shared registry. Process equipment stays SCADA-only.
 6. Import Node-RED flow JSON into reviewed tags and suggested components, or
    create tags manually.
 7. Bind typed mock tags and configure rules, formatting, thresholds, and

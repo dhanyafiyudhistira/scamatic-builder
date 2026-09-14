@@ -1,13 +1,13 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
-import { COMPONENT_REGISTRY, compatibleTags } from '../../shared/component-registry.js'
+import { COMPONENT_REGISTRY, PROCESS_EQUIPMENT_TYPES, SCADA_PROCESS_COMPONENT_TYPES, compatibleTags, componentDefinitionsForProject } from '../../shared/component-registry.js'
 import { initialMockValue, RULE_OPERATORS } from '../../shared/runtime-evaluator.js'
 import { CONTROL_POPUP_CHILD_TYPES, CONTROL_POPUP_MAX_CHILDREN, popupOwnerMap, rootRuntimeComponents } from '../../shared/control-popup.js'
 import { tagUsageCounts } from '../../shared/tag-bindings.js'
 import { numericEngineering, numericFormatMode, numericWriteConstraints, resolveGaugeZones, resolveNumericRange } from '../../shared/numeric-tag-config.js'
 import { describeAlarmRule, normalizeNumericAlarmRule, numericAlarmRule } from '../../shared/alarm.js'
 
-export function ComponentLibrary({ onAdd }) {
-  const definitions = Object.values(COMPONENT_REGISTRY).filter(definition => definition.library !== false)
+export function ComponentLibrary({ onAdd, projectType = 'scada' }) {
+  const definitions = componentDefinitionsForProject(projectType)
   const listRef = useItemCountViewport('.sb-library-item', 5, definitions.map(definition => definition.type).join('|'))
 
   return (
@@ -261,6 +261,8 @@ export function ComponentInspector({ component, components = [], tags, directThi
   const compatible = compatibleTags(component.type, tags)
   const availableTags = ['control-button', 'tuning-slider', 'operation-shifter'].includes(component.type)
     ? compatible.filter(tag => ['write', 'read-write'].includes(tag.access))
+    : SCADA_PROCESS_COMPONENT_TYPES.includes(component.type)
+      ? compatible.filter(tag => ['read', 'read-write'].includes(tag.access))
     : compatible
   const boundTag = tags.find(tag => tag.id === component.binding?.tagId)
   return (
@@ -279,6 +281,8 @@ export function ComponentInspector({ component, components = [], tags, directThi
       <label className="sb-check"><input type="checkbox" checked={component.visible !== false} onChange={event => onChange({ visible: event.target.checked })} /> Visible</label>
       <label className="sb-check"><input type="checkbox" checked={Boolean(component.locked)} onChange={event => onChange({ locked: event.target.checked })} /> Locked</label>
       {component.type === 'indicator-lamp' && <LampProperties component={component} setProperty={setProperty} />}
+      {PROCESS_EQUIPMENT_TYPES.includes(component.type) && <ProcessEquipmentProperties component={component} setProperty={setProperty} />}
+      {component.type === 'pipe' && <PipeProperties component={component} setProperty={setProperty} />}
       {component.type === 'alarm' && <AlarmProperties component={component} tag={boundTag} setProperty={setProperty} />}
       {component.type === 'value-span' && <ValueProperties component={component} tag={boundTag} setProperty={setProperty} />}
       {component.type === 'gauge' && <GaugeProperties component={component} tag={boundTag} setProperty={setProperty} setProperties={setProperties} />}
@@ -394,6 +398,55 @@ function LampProperties({ component, setProperty }) {
   const rule = component.properties?.rule || { operator: 'truthy' }
   const setRule = patch => setProperty('rule', { ...rule, ...patch })
   return <InspectorGroup title="Lamp state"><label>Shape<select value={component.properties?.shape || 'circle'} onChange={event => setProperty('shape', event.target.value)}><option value="circle">Circle</option><option value="square">Rounded square</option><option value="rectangle">Rectangle</option></select></label><label>Rule<select value={rule.operator} onChange={event => setRule({ operator: event.target.value })}>{RULE_OPERATORS.map(operator => <option value={operator} key={operator}>{operator}</option>)}</select></label>{!['truthy', 'between', 'outside'].includes(rule.operator) && <label>Compare value<input value={rule.value ?? ''} onChange={event => setRule({ value: parseMaybeNumber(event.target.value) })} /></label>}{['between', 'outside'].includes(rule.operator) && <div className="sb-form-grid"><NumberField label="Minimum" value={rule.min ?? 0} onChange={value => setRule({ min: value })} /><NumberField label="Maximum" value={rule.max ?? 100} onChange={value => setRule({ max: value })} /></div>}<div className="sb-form-grid"><ColorField label="ON color" value={component.properties?.onColor || '#22c55e'} onChange={value => setProperty('onColor', value)} /><ColorField label="OFF color" value={component.properties?.offColor || '#64748b'} onChange={value => setProperty('offColor', value)} /></div><label className="sb-check"><input type="checkbox" checked={component.properties?.glow !== false} onChange={event => setProperty('glow', event.target.checked)} /> Glow when active</label></InspectorGroup>
+}
+
+function ProcessEquipmentProperties({ component, setProperty }) {
+  const properties = component.properties || {}
+  const title = component.type === 'valve' ? 'Valve state' : `${COMPONENT_REGISTRY[component.type]?.label || 'Equipment'} state`
+  return (
+    <InspectorGroup title={title}>
+      <StateRuleProperties properties={properties} setProperty={setProperty} />
+      {component.type === 'valve' && <label>Orientation<select value={properties.orientation || 'horizontal'} onChange={event => setProperty('orientation', event.target.value)}><option value="horizontal">Horizontal</option><option value="vertical">Vertical</option></select></label>}
+      <div className="sb-form-grid">
+        <label>Active text<input value={properties.activeText || (component.type === 'valve' ? 'OPEN' : 'RUNNING')} onChange={event => setProperty('activeText', event.target.value)} /></label>
+        <label>Inactive text<input value={properties.inactiveText || (component.type === 'valve' ? 'CLOSED' : 'STOPPED')} onChange={event => setProperty('inactiveText', event.target.value)} /></label>
+        <ColorField label="Active color" value={properties.activeColor || '#22c55e'} onChange={value => setProperty('activeColor', value)} />
+        <ColorField label="Idle color" value={properties.idleColor || '#64748b'} onChange={value => setProperty('idleColor', value)} />
+      </div>
+      {component.type !== 'valve' && <label className="sb-check"><input type="checkbox" checked={properties.animate !== false} onChange={event => setProperty('animate', event.target.checked)} /> Animate while running</label>}
+      <label className="sb-check"><input type="checkbox" checked={properties.glow !== false} onChange={event => setProperty('glow', event.target.checked)} /> Glow while active</label>
+    </InspectorGroup>
+  )
+}
+
+function PipeProperties({ component, setProperty }) {
+  const properties = component.properties || {}
+  return (
+    <InspectorGroup title="Flow indication">
+      <StateRuleProperties properties={properties} setProperty={setProperty} />
+      <label>Stream direction<select value={properties.direction || 'forward'} onChange={event => setProperty('direction', event.target.value)}><option value="forward">Forward</option><option value="reverse">Reverse</option></select></label>
+      <div className="sb-form-grid">
+        <label>Active text<input value={properties.activeText || 'FLOW ACTIVE'} onChange={event => setProperty('activeText', event.target.value)} /></label>
+        <label>Inactive text<input value={properties.inactiveText || 'NO FLOW'} onChange={event => setProperty('inactiveText', event.target.value)} /></label>
+        <ColorField label="Flow color" value={properties.activeColor || '#20c4d9'} onChange={value => setProperty('activeColor', value)} />
+        <ColorField label="Idle color" value={properties.idleColor || '#475569'} onChange={value => setProperty('idleColor', value)} />
+      </div>
+      <label className="sb-check"><input type="checkbox" checked={properties.animate !== false} onChange={event => setProperty('animate', event.target.checked)} /> Animate stream while active</label>
+      <label className="sb-check"><input type="checkbox" checked={properties.glow !== false} onChange={event => setProperty('glow', event.target.checked)} /> Illuminate active stream</label>
+    </InspectorGroup>
+  )
+}
+
+function StateRuleProperties({ properties, setProperty }) {
+  const rule = properties.rule || { operator: 'truthy' }
+  const setRule = patch => setProperty('rule', { ...rule, ...patch })
+  return (
+    <>
+      <label>Active rule<select value={rule.operator} onChange={event => setRule({ operator: event.target.value })}>{RULE_OPERATORS.map(operator => <option value={operator} key={operator}>{operator}</option>)}</select></label>
+      {!['truthy', 'between', 'outside'].includes(rule.operator) && <label>Compare value<input value={rule.value ?? ''} onChange={event => setRule({ value: parseMaybeNumber(event.target.value) })} /></label>}
+      {['between', 'outside'].includes(rule.operator) && <div className="sb-form-grid"><NumberField label="Minimum" value={rule.min ?? 0} onChange={value => setRule({ min: value })} /><NumberField label="Maximum" value={rule.max ?? 100} onChange={value => setRule({ max: value })} /></div>}
+    </>
+  )
 }
 
 function AlarmProperties({ component, tag, setProperty }) {

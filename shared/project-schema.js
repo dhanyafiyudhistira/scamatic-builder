@@ -1,4 +1,4 @@
-import { COMPONENT_REGISTRY } from './component-registry.js'
+import { COMPONENT_REGISTRY, PROCESS_EQUIPMENT_TYPES, SCADA_PROCESS_COMPONENT_TYPES, componentAvailableForProject } from './component-registry.js'
 import { RULE_OPERATORS } from './runtime-evaluator.js'
 import { CONTROL_POPUP_CHILD_TYPES, CONTROL_POPUP_MAX_CHILDREN, CONTROL_POPUP_TYPE } from './control-popup.js'
 import { MAX_STALE_AFTER_MS, MIN_STALE_AFTER_MS, normalizeTagFreshness, TAG_FRESHNESS_MODES } from './tag-freshness.js'
@@ -8,11 +8,15 @@ import { ALARM_FREQUENCY_RANGE, ALARM_PRESENTATIONS, ALARM_PULSE_RANGE, ALARM_RU
 import { DEFAULT_PROJECT_TYPE, PROJECT_TYPES, isIotDashboardProject, projectTypeMetadata, projectTypeOf } from './project-type.js'
 import { DASHBOARD_BREAKPOINTS, createResponsiveDashboardLayout, dashboardCanvas, validResponsivePosition } from './responsive-dashboard.js'
 
-export const PROJECT_SCHEMA_VERSION = '1.7.0'
-export const LEGACY_PROJECT_SCHEMA_VERSIONS = Object.freeze(['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0'])
+export const PROJECT_SCHEMA_VERSION = '1.8.0'
+export const LEGACY_PROJECT_SCHEMA_VERSIONS = Object.freeze(['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0'])
 export const COMPONENT_TYPES = Object.keys(COMPONENT_REGISTRY)
 
 const COMMAND_COMPONENT_TYPES = new Set(['control-button', 'tuning-slider', 'operation-shifter'])
+const PROCESS_EQUIPMENT_TYPE_SET = new Set(PROCESS_EQUIPMENT_TYPES)
+const SCADA_PROCESS_COMPONENT_TYPE_SET = new Set(SCADA_PROCESS_COMPONENT_TYPES)
+const PIPE_DIRECTIONS = new Set(['forward', 'reverse'])
+const VALVE_ORIENTATIONS = new Set(['horizontal', 'vertical'])
 const COMMAND_CONFIRMATIONS = new Set(['none', 'single'])
 const COMMAND_ROLES = new Set(['VIEWER', 'EDITOR', 'OPERATOR', 'ADMIN', 'OWNER'])
 const CONTROL_ACTIONS = new Set(['toggle-boolean', 'set-value', 'pulse'])
@@ -215,6 +219,8 @@ export function validateProjectSchema(schema, { requireAsset = false } = {}) {
     if (!boundedText(component.name, 160)) error('component.name', 'Every component requires a display name no longer than 160 characters.', `${path}.name`)
     if (!COMPONENT_TYPES.includes(component?.type)) {
       error('component.type', `Unsupported component type: ${component?.type ?? 'missing'}.`, `${path}.type`)
+    } else if (!componentAvailableForProject(component.type, projectTypeOf(schema))) {
+      error('component.projectType', `${COMPONENT_REGISTRY[component.type].label} is available only in SCADA projects.`, `${path}.type`)
     }
     const position = component?.position
     for (const key of ['x', 'y', 'width', 'height', 'rotation']) {
@@ -256,6 +262,9 @@ export function validateProjectSchema(schema, { requireAsset = false } = {}) {
       if (tag && !allowedTypes.includes(tag.dataType)) {
         error('binding.type', `${component.name || component.type} cannot bind to ${tag.dataType} tag ${tagId}.`, `${path}.binding.tagId`)
       }
+      if (tag && SCADA_PROCESS_COMPONENT_TYPE_SET.has(component.type) && tag.access === 'write') {
+        error('binding.writeonly', `${component.name || component.type} requires a readable process-state tag.`, `${path}.binding.tagId`)
+      }
     }
 
     if (isChart) {
@@ -291,6 +300,21 @@ export function validateProjectSchema(schema, { requireAsset = false } = {}) {
       error('rule.value', `${rule.operator} rule requires a finite comparison value.`, `${path}.properties.rule.value`)
     } else if (['between', 'outside'].includes(rule?.operator) && (!Number.isFinite(Number(rule.min)) || !Number.isFinite(Number(rule.max)) || Number(rule.max) < Number(rule.min))) {
       error('rule.range', `${rule.operator === 'outside' ? 'Outside' : 'Between'} rule requires finite minimum and maximum values in ascending order.`, `${path}.properties.rule`)
+    }
+
+    if (SCADA_PROCESS_COMPONENT_TYPE_SET.has(component?.type)) {
+      const properties = component.properties || {}
+      for (const key of ['activeColor', 'idleColor']) {
+        if (properties[key] != null && (typeof properties[key] !== 'string' || !/^#[0-9a-f]{6}$/i.test(properties[key]))) error('process.color', 'Process component colors must use six-digit hexadecimal values.', `${path}.properties.${key}`)
+      }
+      for (const key of ['activeText', 'inactiveText']) {
+        if (properties[key] != null && !boundedText(properties[key], 40)) error('process.stateText', 'Process state text must contain 1 to 40 safe characters.', `${path}.properties.${key}`)
+      }
+      if (properties.glow != null && typeof properties.glow !== 'boolean') error('process.glow', 'Process component glow must be a boolean.', `${path}.properties.glow`)
+      if (properties.animate != null && typeof properties.animate !== 'boolean') error('process.animate', 'Process component animation must be a boolean.', `${path}.properties.animate`)
+      if (component.type === 'valve' && !VALVE_ORIENTATIONS.has(properties.orientation || 'horizontal')) error('valve.orientation', 'Valve orientation must be horizontal or vertical.', `${path}.properties.orientation`)
+      if (component.type === 'pipe' && !PIPE_DIRECTIONS.has(properties.direction || 'forward')) error('pipe.direction', 'Pipe stream direction must be forward or reverse.', `${path}.properties.direction`)
+      if (component.type !== 'pipe' && !PROCESS_EQUIPMENT_TYPE_SET.has(component.type)) error('process.type', 'Unsupported process equipment type.', `${path}.type`)
     }
 
     if (component?.type === 'alarm') {
@@ -553,7 +577,7 @@ export function migrateProjectSchema(input) {
       return { ...component, properties }
     })
   }
-  migrateNumericConfiguration(schema, { legacy: sourceVersion !== '1.6.0' })
+  migrateNumericConfiguration(schema, { legacy: !['1.6.0', '1.7.0'].includes(sourceVersion) })
   schema.project = { ...schema.project, projectType: schema.project?.projectType || DEFAULT_PROJECT_TYPE, runtimeProfile: runtimeProfile(schema) }
   migrateIotDashboardCanvasTheme(schema)
   if (isIotDashboardProject(schema) && !schema.project.dashboardLayout) schema.project.dashboardLayout = createResponsiveDashboardLayout()

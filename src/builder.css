@@ -1769,6 +1769,230 @@ body.sb-is-resizing-sidebar * {
   font-family: ui-monospace, monospace;
 }
 
+.sb-process-equipment {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  place-items: center;
+  gap: 2%;
+  overflow: visible;
+  color: #dbe8ec;
+  container-type: size;
+}
+
+.sb-process-equipment>svg {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: visible;
+  color: var(--equipment-color);
+  filter: drop-shadow(0 3px 3px #0009);
+}
+
+.sb-equipment-body {
+  fill: color-mix(in srgb, var(--equipment-color) 54%, #182126);
+  stroke: color-mix(in srgb, var(--equipment-color) 68%, #d4e4e8);
+  stroke-width: 3;
+  stroke-linejoin: round;
+  transition: fill .2s ease, stroke .2s ease;
+}
+
+.sb-equipment-pipe,
+.sb-equipment-base,
+.sb-equipment-detail {
+  fill: none;
+  stroke: color-mix(in srgb, var(--equipment-color) 62%, #9eafb5);
+  stroke-width: 5;
+  stroke-linecap: square;
+  stroke-linejoin: round;
+}
+
+.sb-equipment-base { stroke-width: 4; }
+.sb-equipment-detail { stroke-width: 3; }
+
+.sb-equipment-actuator {
+  fill: #39474c;
+  stroke: color-mix(in srgb, var(--equipment-color) 58%, #c4d2d6);
+  stroke-width: 2;
+}
+
+.sb-equipment-motion {
+  fill: color-mix(in srgb, var(--equipment-color) 72%, #202a2e);
+  stroke: color-mix(in srgb, var(--equipment-color) 72%, #d8e5e8);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transform-box: view-box;
+  transform-origin: 90px 50px;
+}
+
+.sb-process-equipment.type-pump .sb-equipment-motion { transform-origin: 90px 57px; }
+
+.sb-equipment-hub {
+  fill: #c9d4d7;
+  stroke: #263237;
+  stroke-width: 2;
+}
+
+.sb-equipment-letter {
+  fill: #eaf3f5;
+  font: 900 24px/1 ui-monospace, monospace;
+  text-anchor: middle;
+}
+
+.sb-process-equipment.type-valve.is-vertical .sb-equipment-orientation {
+  transform-box: view-box;
+  transform-origin: 90px 51px;
+  transform: rotate(90deg);
+}
+
+.sb-process-equipment.is-active.has-glow>svg {
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--equipment-active-color) 65%, transparent)) drop-shadow(0 3px 3px #0009);
+}
+
+.sb-process-equipment.is-active.is-animated .sb-equipment-motion {
+  animation: sb-equipment-rotate 1.15s linear infinite;
+}
+
+.sb-process-equipment.type-motor.is-active.is-animated .sb-equipment-motion {
+  animation-duration: .85s;
+}
+
+.sb-equipment-caption {
+  max-width: 100%;
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: .6em;
+  overflow: hidden;
+  font-family: ui-monospace, monospace;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.sb-equipment-caption strong {
+  overflow: hidden;
+  font-size: clamp(7px, 8cqh, 13px);
+  letter-spacing: .08em;
+  text-overflow: ellipsis;
+}
+
+.sb-equipment-caption small {
+  color: var(--equipment-color);
+  font-size: clamp(6px, 6cqh, 10px);
+  font-weight: 800;
+  letter-spacing: .08em;
+}
+
+.sb-process-equipment:not(.quality-good)>svg { opacity: .48; }
+
+.sb-pipe-component {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  align-items: center;
+  overflow: visible;
+  color: #dbe8ec;
+  container-type: size;
+}
+
+.sb-pipe-component>svg {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: visible;
+  filter: drop-shadow(0 3px 2px #0009);
+}
+
+.sb-pipe-casing,
+.sb-pipe-fill,
+.sb-pipe-stream {
+  fill: none;
+  vector-effect: non-scaling-stroke;
+}
+
+.sb-pipe-casing {
+  stroke: #101619;
+  stroke-width: 18;
+  stroke-linecap: butt;
+}
+
+.sb-pipe-fill {
+  stroke: var(--pipe-color);
+  stroke-width: 12;
+  stroke-linecap: butt;
+  transition: stroke .2s ease;
+}
+
+.sb-pipe-stream {
+  opacity: 0;
+  stroke: #e9ffff;
+  stroke-width: 3;
+  stroke-dasharray: 14 12;
+  stroke-linecap: round;
+}
+
+.sb-pipe-component.is-active .sb-pipe-stream { opacity: .9; }
+
+.sb-pipe-component.is-active.has-glow>svg {
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--pipe-active-color) 72%, transparent)) drop-shadow(0 3px 2px #0009);
+}
+
+.sb-pipe-component.is-active.is-animated .sb-pipe-stream {
+  animation: sb-pipe-stream .85s linear infinite;
+}
+
+.sb-pipe-component.is-reverse .sb-pipe-stream { animation-direction: reverse; }
+
+.sb-pipe-caption {
+  max-width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1em;
+  overflow: hidden;
+  font-family: ui-monospace, monospace;
+  white-space: nowrap;
+}
+
+.sb-pipe-caption strong {
+  overflow: hidden;
+  font-size: clamp(6px, 12cqh, 11px);
+  letter-spacing: .1em;
+  text-overflow: ellipsis;
+}
+
+.sb-pipe-caption small {
+  display: inline-flex;
+  align-items: center;
+  gap: .45em;
+  color: var(--pipe-color);
+  font-size: clamp(5px, 10cqh, 9px);
+  font-weight: 800;
+  letter-spacing: .08em;
+}
+
+.sb-pipe-caption i {
+  width: .65em;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: var(--pipe-color);
+  box-shadow: 0 0 0 1px #020607;
+}
+
+.sb-pipe-component.is-active.has-glow .sb-pipe-caption i {
+  box-shadow: 0 0 8px var(--pipe-active-color), 0 0 0 1px #020607;
+}
+
+.sb-pipe-component:not(.quality-good)>svg { opacity: .48; }
+
+.board-tone-light :is(.sb-process-equipment, .sb-pipe-component) { color: #1c2b31; }
+
+@keyframes sb-equipment-rotate { to { transform: rotate(360deg); } }
+@keyframes sb-pipe-stream { to { stroke-dashoffset: -26; } }
+
 .sb-alarm-component {
   width: 100%;
   height: 100%;
@@ -1934,7 +2158,9 @@ body.sb-is-resizing-sidebar * {
 
 @media (prefers-reduced-motion: reduce) {
   .sb-alarm-component.is-flashing .sb-alarm-beacon-light,
-  .sb-alarm-component.is-flashing .sb-alarm-wave { animation: none; }
+  .sb-alarm-component.is-flashing .sb-alarm-wave,
+  .sb-process-equipment.is-animated .sb-equipment-motion,
+  .sb-pipe-component.is-animated .sb-pipe-stream { animation: none; }
 }
 
 .sb-value-component,
@@ -9094,4 +9320,380 @@ body.sb-is-resizing-sidebar * {
 .sb-runtime-profile-banner span {
   color: var(--sb-muted, #a8b2b9);
   font-size: 12px;
+}
+
+/* IoT Dashboard components: original silhouettes with a low-glare matte skin. */
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) {
+  --sb-iot-matte: #111a1d;
+  --sb-iot-matte-raised: #182326;
+  --sb-iot-matte-line: #405158;
+  --sb-iot-matte-muted: #8da2aa;
+  --sb-iot-matte-texture: radial-gradient(circle at 1px 1px, #ffffff10 .55px, transparent .75px);
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard)
+  :is(.sb-value-component, .sb-tuning-component) {
+  border-color: var(--sb-iot-matte-line);
+  border-radius: 5px;
+  background-color: var(--sb-iot-matte);
+  background-image: var(--sb-iot-matte-texture) !important;
+  background-size: 4px 4px;
+  box-shadow: inset 0 0 18px #0008, 2px 2px 0 #030708;
+}
+
+/* KPI / Value Span */
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-value-component {
+  place-items: center;
+  padding: 8%;
+  text-align: center;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-value-component .sb-value-label {
+  color: var(--sb-iot-matte-muted);
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-value-component strong {
+  align-self: center;
+  justify-self: center;
+  font-family: ui-monospace, monospace;
+  font-size: clamp(10px, 1.6vw, 28px);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  text-shadow: 0 0 10px color-mix(in srgb, currentColor 16%, transparent);
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-value-component small {
+  color: var(--sb-iot-matte-muted);
+}
+
+/* Indicator Lamp keeps its original silhouette; only the lens is matte. */
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-lamp-component {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  text-align: center;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-runtime-lamp {
+  width: 52%;
+  border-color: #11191c;
+  background-color: color-mix(in srgb, var(--lamp-color) 76%, #111a1d);
+  background-image: var(--sb-iot-matte-texture);
+  background-size: 4px 4px;
+  box-shadow: inset 0 0 0 1px #ffffff14, inset 0 -3px 7px #0008;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-runtime-lamp.has-glow {
+  box-shadow: 0 0 12px color-mix(in srgb, var(--lamp-color) 65%, transparent), inset 0 0 0 1px #ffffff18, inset 0 -3px 7px #0008;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-lamp-label {
+  align-self: auto;
+  color: #dcebed;
+  font-size: clamp(7px, 1.1vw, 15px);
+  letter-spacing: .08em;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-lamp-state {
+  align-self: auto;
+  width: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--sb-iot-matte-muted);
+  font-size: clamp(6px, .75vw, 10px);
+  letter-spacing: normal;
+}
+
+/* Alarm keeps the original vertical instrument layout. */
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-alarm-component {
+  grid-template-columns: none;
+  grid-template-rows: minmax(0, 1fr) auto auto auto;
+  place-items: center;
+  gap: 3%;
+  padding: 7%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  text-align: center;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard)
+  :is(.sb-alarm-beacon, .sb-alarm-buzzer) {
+  grid-column: auto;
+  grid-row: auto;
+  align-self: stretch;
+  justify-self: auto;
+  width: auto;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-alarm-label {
+  grid-column: auto;
+  align-self: auto;
+  color: var(--sb-iot-matte-muted);
+  font-size: clamp(7px, 7cqw, 14px);
+  letter-spacing: .08em;
+  text-align: center;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-alarm-state {
+  grid-column: auto;
+  align-self: auto;
+  font-size: clamp(8px, 8cqw, 16px);
+  letter-spacing: .12em;
+  text-align: center;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-alarm-silence {
+  grid-column: auto;
+  justify-self: auto;
+  border-color: var(--sb-iot-matte-line);
+  border-radius: 4px;
+  background-color: var(--sb-iot-matte-raised);
+  background-image: var(--sb-iot-matte-texture) !important;
+  background-size: 4px 4px;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-alarm-beacon-cap,
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-alarm-beacon-base {
+  background-color: #46555a;
+  background-image: var(--sb-iot-matte-texture);
+  background-size: 4px 4px;
+  box-shadow: inset 0 0 0 1px #ffffff12, inset 0 -2px 4px #0008;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-alarm-beacon-light {
+  background-color: color-mix(in srgb, var(--alarm-idle-color) 78%, #141c1f);
+  background-image: var(--sb-iot-matte-texture);
+  background-size: 4px 4px;
+  box-shadow: inset 0 0 0 1px #ffffff12, inset 0 -4px 9px #0009;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-alarm-component.is-active .sb-alarm-beacon-light {
+  background-color: color-mix(in srgb, var(--alarm-active-color) 82%, #141c1f);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--alarm-active-color) 60%, transparent), inset 0 0 0 1px #ffffff16, inset 0 -4px 9px #0009;
+}
+
+/* Gauge keeps the original face and geometry with low-glare materials. */
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-gauge-component {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-gauge-component > svg {
+  position: static;
+  filter: drop-shadow(0 4px 6px #0008);
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-gauge-shadow {
+  fill: #02090c99;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-gauge-face {
+  fill: #131d20;
+  stroke: var(--sb-iot-matte-line);
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard)
+  :is(.sb-gauge-ticks text, .sb-gauge-label, .sb-gauge-unit, .sb-gauge-quality, .sb-gauge-digital text) {
+  fill: var(--sb-text);
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-gauge-track {
+  stroke: #29383d;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-gauge-ticks line {
+  stroke: color-mix(in srgb, var(--sb-accent) 30%, #587079);
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-gauge-digital rect {
+  fill: var(--sb-iot-matte);
+  stroke: var(--sb-iot-matte-line);
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-gauge-hub-outer {
+  fill: #aab6b9;
+  stroke: #56666c;
+  filter: drop-shadow(0 1px 1px #0008);
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-gauge-hub-inner {
+  fill: #7e8d92;
+}
+
+/* Command button keeps the compact SCADA silhouette, but swaps gloss for matte. */
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-control-component {
+  place-content: normal;
+  place-items: center;
+  gap: 0;
+  padding: 0;
+  border: 2px solid color-mix(in srgb, var(--button-color) 38%, #11191c);
+  border-radius: 4px;
+  background-color: color-mix(in srgb, var(--button-color) 48%, #151d20);
+  background-image: var(--sb-iot-matte-texture);
+  background-size: 4px 4px;
+  color: #eef7f8;
+  box-shadow: 2px 2px 0 #050809, inset 0 0 0 1px #ffffff10, inset 0 -3px 6px #0005;
+  text-align: center;
+  transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-control-component strong {
+  font-family: inherit;
+  font-size: clamp(7px, 1vw, 14px);
+  letter-spacing: normal;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-control-component span {
+  width: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #c3d0d3;
+  opacity: .72;
+  letter-spacing: normal;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-control-component:hover:not(:disabled),
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-control-component:focus-visible {
+  border-color: color-mix(in srgb, var(--button-color) 62%, #91a3a8);
+  box-shadow: 2px 2px 0 #050809, inset 0 0 0 1px #ffffff16, inset 0 -3px 6px #0005, 0 0 9px color-mix(in srgb, var(--button-color) 22%, transparent);
+  transform: translateY(-1px);
+}
+
+/* Chart launcher retains the original centered button treatment. */
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-chart-launcher {
+  position: static;
+  isolation: auto;
+  display: grid;
+  place-items: center;
+  padding: 0 !important;
+  border: 1px solid var(--sb-iot-matte-line) !important;
+  border-radius: 5px !important;
+  background-color: var(--sb-iot-matte-raised) !important;
+  background-image: var(--sb-iot-matte-texture) !important;
+  background-size: 4px 4px !important;
+  color: #dcebed !important;
+  box-shadow: inset 0 0 0 1px #ffffff0c, inset 0 -3px 7px #0008, 2px 2px 0 #050809;
+  text-align: center;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-chart-launcher::before {
+  content: none;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-chart-launcher::after {
+  content: none;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-chart-launcher:hover,
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-chart-launcher:focus-visible {
+  border-color: #71858c !important;
+  color: #fff !important;
+  box-shadow: inset 0 0 0 1px #ffffff12, inset 0 -3px 7px #0008, 2px 2px 0 #050809, 0 0 9px #2ce6eb24;
+}
+
+/* Slider and mode controls retain their original geometry with matte surfaces. */
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-tuning-component {
+  border-radius: 5px;
+  background-color: var(--sb-iot-matte);
+  box-shadow: inset 0 0 18px #0008, 2px 2px 0 #030708;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-tuning-component input[type="range"]::-webkit-slider-runnable-track {
+  border-color: #101719;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--tuning-accent) 68%, #263337) 0 var(--tuning-progress), #263337 var(--tuning-progress) 100%);
+  box-shadow: inset 0 2px 4px #000b;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-tuning-component input[type="range"]::-webkit-slider-thumb {
+  border: 2px solid #101719;
+  background: color-mix(in srgb, var(--tuning-accent) 72%, #354247);
+  box-shadow: inset 0 0 0 1px #ffffff1a, 0 0 0 2px #65767c, 0 3px 5px #000b;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-tuning-component input[type="range"]::-moz-range-track {
+  border-color: #101719;
+  background: #263337;
+  box-shadow: inset 0 2px 4px #000b;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-tuning-component input[type="range"]::-moz-range-progress {
+  border-color: color-mix(in srgb, var(--tuning-accent) 68%, #263337);
+  background: color-mix(in srgb, var(--tuning-accent) 68%, #263337);
+  box-shadow: none;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-tuning-component input[type="range"]::-moz-range-thumb {
+  border: 2px solid #101719;
+  background: color-mix(in srgb, var(--tuning-accent) 72%, #354247);
+  box-shadow: inset 0 0 0 1px #ffffff1a, 0 0 0 2px #65767c, 0 3px 5px #000b;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-operation-shifter-trigger,
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-control-popup-launcher {
+  overflow: hidden;
+  border: 1px solid var(--sb-iot-matte-line) !important;
+  border-radius: 5px !important;
+  background-color: var(--sb-iot-matte-raised) !important;
+  background-image: var(--sb-iot-matte-texture) !important;
+  background-size: 4px 4px !important;
+  color: #e7f1f2 !important;
+  box-shadow: inset 0 0 0 1px #ffffff0c, inset 0 -3px 7px #0008, 2px 2px 0 #050809 !important;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-operation-shifter-trigger span,
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-control-popup-launcher span {
+  color: var(--sb-iot-matte-muted);
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-operation-shifter-menu {
+  overflow: hidden;
+  border-color: var(--sb-iot-matte-line);
+  border-radius: 2px;
+  background-color: #11191c;
+  background-image: var(--sb-iot-matte-texture);
+  background-size: 4px 4px;
+  box-shadow: 0 10px 24px #000b;
+}
+
+/* Expanded IoT charts use the same low-glare material without extra framing. */
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-chart-fullscreen {
+  border-color: var(--sb-iot-matte-line);
+  border-radius: 5px;
+  background-color: #10181b;
+  background-image: var(--sb-iot-matte-texture);
+  background-size: 4px 4px;
+  box-shadow: 0 18px 46px #000c;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-chart-fullscreen > header {
+  border-bottom-color: var(--sb-iot-matte-line);
+  background: #162124;
+}
+
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-chart-legend,
+:is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-chart-plot {
+  border-color: var(--sb-iot-matte-line);
+  background: #0c1315;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :is(.sb-app.mode-iot-dashboard, .sb-preview-page.mode-iot-dashboard, .sb-published-runtime.mode-iot-dashboard) .sb-control-component {
+    transform: none !important;
+  }
 }

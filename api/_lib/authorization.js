@@ -46,7 +46,12 @@ export function requireWorkspacePermission(principal, res, permission) {
   return false
 }
 
-export async function requireProjectPermission(principal, res, projectOrId, permission, { bypassProjectLock = false } = {}) {
+export function loadProjectPermissionAssignment(principal, projectId) {
+  if (['OWNER', 'ADMIN', 'EDITOR'].includes(principal?.role)) return Promise.resolve(undefined)
+  return ProjectMember.findOne({ projectId, userId: principal?.id, status: 'active' }).lean()
+}
+
+export async function requireProjectPermission(principal, res, projectOrId, permission, { bypassProjectLock = false, projectAssignment = undefined } = {}) {
   const project = typeof projectOrId === 'string' ? await Project.findById(projectOrId) : projectOrId
   if (!project || project.workspaceId !== principal.workspaceId) {
     res.status(404).json({ error: 'Project not found.' })
@@ -54,7 +59,9 @@ export async function requireProjectPermission(principal, res, projectOrId, perm
   }
   let effectiveRole = principal.role
   if (!['OWNER', 'ADMIN', 'EDITOR'].includes(effectiveRole)) {
-    const assignment = await ProjectMember.findOne({ projectId: project.id, userId: principal.id, status: 'active' }).lean()
+    const assignment = projectAssignment === undefined
+      ? await ProjectMember.findOne({ projectId: project.id, userId: principal.id, status: 'active' }).lean()
+      : projectAssignment
     if (!assignment) {
       res.status(404).json({ error: 'Project not found.' })
       return null

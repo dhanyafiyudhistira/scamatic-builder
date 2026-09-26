@@ -1,6 +1,7 @@
 import { Component, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { commandUiState, evaluateRule, formatRuntimeValue, tuningInteractionState, valueSeverity } from '../../shared/runtime-evaluator.js'
-import { commandResultRetentionMs, isPendingCommandStatus } from '../../shared/command-lifecycle.js'
+import { commandResultRetentionMs, commandStatusPresentation, isPendingCommandStatus } from '../../shared/command-lifecycle.js'
+import { createControlCommandIntentQueue } from '../../shared/control-command-intent.js'
 import { offsetBounds, resizeComponentBounds, resolveSmartSnap, selectionBounds } from '../../shared/placement.js'
 import { TelemetryChart } from './TelemetryChart.jsx'
 import { rootRuntimeComponents } from '../../shared/control-popup.js'
@@ -517,10 +518,8 @@ class RuntimeComponentBoundary extends Component {
 }
 
 function RuntimeComponent({ component, designAsset, tag, value, quality, chartTags, editable, actorRole, onCommand, commandResult, onExpandChart, onOpenPopup, commandConnectionAvailable, operationMode = 'manual', onOperationModeChange, operationLockLabel = '' }) {
-  const [commandState, setCommandState] = useState('idle')
   const properties = component.properties || {}
   const qualityLabel = quality !== 'good' ? quality.toUpperCase() : null
-  const visibleCommandState = commandResult?.status || commandState
 
   if (component.type === 'indicator-lamp') {
     const active = evaluateRule(value, properties.rule)
@@ -614,38 +613,7 @@ function RuntimeComponent({ component, designAsset, tag, value, quality, chartTa
   }
 
   if (component.type === 'control-button') {
-    const permitted = canExecuteCommand(actorRole, properties.requiredRole)
-    const commandUi = commandUiState({
-      tag,
-      quality,
-      editable,
-      hasCommandHandler: Boolean(onCommand),
-      permitted,
-      connectionAvailable: commandConnectionAvailable,
-      commandState: visibleCommandState,
-      interlockLabel: operationLockLabel,
-    })
-    const runCommand = async event => {
-      event.stopPropagation()
-      if (commandUi.disabled) return
-      if (properties.confirmation === 'single' && !window.confirm(`Send command “${properties.label || component.name}”?`)) return
-      setCommandState('requested')
-      let terminalState = 'failed'
-      try {
-        const result = await onCommand(component, tag)
-        terminalState = result?.status || (result?.ok ? 'acknowledged' : 'failed')
-      } catch {
-        terminalState = 'failed'
-      }
-      setCommandState(terminalState)
-      window.setTimeout(() => setCommandState('idle'), commandResultRetentionMs(terminalState))
-    }
-    return (
-      <button type="button" className={`sb-control-component state-${commandUi.label.toLowerCase().replaceAll(' ', '-')}`} style={{ '--button-color': properties.buttonColor || '#f6b73c' }} disabled={commandUi.disabled} onClick={runCommand}>
-        <strong>{isPendingCommandStatus(visibleCommandState) ? 'SENDING…' : properties.label || component.name}</strong>
-        <span>{commandUi.label}</span>
-      </button>
-    )
+    return <ControlButtonComponent component={component} tag={tag} value={value} quality={quality} editable={editable} actorRole={actorRole} onCommand={onCommand} commandResult={commandResult} commandConnectionAvailable={commandConnectionAvailable} operationLockLabel={operationLockLabel} />
   }
 
   if (component.type === 'text-label') {
@@ -676,6 +644,76 @@ function RuntimeComponent({ component, designAsset, tag, value, quality, chartTa
       : <div className="sb-design-image-missing" role="status">IMAGE UNAVAILABLE</div>
   }
   return <div className="sb-invalid-component">Unsupported component</div>
+}
+
+function ControlButtonComponent({ component, tag, value, quality, editable, actorRole, onCommand, commandResult, commandConnectionAvailable, operationLockLabel }) {
+  const properties = component.properties || {}
+  const action = properties.action || 'toggle-boolean'
+  const queueRef = useRef(null)
+  if (!queueRef.current) queueRef.current = createControlCommandIntentQueue({ action, currentValue: value, payload: properties.payload })
+  queueRef.current.configure({ action, payload: properties.payload })
+  const [queueState, setQueueState] = useState(() => queueRef.current.snapshot())
+  const [commandState, setCommandState] = useState('idle')
+  const resetTimerRef = useRef(null)
+
+  useEffect(() => {
+    setQueueState(queueRef.current.sync(value))
+  }, [value])
+
+  useEffect(() => () => window.clearTimeout(resetTimerRef.current), [])
+
+  const permitted = canExecuteCommand(actorRole, properties.requiredRole)
+  const admissionUi = commandUiState({
+    tag,
+    quality,
+    editable,
+    hasCommandHandler: Boolean(onCommand),
+    permitted,
+    connectionAvailable: commandConnectionAvailable,
+    commandState: 'idle',
+    interlockLabel: operationLockLabel,
+  })
+  const visibleCommandState = queueState.inFlight ? 'requested' : commandResult?.status || commandState
+  const presentation = commandStatusPresentation(visibleCommandState)
+  const statusLabel = admissionUi.disabled ? admissionUi.label : queueState.queued ? 'QUEUED' : presentation.label
+
+  const dispatchQueuedCommands = async initialIntent => {
+    let intent = initialIntent
+    let terminalState = 'failed'
+    while (intent.kind === 'dispatch') {
+      setCommandState('requested')
+      let result
+      try {
+        result = await onCommand(component, tag, intent.value, { clientIntentAt: intent.intentAt })
+        terminalState = result?.status || (result?.ok ? 'acknowledged' : 'failed')
+      } catch {
+        result = { ok: false, status: 'failed' }
+        terminalState = 'failed'
+      }
+      intent = queueRef.current.settle(result)
+      setQueueState(intent.state)
+    }
+    setCommandState(terminalState)
+    window.clearTimeout(resetTimerRef.current)
+    resetTimerRef.current = window.setTimeout(() => setCommandState('idle'), commandResultRetentionMs(terminalState))
+  }
+
+  const runCommand = event => {
+    event.stopPropagation()
+    if (admissionUi.disabled) return
+    const clientIntentAt = Date.now()
+    if (properties.confirmation === 'single' && !window.confirm(`Send command “${properties.label || component.name}”?`)) return
+    const intent = queueRef.current.press(value, { intentAt: clientIntentAt })
+    setQueueState(intent.state)
+    if (intent.kind === 'dispatch') void dispatchQueuedCommands(intent)
+  }
+
+  return (
+    <button type="button" className={`sb-control-component state-${statusLabel.toLowerCase().replaceAll(' ', '-')}`} style={{ '--button-color': properties.buttonColor || '#f6b73c' }} disabled={admissionUi.disabled} onClick={runCommand}>
+      <strong>{queueState.queued ? 'QUEUED…' : queueState.inFlight ? 'SENDING…' : properties.label || component.name}</strong>
+      <span>{statusLabel}</span>
+    </button>
+  )
 }
 
 function ProcessEquipmentComponent({ component, tag, value, quality }) {

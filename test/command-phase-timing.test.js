@@ -21,6 +21,34 @@ test('command phase timer measures operations without delaying or changing their
   })
 })
 
+test('command phase timer reports atomic worker authorization separately', async () => {
+  let clock = 200
+  const timer = createCommandPhaseTimer({ now: () => clock })
+
+  await timer.measure('authorizationTransactionMs', async () => { clock += 24.6 })
+
+  assert.deepEqual(timer.snapshot(), {
+    authorizationTransactionMs: 25,
+    serverResponseReadyMs: 25,
+    unattributedMs: 0,
+  })
+  assert.equal(COMMAND_PHASE_TIMING_FIELDS.includes('authorizationTransactionMs'), true)
+})
+
+test('command phase timer reports atomic Simulation completion separately', async () => {
+  let clock = 300
+  const timer = createCommandPhaseTimer({ now: () => clock })
+
+  await timer.measure('simulationTransactionMs', async () => { clock += 42.2 })
+
+  assert.deepEqual(timer.snapshot(), {
+    simulationTransactionMs: 42,
+    serverResponseReadyMs: 42,
+    unattributedMs: 0,
+  })
+  assert.equal(COMMAND_PHASE_TIMING_FIELDS.includes('simulationTransactionMs'), true)
+})
+
 test('command phase timer preserves thrown errors and records the failed operation duration', async () => {
   let clock = 0
   const timer = createCommandPhaseTimer({ now: () => clock })

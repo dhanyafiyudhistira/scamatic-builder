@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { previousSimulationCommandValue, simulationCommandReadScope, simulationCommandState } from '../shared/simulation-command-state.js'
+import { previousSimulationCommandValue, simulationCommandHistoryRequired, simulationCommandReadScope, simulationCommandState } from '../shared/simulation-command-state.js'
 
 const schema = {
   tags: [
@@ -58,4 +58,11 @@ test('the newest relevant toggle effect is sufficient to reconstruct its previou
   const newestReset = { ...acknowledged, componentId: 'operation', tagId: 'mode.command', resultSummary: { value: { mode: 'reset' } } }
   assert.equal(previousSimulationCommandValue(schema, [newestButton], schema.components[0], schema.tags[2]), true)
   assert.equal(previousSimulationCommandValue(schema, [newestReset], schema.components[0], schema.tags[2]), false)
+})
+
+test('an explicit toggle intent does not reload history that cannot affect its result', () => {
+  assert.equal(simulationCommandHistoryRequired(schema.components[0], undefined), true)
+  assert.equal(simulationCommandHistoryRequired(schema.components[0], true), false)
+  assert.equal(simulationCommandHistoryRequired(schema.components[0], false), false)
+  assert.equal(simulationCommandHistoryRequired(schema.components[1], undefined), false)
 })

@@ -26,6 +26,7 @@ import { createRpcPerformanceTracker } from './connectors/rpc-performance.js'
 import { shouldRunProjectWorker } from '../shared/runtime-worker-mode.js'
 import { createTrailingTaskRunner } from './connectors/trailing-task-runner.js'
 import { buildCommandCandidateFilter, createCommandWakeBuffer } from './connectors/command-wake.js'
+import { loadRuntimeReconciliationInputs } from './connectors/runtime-reconciliation.js'
 
 if (process.env.CONNECTOR_PLATFORM_ENABLED !== 'true') {
   console.error('[ConnectorWorker] CONNECTOR_PLATFORM_ENABLED is not true; refusing to start.')
@@ -229,25 +230,23 @@ async function main() {
     await connectMongo()
     await reloadWorkspaceChartWriters()
     const now = new Date()
-    const [connectors, activeSessionProjectIds] = await Promise.all([
-      Connector.find({ enabled: true }).lean(),
-      RuntimeSession.distinct('projectId', { revokedAt: null, expiresAt: { $gt: now } }),
-    ])
-    const activeProjects = new Set(activeSessionProjectIds.map(String))
+    const connectors = await Connector.find({ enabled: true }).lean()
+    const reconciliation = await loadRuntimeReconciliationInputs({
+      connectors,
+      environmentRef,
+      findEnvironments: connectorIds => ConnectorEnvironment.find({ connectorId: { $in: connectorIds }, environmentRef }).lean(),
+      findProjects: projectIds => Project.find({ _id: { $in: projectIds } }).lean(),
+      findVersions: versionIds => ProjectVersion.find({ _id: { $in: versionIds } }).lean(),
+      findDrafts: projectIds => ProjectDraft.find({ _id: { $in: projectIds } }).lean(),
+      findActiveSessionProjectIds: projectIds => RuntimeSession.distinct('projectId', { projectId: { $in: projectIds }, revokedAt: null, expiresAt: { $gt: now } }),
+      selectRuntimeSchema: selectConnectorRuntimeSchema,
+    })
     const wanted = new Set()
-    for (const connector of connectors) {
-      const environment = await ConnectorEnvironment.findOne({ connectorId: connector._id, environmentRef }).lean()
-      const project = environment && await Project.findOne({ _id: connector.projectId, workspaceId: connector.workspaceId }).lean()
-      const version = project?.activeVersionId && await ProjectVersion.findById(project.activeVersionId).lean()
-      let selection = selectConnectorRuntimeSchema({ connector, environmentRef, publishedVersion: version })
-      let draft = null
-      if (!selection && project) {
-        draft = await ProjectDraft.findById(project._id).lean()
-        selection = selectConnectorRuntimeSchema({ connector, environmentRef, publishedVersion: version, draft })
-      }
+    const onlineEnvironmentIds = []
+    for (const { connector, environment, project, draft, selection } of reconciliation.items) {
       if (!environment?.secretConfiguredAt || !selection) continue
       if (!shouldRunProjectWorker(project, {
-        hasActiveSession: activeProjects.has(String(project._id)),
+        hasActiveSession: reconciliation.activeProjectIds.has(String(project._id)),
         selectionMode: selection.mode,
         draftUpdatedAt: draft?.updatedAt,
         now: now.getTime(),
@@ -255,7 +254,7 @@ async function main() {
       const { source, bindings, mode } = selection
       let authentication
       try {
-        authentication = await getThingsBoardAccessToken({ connectorId: connector._id, environmentRef })
+        authentication = await getThingsBoardAccessToken({ connectorId: connector._id, environmentRef, environment })
       } catch (error) {
         const message = error?.code === 'THINGSBOARD_JWT_EXPIRED'
           ? 'ThingsBoard JWT expired; reconnect the account in Builder.'
@@ -267,7 +266,7 @@ async function main() {
       const fingerprint = `${selection.fingerprint}:${JSON.stringify(environment.config || {})}:${authentication.secretUpdatedAt?.toISOString?.() || authentication.secretUpdatedAt}`
       const existingRuntime = runtimes.get(connector._id)
       if (existingRuntime?.fingerprint === fingerprint) {
-        if (environment.health?.state === 'online') await ConnectorEnvironment.updateOne({ _id: environment._id }, { $set: { 'health.checkedAt': new Date() } })
+        if (environment.health?.state === 'online') onlineEnvironmentIds.push(environment._id)
         continue
       }
       if (existingRuntime) { await existingRuntime.stop(); runtimes.delete(connector._id) }
@@ -297,6 +296,12 @@ async function main() {
       runtime.mode = mode
       runtimes.set(connector._id, runtime)
       runtime.start().catch(error => console.error('[ConnectorWorker] runtime stopped', connector._id, error.message))
+    }
+    if (onlineEnvironmentIds.length) {
+      await ConnectorEnvironment.updateMany(
+        { _id: { $in: onlineEnvironmentIds } },
+        { $set: { 'health.checkedAt': new Date() } },
+      )
     }
     for (const [id, runtime] of runtimes) if (!wanted.has(id)) { await runtime.stop(); runtimes.delete(id); healthSummaries.delete(id) }
   }

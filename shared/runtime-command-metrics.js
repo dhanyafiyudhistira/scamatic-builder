@@ -9,6 +9,7 @@ const TIMING_FIELDS = Object.freeze([
   'feedbackWaitMs',
   'serverTotalMs',
   ...COMMAND_PHASE_TIMING_FIELDS,
+  'clientIntentToDispatchMs',
   'clientEndToEndMs',
 ])
 

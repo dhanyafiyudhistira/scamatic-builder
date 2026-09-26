@@ -110,6 +110,7 @@ export async function refreshThingsBoardTokenPair({
 export async function getThingsBoardAccessToken({
   connectorId,
   environmentRef = 'staging',
+  environment: suppliedEnvironment = null,
   forceRefresh = false,
   rejectedToken = null,
   now = () => Date.now(),
@@ -117,7 +118,12 @@ export async function getThingsBoardAccessToken({
   validateTarget = assertSafeConnectorTarget,
   refreshWindowMs = DEFAULT_REFRESH_WINDOW_MS,
 }) {
-  const environment = await ConnectorEnvironment.findOne({ connectorId, environmentRef }).lean()
+  const suppliedMatches = suppliedEnvironment
+    && String(suppliedEnvironment.connectorId || '') === String(connectorId || '')
+    && String(suppliedEnvironment.environmentRef || 'staging') === String(environmentRef || 'staging')
+  const environment = suppliedMatches
+    ? suppliedEnvironment
+    : await ConnectorEnvironment.findOne({ connectorId, environmentRef }).lean()
   if (!environment?.secretConfiguredAt) throw authError('ThingsBoard authentication is not configured.', 'THINGSBOARD_AUTH_MISSING')
   const secretId = connectorSecretId(connectorId, environmentRef)
   let record = await loadSecret(secretId)

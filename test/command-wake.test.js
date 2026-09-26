@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
-import { persistWorkerCommandAuthorization } from '../api/_handlers/commands.js'
+import { authorizeWorkerCommand, persistWorkerCommandAuthorization } from '../api/_handlers/commands.js'
 
 test('worker authorization is durable and audited before the best-effort wake signal', async () => {
   const order = []
@@ -88,6 +88,32 @@ test('a lost authorization compare-and-set aborts without waking the worker', as
   assert.equal(wakeCount, 0)
 })
 
+test('a new worker command is inserted as authorized inside the active transaction', async () => {
+  const session = { id: 'mongo-session' }
+  const authorizedAt = new Date('2026-09-15T12:00:00.000Z')
+  const event = {
+    _id: 'command-atomic-create',
+    isNew: true,
+    toObject: () => ({ _id: 'command-atomic-create', status: 'requested', executionMode: 'worker' }),
+  }
+  let createCalls = 0
+  const commandEvents = {
+    async create(documents, options) {
+      createCalls += 1
+      assert.deepEqual(options, { session })
+      assert.equal(documents[0].status, 'authorized')
+      assert.equal(documents[0].authorizedAt, authorizedAt)
+      return [{ toObject: () => documents[0] }]
+    },
+  }
+
+  const result = await authorizeWorkerCommand(event, authorizedAt, session, commandEvents)
+
+  assert.equal(createCalls, 1)
+  assert.equal(result.status, 'authorized')
+  assert.equal(result._id, 'command-atomic-create')
+})
+
 test('production wiring commits authorization with its audit before sending a targeted wake', async () => {
   const [commands, server, worker] = await Promise.all([
     readFile(new URL('../api/_handlers/commands.js', import.meta.url), 'utf8'),
@@ -102,7 +128,9 @@ test('production wiring commits authorization with its audit before sending a ta
   assert.ok(authorization.indexOf('await audit(session)') < authorization.indexOf('await authorize(event'))
   assert.match(authorization, /status: 'requested', executionMode: 'worker'/)
   assert.match(commands, /MONGO_TRANSACTIONS_REQUIRED[\s\S]*res\.status\(503\)/)
-  assert.match(server, /requestCommandPoll\(event\?\._id\)/)
+  assert.match(commands, /executionPlan\.executionMode === 'worker'[\s\S]*new CommandEvent\(eventFields\)/)
+  assert.match(commands, /authorizationTransactionMs/)
+  assert.match(server, /requestCommandPoll\(String\(event\?\._id \|\| ''\)\)/)
   assert.match(worker, /commandWakeBuffer\?\.take\(available\)/)
   assert.match(worker, /buildCommandCandidateFilter\(\{ pendingIds, targetedIds \}\)/)
 })

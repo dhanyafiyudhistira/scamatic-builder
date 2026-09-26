@@ -107,6 +107,8 @@ test('mock command enforces writable access and returns acknowledgment values', 
   const result = executeMockCommand(component, { access: 'read-write', dataType: 'boolean' }, false)
   assert.equal(result.ok, true)
   assert.equal(result.value, true)
+  assert.equal(executeMockCommand(component, { access: 'read-write', dataType: 'boolean' }, false, false).value, false)
+  assert.equal(executeMockCommand(component, { access: 'read-write', dataType: 'boolean' }, false, 'false').ok, false)
 })
 
 test('tuning slider accepts aligned numeric setpoints and rejects unsafe payloads', () => {

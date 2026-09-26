@@ -14,34 +14,42 @@ import { discoverThingsBoardTelemetry, getThingsBoardDevice, listThingsBoardDevi
 
 const ENVIRONMENTS = new Set(['development', 'staging', 'production'])
 
-export default async function handler(req, res) {
-  const principal = await requirePrincipal(req, res)
-  if (!principal) return
-  const projectId = String(req.query?.projectId || req.body?.projectId || '')
-  if (!projectId) return res.status(400).json({ error: 'projectId is required.' })
+export function createConnectorHandler(overrides = {}) {
+  const dependencies = connectorHandlerDependencies(overrides)
+  return async function handler(req, res) {
+    const principal = await dependencies.requirePrincipal(req, res)
+    if (!principal) return
+    const projectId = String(req.query?.projectId || req.body?.projectId || '')
+    if (!projectId) return res.status(400).json({ error: 'projectId is required.' })
 
-  await connectMongo()
-  const project = await Project.findById(projectId)
-  const permission = req.method === 'GET' ? PERMISSIONS.BUILDER_READ : PERMISSIONS.SOURCE_CONFIGURE
-  if (!project || !(await requireProjectPermission(principal, res, project, permission))) return
-  if (req.method !== 'GET' && !requireCsrf(req, res, principal)) return
-  const rateScope = req.method === 'GET' ? 'connector-read' : 'connector-write'
-  const rateLimit = req.method === 'GET' ? 120 : 40
-  if (!(await enforceRateLimit(req, res, rateScope, { limit: rateLimit, windowMs: 60_000, identity: `${principal.id}:${projectId}` }))) return
+    await dependencies.connectMongo()
+    const project = await dependencies.findProject(projectId)
+    const permission = req.method === 'GET' ? PERMISSIONS.BUILDER_READ : PERMISSIONS.SOURCE_CONFIGURE
+    if (!project || !(await dependencies.requireProjectPermission(principal, res, project, permission))) return
+    if (req.method !== 'GET' && !dependencies.requireCsrf(req, res, principal)) return
+    const rateScope = req.method === 'GET' ? 'connector-read' : 'connector-write'
+    const rateLimit = req.method === 'GET' ? 120 : 40
+    if (!(await dependencies.enforceRateLimit(req, res, rateScope, { limit: rateLimit, windowMs: 60_000, identity: `${principal.id}:${projectId}` }))) return
 
-  try {
-    if (req.method === 'GET') return listConnectors(res, principal, projectId, req.query?.environmentRef)
-    if (req.method === 'POST' && req.body?.action) return connectorAction(req, res, principal, projectId)
-    if (req.method === 'POST') return createConnector(req, res, principal, projectId, project)
-    if (req.method === 'PUT') return updateConnector(req, res, principal, projectId, project)
-    if (req.method === 'DELETE') return deleteConnector(req, res, principal, projectId)
-    res.setHeader('Allow', 'GET, POST, PUT, DELETE')
-    return res.status(405).json({ error: `Method ${req.method} not allowed` })
-  } catch (error) {
-    if (error?.statusCode) return res.status(error.statusCode).json({ error: error.message })
-    return res.status(500).json({ error: 'Unable to process connector request.', code: 'CONNECTOR_REQUEST_FAILED', correlationId: requestId(req) })
+    try {
+      if (req.method === 'GET') return await listConnectors(res, principal, projectId, req.query?.environmentRef)
+      if (req.method === 'POST' && req.body?.action) return await dependencies.handleConnectorAction(req, res, principal, projectId, dependencies)
+      if (req.method === 'POST') return await createConnector(req, res, principal, projectId, project)
+      if (req.method === 'PUT') return await updateConnector(req, res, principal, projectId, project)
+      if (req.method === 'DELETE') return await deleteConnector(req, res, principal, projectId)
+      res.setHeader('Allow', 'GET, POST, PUT, DELETE')
+      return res.status(405).json({ error: `Method ${req.method} not allowed` })
+    } catch (error) {
+      if (error?.statusCode) {
+        const code = /^[A-Z][A-Z0-9_]{2,79}$/.test(String(error.code || '')) ? String(error.code) : null
+        return res.status(error.statusCode).json({ error: error.message, ...(code ? { code } : {}) })
+      }
+      return res.status(500).json({ error: 'Unable to process connector request.', code: 'CONNECTOR_REQUEST_FAILED', correlationId: requestId(req) })
+    }
   }
 }
+
+export default createConnectorHandler()
 
 async function listConnectors(res, principal, projectId, environmentRef = 'staging') {
   const environment = validEnvironment(environmentRef)
@@ -89,14 +97,15 @@ async function updateConnector(req, res, principal, projectId, project) {
   return res.status(200).json({ connector: publicConnector(connector.toObject(), environment.toObject()) })
 }
 
-async function connectorAction(req, res, principal, projectId) {
-  const connector = await ownedConnector(req.body?.connectorId, principal, projectId)
+export async function handleConnectorAction(req, res, principal, projectId, overrides = {}) {
+  const dependencies = connectorHandlerDependencies(overrides)
+  const connector = await dependencies.ownedConnector(req.body?.connectorId, principal, projectId)
   if (!connector) return res.status(404).json({ error: 'Connector not found.' })
   const environmentRef = validEnvironment(req.body?.environmentRef || 'staging')
-  const environment = await ConnectorEnvironment.findOne({ connectorId: connector.id, environmentRef })
+  const environment = await dependencies.findEnvironment(connector.id, environmentRef)
   if (!environment) return res.status(404).json({ error: 'Connector environment not found.' })
   const action = String(req.body.action)
-  if (['rotate-secret', 'connect-account', 'test', 'browse-devices', 'discover-device-telemetry', 'select-device'].includes(action) && !(await enforceRateLimit(req, res, `connector-${action}`, { limit: action === 'connect-account' ? 5 : action === 'browse-devices' ? 20 : 8, windowMs: 60_000, identity: `${principal.id}:${projectId}:${connector.id}` }))) return
+  if (['rotate-secret', 'connect-account', 'test', 'browse-devices', 'discover-device-telemetry', 'select-device'].includes(action) && !(await dependencies.enforceRateLimit(req, res, `connector-${action}`, { limit: action === 'connect-account' ? 5 : action === 'browse-devices' ? 20 : 8, windowMs: 60_000, identity: `${principal.id}:${projectId}:${connector.id}` }))) return
   if (action === 'connect-account') {
     if (!roleCan(principal.role, PERMISSIONS.SECRET_ROTATE)) return res.status(403).json({ error: 'Insufficient permission.', code: 'PERMISSION_DENIED' })
     const username = String(req.body?.username || '').trim()
@@ -191,37 +200,53 @@ async function connectorAction(req, res, principal, projectId) {
     return res.status(result.ok ? 200 : 422).json({ ok: result.ok, message: result.message, connector: publicConnector(connector.toObject(), environment.toObject()) })
   }
   if (action === 'browse-devices') {
-    const catalog = await withThingsBoardAccessToken(
+    const catalog = await dependencies.withThingsBoardAccessToken(
       { connectorId: connector.id, environmentRef },
-      jwt => listThingsBoardDevices({ serverUrl: environment.config?.serverUrl, jwt, page: req.body?.page, pageSize: 20, textSearch: req.body?.textSearch }),
+      jwt => dependencies.listThingsBoardDevices({ serverUrl: environment.config?.serverUrl, jwt, page: req.body?.page, pageSize: 20, textSearch: req.body?.textSearch }),
     )
     return res.status(200).json(catalog)
   }
   if (action === 'discover-device-telemetry') {
     const deviceId = String(req.body?.deviceId || environment.config?.deviceId || '')
-    const discovery = await withThingsBoardAccessToken(
+    const discovery = await dependencies.withThingsBoardAccessToken(
       { connectorId: connector.id, environmentRef },
-      jwt => discoverThingsBoardTelemetry({ serverUrl: environment.config?.serverUrl, jwt, deviceId }),
+      jwt => dependencies.discoverThingsBoardTelemetry({ serverUrl: environment.config?.serverUrl, jwt, deviceId }),
     )
     return res.status(200).json(discovery)
   }
   if (action === 'select-device') {
     const deviceId = String(req.body?.deviceId || '').trim()
     if (connector.enabled && environment.config?.deviceId !== deviceId) return res.status(409).json({ error: 'Disable the connector before switching its ThingsBoard device.', code: 'CONNECTOR_DEVICE_SWITCH_REQUIRES_DISABLE' })
-    const device = await withThingsBoardAccessToken(
+    const device = await dependencies.withThingsBoardAccessToken(
       { connectorId: connector.id, environmentRef },
-      jwt => getThingsBoardDevice({ serverUrl: environment.config?.serverUrl, jwt, deviceId }),
+      jwt => dependencies.getThingsBoardDevice({ serverUrl: environment.config?.serverUrl, jwt, deviceId }),
     )
-    const changedAt = new Date()
+    const outcome = await persistThingsBoardDeviceSelection({ connectorId: connector.id, environmentRef, device, principal, projectId }, dependencies)
+    if (outcome.status === 'not-found') return res.status(404).json({ error: 'Connector or environment no longer exists.' })
+    if (outcome.status === 'enabled-conflict') return res.status(409).json({ error: 'Disable the connector before switching its ThingsBoard device.', code: 'CONNECTOR_DEVICE_SWITCH_REQUIRES_DISABLE' })
+    return res.status(200).json({ device, connector: publicConnector(outcome.connector.toObject(), outcome.environment.toObject()) })
+  }
+  return res.status(400).json({ error: 'Unsupported connector action.' })
+}
+
+export async function persistThingsBoardDeviceSelection({ connectorId, environmentRef, device, principal, projectId }, overrides = {}) {
+  const dependencies = connectorHandlerDependencies(overrides)
+  return dependencies.runMongoTransaction(async session => {
+    const connector = await dependencies.ownedConnector(connectorId, principal, projectId, session)
+    if (!connector) return { status: 'not-found' }
+    const environment = await dependencies.findEnvironment(connector.id, environmentRef, session)
+    if (!environment) return { status: 'not-found' }
+    if (connector.enabled && environment.config?.deviceId !== device.id) return { status: 'enabled-conflict' }
+
+    const changedAt = dependencies.now()
     environment.config = { ...environment.config, deviceId: device.id }
     environment.health = { state: 'degraded', message: 'ThingsBoard device selected; test or enable the connector.', checkedAt: changedAt }
     environment.commandHealth = { state: 'unknown', message: 'No RPC result observed for the selected device.', checkedAt: changedAt }
     environment.updatedBy = principal.id
-    await environment.save()
-    await audit(principal, projectId, 'connector.device.selected', connector.id, { environmentRef, deviceId: device.id })
-    return res.status(200).json({ device, connector: publicConnector(connector.toObject(), environment.toObject()) })
-  }
-  return res.status(400).json({ error: 'Unsupported connector action.' })
+    await environment.save(session ? { session } : undefined)
+    await dependencies.audit(principal, projectId, 'connector.device.selected', connector.id, { environmentRef, deviceId: device.id }, session)
+    return { status: 'selected', connector, environment }
+  })
 }
 
 async function deleteConnector(req, res, principal, projectId) {
@@ -278,6 +303,34 @@ async function ownedConnector(id, principal, projectId, session = null) {
   const query = Connector.findOne({ _id: String(id || ''), workspaceId: principal.workspaceId, projectId })
   return session ? query.session(session) : query
 }
+
+async function findConnectorEnvironment(connectorId, environmentRef, session = null) {
+  const query = ConnectorEnvironment.findOne({ connectorId, environmentRef })
+  return session ? query.session(session) : query
+}
+
+function connectorHandlerDependencies(overrides = {}) {
+  return {
+    requirePrincipal,
+    connectMongo,
+    findProject: projectId => Project.findById(projectId),
+    requireProjectPermission,
+    requireCsrf,
+    enforceRateLimit,
+    handleConnectorAction,
+    ownedConnector,
+    findEnvironment: findConnectorEnvironment,
+    withThingsBoardAccessToken,
+    listThingsBoardDevices,
+    discoverThingsBoardTelemetry,
+    getThingsBoardDevice,
+    runMongoTransaction,
+    audit,
+    now: () => new Date(),
+    ...(overrides && typeof overrides === 'object' ? overrides : {}),
+  }
+}
+
 function boundedNumber(value, min, max, fallback) { const number = Number(value); return Number.isFinite(number) ? Math.min(max, Math.max(min, Math.round(number))) : fallback }
 async function audit(principal, projectId, action, targetId, metadata, session = null) {
   const event = { workspaceId: principal.workspaceId, projectId, actorId: principal.id, action, targetType: 'connector', targetId, correlationId: null, metadata: redactMetadata(metadata) }

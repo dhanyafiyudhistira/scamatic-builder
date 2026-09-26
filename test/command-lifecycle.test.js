@@ -14,6 +14,7 @@ import {
 } from '../shared/command-lifecycle.js'
 
 test('command lifecycle separates gateway progress from terminal device outcomes', () => {
+  assert.deepEqual(commandStatusPresentation('idle'), { state: 'idle', label: 'IDLE', tone: 'neutral' })
   assert.equal(isPendingCommandStatus('accepted_by_gateway'), true)
   assert.equal(isTerminalCommandStatus('accepted_by_gateway'), false)
   assert.equal(commandStatusPresentation('accepted_by_gateway').label, 'AWAITING FEEDBACK')

@@ -382,16 +382,40 @@ including tag values or secret material.
 
 Desktop commands continue to enter through `127.0.0.1:3001`, remain durable and
 idempotent in MongoDB, and execute only in the managed Node connector worker.
+Authentication joins the live session, user, and workspace membership in one
+server-side MongoDB command instead of two network waves. For Operator requests,
+the project assignment lookup overlaps the project, runtime-session, and
+idempotency reads while preserving the same live authorization decision.
 Independent project/session reads used by status polling run concurrently. The
 worker also keeps a bounded, expiring LRU of immutable published versions so a
 repeated command does not reload the same schema on every dispatch batch.
+Worker authorization inserts the already-authorized command and its audit event
+in one MongoDB transaction, avoiding a separate requested-state write while
+preserving the fail-closed audit boundary.
+Simulation completion likewise stores its two audit records and one final
+command through two operations in one transaction instead of six sequential
+writes. Explicit boolean toggle intents also skip the legacy state-history read,
+which remains available for older clients that omit the target value. Runtime
+metrics now begin at the operator intent, so confirmation and
+bounded queue delay are visible separately from API and database time.
+Runtime command rate limits reserve small, bounded permit leases, so normal
+operator bursts do not require a control-database write for every press while
+the shared per-user/project ceiling remains enforced. Each lease is replenished
+asynchronously at a bounded low-water mark so a later press does not absorb the
+periodic reservation delay. Control Buttons retain at
+most one pending intent: toggle commands coalesce to the latest desired state,
+pulses retain one trailing edge, and device commands remain strictly serialized.
+Periodic worker reconciliation batch-loads environments, projects, versions,
+and drafts. Published `Smart` and `Always On` projects skip the active-session
+query because a session cannot change their lifecycle decision.
 
 Worker readiness at `/health/data-plane/ready` includes safe aggregate RPC
 diagnostics: queue pressure, version-cache hits/misses, terminal status counts,
 and bounded `p50`/`p95`/`p99` phase timings. Payload values, request IDs, JWTs,
 connector secrets, and tag identities are never included. Run the controlled
-round-trip comparison with `npm run bench:rpc`; it measures overlapped and
-avoided local MongoDB waits, not Internet or ThingsBoard latency.
+round-trip comparison with `npm run bench:rpc`; it measures overlapped reads,
+cached reads, and the avoided authorization write using controlled MongoDB
+delays—not Internet or ThingsBoard latency.
 
 ```powershell
 npm run rust:test

@@ -53,3 +53,8 @@ export function simulationCommandReadScope(schema, component, tag) {
     .filter(Boolean)
   return { componentId: component.id, tagId: tag.id, resetComponentIds }
 }
+
+export function simulationCommandHistoryRequired(component, requestedValue) {
+  const action = component?.properties?.action || 'toggle-boolean'
+  return component?.type === 'control-button' && action === 'toggle-boolean' && requestedValue === undefined
+}

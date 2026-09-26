@@ -13,14 +13,16 @@ test('command admission starts independent MongoDB reads without serial waits', 
     loadProject: read('project', { id: 'project-1' }),
     loadRuntimeSession: read('runtime-session', { id: 'session-1' }),
     loadDuplicate: read('duplicate', null),
+    loadProjectAssignment: read('project-assignment', { role: 'OPERATOR' }),
   })
 
-  assert.deepEqual(started, ['project', 'runtime-session', 'duplicate'])
+  assert.deepEqual(started, ['project', 'runtime-session', 'duplicate', 'project-assignment'])
   for (const release of pending.values()) release()
   assert.deepEqual(await resultPromise, {
     project: { id: 'project-1' },
     runtimeSession: { id: 'session-1' },
     duplicate: null,
+    projectAssignment: { role: 'OPERATOR' },
   })
 })
 
@@ -34,13 +36,15 @@ test('command status overlaps project authorization context and runtime-session 
   const resultPromise = loadCommandStatusReads({
     loadProject: read('project', { id: 'project-1' }),
     loadRuntimeSession: read('runtime-session', { id: 'session-1' }),
+    loadProjectAssignment: read('project-assignment', { role: 'OPERATOR' }),
   })
 
-  assert.deepEqual(started, ['project', 'runtime-session'])
+  assert.deepEqual(started, ['project', 'runtime-session', 'project-assignment'])
   for (const release of pending.values()) release()
   assert.deepEqual(await resultPromise, {
     project: { id: 'project-1' },
     runtimeSession: { id: 'session-1' },
+    projectAssignment: { role: 'OPERATOR' },
   })
 })
 

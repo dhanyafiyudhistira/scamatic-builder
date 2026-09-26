@@ -878,8 +878,13 @@ export default function RuntimeApp({ slug, metricsEnabled = false }) {
     return () => { cancelled = true }
   }, [rememberCommandResult, runtime?.projectId, runtime?.schema?.components, runtimeSession?.stream?.url, runtimeSession?.token, waitForCommandPush])
 
-  const runCommand = async (component, tag, requestedValue) => {
-    const clientStartedAt = Date.now()
+  const runCommand = async (component, tag, requestedValue, commandContext = {}) => {
+    const clientDispatchedAt = Date.now()
+    const suppliedIntentAt = Number(commandContext?.clientIntentAt)
+    const clientStartedAt = Number.isFinite(suppliedIntentAt) && suppliedIntentAt >= 0 && suppliedIntentAt <= clientDispatchedAt
+      ? suppliedIntentAt
+      : clientDispatchedAt
+    const clientIntentToDispatchMs = Math.round(clientDispatchedAt - clientStartedAt)
     const commandRequestId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`
     if (commandMetricsRecorderRef.current?.start(commandRequestId, { startedAt: clientStartedAt })) scheduleCommandMetricsRefresh()
     if (profile.id === 'simulation' && component.type === 'operation-shifter') cancelSimulationSequence(component.id)
@@ -965,7 +970,10 @@ export default function RuntimeApp({ slug, metricsEnabled = false }) {
           }, result.resetAfterMs)
         }
       }
-      return rememberCommandResult(component, result)
+      return rememberCommandResult(component, {
+        ...result,
+        timing: { ...(result?.timing || {}), clientIntentToDispatchMs },
+      })
     } catch (requestError) {
       const rejected = Number(requestError.status) >= 400 && Number(requestError.status) < 500
       return rememberCommandResult(component, {
@@ -976,6 +984,7 @@ export default function RuntimeApp({ slug, metricsEnabled = false }) {
         code: requestError.code || 'COMMAND_STATUS_UNKNOWN',
         tagId: tag?.id,
         correlationId: requestError.correlationId || null,
+        timing: { clientIntentToDispatchMs },
       })
     }
   }
@@ -1131,7 +1140,9 @@ async function reconcileCommandStatus({ projectId, runtimeToken, requestId, init
         continue
       }
     } else {
-      await new Promise(resolve => window.setTimeout(resolve, 500))
+      // Keep the no-stream fallback responsive without busy polling. The
+      // status endpoint uses leased rate-limit permits for this cadence.
+      await new Promise(resolve => window.setTimeout(resolve, 250))
     }
     if (Date.now() >= deadline) break
     latest = await apiRequest(`/api/commands?projectId=${encodeURIComponent(projectId)}&requestId=${encodeURIComponent(requestId)}`, {
@@ -1177,10 +1188,12 @@ function RuntimeMetricsPanel({ summary, profile, onReset, onExport }) {
   const metrics = summary?.metrics || {}
   const metricRows = profile === 'simulation'
     ? [
+        ['Intent → dispatch', metrics.clientIntentToDispatchMs],
         ['API (legacy)', metrics.apiAuthorizationMs],
         ['Admission total', metrics.admissionTotalMs],
         ['Admission reads', metrics.admissionReadsMs],
         ['Simulation state', metrics.simulationStateReadsMs],
+        ['Atomic completion', metrics.simulationTransactionMs],
         ['Command create', metrics.commandCreateMs],
         ['Authorization save', metrics.authorizationPersistMs],
         ['Authorization audit', metrics.authorizationAuditMs],
@@ -1191,7 +1204,9 @@ function RuntimeMetricsPanel({ summary, profile, onReset, onExport }) {
         ['Client E2E', metrics.clientEndToEndMs],
       ]
     : [
+        ['Intent → dispatch', metrics.clientIntentToDispatchMs],
         ['API', metrics.apiAuthorizationMs],
+        ['Atomic authorization', metrics.authorizationTransactionMs],
         ['Worker queue', metrics.workerQueueMs],
         ['Server total', metrics.serverTotalMs],
         ['Client E2E', metrics.clientEndToEndMs],

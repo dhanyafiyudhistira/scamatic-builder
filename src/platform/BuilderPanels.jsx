@@ -1,24 +1,35 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
-import { COMPONENT_REGISTRY, compatibleTags } from '../../shared/component-registry.js'
+import { Fragment, lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { COMPONENT_REGISTRY, PROCESS_EQUIPMENT_TYPES, SCADA_PROCESS_COMPONENT_TYPES, compatibleTags, componentDefinitionsForProject } from '../../shared/component-registry.js'
+import { MARKUP_TYPE, markupUsesFill } from '../../shared/markup-stroke.js'
 import { initialMockValue, RULE_OPERATORS } from '../../shared/runtime-evaluator.js'
 import { CONTROL_POPUP_CHILD_TYPES, CONTROL_POPUP_MAX_CHILDREN, popupOwnerMap, rootRuntimeComponents } from '../../shared/control-popup.js'
 import { tagUsageCounts } from '../../shared/tag-bindings.js'
 import { numericEngineering, numericFormatMode, numericWriteConstraints, resolveGaugeZones, resolveNumericRange } from '../../shared/numeric-tag-config.js'
 import { describeAlarmRule, normalizeNumericAlarmRule, numericAlarmRule } from '../../shared/alarm.js'
 
-export function ComponentLibrary({ onAdd }) {
-  const definitions = Object.values(COMPONENT_REGISTRY).filter(definition => definition.library !== false)
+const GrindstoneComponentList = lazy(() => import('./MarkupSymbols.jsx')
+  .then(module => ({ default: module.GrindstoneComponentList })))
+
+export function ComponentLibrary({ onAdd, projectType = 'scada', componentTypes, onAddSymbol }) {
+  const definitions = componentDefinitionsForProject(projectType)
+    .filter(definition => !componentTypes || componentTypes.includes(definition.type))
   const listRef = useItemCountViewport('.sb-library-item', 5, definitions.map(definition => definition.type).join('|'))
 
-  return (
+  return <>
     <div ref={listRef} className="sb-component-library" role="region" aria-label="Available components" tabIndex={0}>
       {definitions.map(definition => (
         <button type="button" className="sb-library-item" key={definition.type} onClick={() => onAdd(definition.type)}>
-          <strong>{definition.label}</strong>
+          <strong>{onAddSymbol && definition.type === 'control-button' ? 'Button' : definition.label}</strong>
         </button>
       ))}
     </div>
-  )
+    {onAddSymbol && <details className="sb-industrial-components">
+      <summary>Industrial · Grindstone</summary>
+      <Suspense fallback={<p className="sb-muted" role="status">Loading symbols…</p>}>
+        <GrindstoneComponentList onAdd={onAddSymbol} />
+      </Suspense>
+    </details>}
+  </>
 }
 
 export function TagManager({ schema, values, onSchemaChange, onValuesChange }) {
@@ -254,20 +265,22 @@ export function LayersPanel({ components, selectedIds, onSelect, onPatch, onReor
   )
 }
 
-export function ComponentInspector({ component, components = [], tags, onChange, onDelete, onDuplicate, onAddPopupChild, onCreatePopupChild, onDetachPopupChild, onReorderPopupChild, onSelectChild }) {
+export function ComponentInspector({ component, components = [], tags, directThingsBoard = false, templateOnly = false, onChange, onDelete, onDuplicate, onAddPopupChild, onCreatePopupChild, onDetachPopupChild, onReorderPopupChild, onSelectChild }) {
   const setPosition = (key, value) => onChange({ position: { ...component.position, [key]: Number(value) } })
   const setProperty = (key, value) => onChange({ properties: { ...component.properties, [key]: value } })
   const setProperties = patch => onChange({ properties: { ...component.properties, ...patch } })
   const compatible = compatibleTags(component.type, tags)
   const availableTags = ['control-button', 'tuning-slider', 'operation-shifter'].includes(component.type)
     ? compatible.filter(tag => ['write', 'read-write'].includes(tag.access))
+    : SCADA_PROCESS_COMPONENT_TYPES.includes(component.type)
+      ? compatible.filter(tag => ['read', 'read-write'].includes(tag.access))
     : compatible
   const boundTag = tags.find(tag => tag.id === component.binding?.tagId)
   return (
     <div className="sb-inspector">
       <label>Name<input value={component.name} onChange={event => onChange({ name: event.target.value })} /></label>
-      {!['text-label', 'design-image'].includes(component.type) && <label>Label<input value={component.properties?.label || ''} onChange={event => setProperty('label', event.target.value)} /></label>}
-      {!['text-label', 'design-image', 'chart', 'control-popup'].includes(component.type) && <label>Tag binding<select value={component.binding?.tagId || ''} onChange={event => onChange({ binding: { tagId: event.target.value || null } })}><option value="">Unbound</option>{availableTags.map(tag => <option value={tag.id} key={tag.id}>{tag.name} · {tag.dataType}</option>)}</select></label>}
+      {!['text-label', 'design-image', MARKUP_TYPE].includes(component.type) && <label>Label<input value={component.properties?.label || ''} onChange={event => setProperty('label', event.target.value)} /></label>}
+      {!templateOnly && !['text-label', 'design-image', 'chart', 'control-popup', MARKUP_TYPE].includes(component.type) && <label>Tag binding<select value={component.binding?.tagId || ''} onChange={event => onChange({ binding: { tagId: event.target.value || null } })}><option value="">Unbound</option>{availableTags.map(tag => <option value={tag.id} key={tag.id}>{tag.name} · {tag.dataType}</option>)}</select></label>}
       <div className="sb-form-grid">
         <NumberField label="X" value={component.position.x} onChange={value => setPosition('x', value)} />
         <NumberField label="Y" value={component.position.y} onChange={value => setPosition('y', value)} />
@@ -278,20 +291,61 @@ export function ComponentInspector({ component, components = [], tags, onChange,
       </div>
       <label className="sb-check"><input type="checkbox" checked={component.visible !== false} onChange={event => onChange({ visible: event.target.checked })} /> Visible</label>
       <label className="sb-check"><input type="checkbox" checked={Boolean(component.locked)} onChange={event => onChange({ locked: event.target.checked })} /> Locked</label>
-      {component.type === 'indicator-lamp' && <LampProperties component={component} setProperty={setProperty} />}
-      {component.type === 'alarm' && <AlarmProperties component={component} tag={boundTag} setProperty={setProperty} />}
-      {component.type === 'value-span' && <ValueProperties component={component} tag={boundTag} setProperty={setProperty} />}
-      {component.type === 'gauge' && <GaugeProperties component={component} tag={boundTag} setProperty={setProperty} setProperties={setProperties} />}
-      {component.type === 'control-button' && <ButtonProperties component={component} tags={tags} setProperty={setProperty} />}
-      {component.type === 'tuning-slider' && <TuningProperties component={component} tag={boundTag} tags={tags} setProperty={setProperty} setProperties={setProperties} />}
-      {component.type === 'operation-shifter' && <OperationShifterProperties component={component} components={components} tags={tags} setProperty={setProperty} />}
-      {component.type === 'control-popup' && <PopupProperties component={component} components={components} setProperty={setProperty} onAddChild={onAddPopupChild} onCreateChild={onCreatePopupChild} onDetachChild={onDetachPopupChild} onReorderChild={onReorderPopupChild} onSelectChild={onSelectChild} />}
-      {component.type === 'chart' && <ChartProperties component={component} tags={availableTags} setProperty={setProperty} onChange={onChange} />}
+      {templateOnly && <WinccTemplateProperties component={component} setProperty={setProperty} />}
+      {!templateOnly && component.type === 'indicator-lamp' && <LampProperties component={component} setProperty={setProperty} />}
+      {PROCESS_EQUIPMENT_TYPES.includes(component.type) && <ProcessEquipmentProperties component={component} setProperty={setProperty} />}
+      {component.type === 'pipe' && <PipeProperties component={component} setProperty={setProperty} />}
+      {!templateOnly && component.type === 'alarm' && <AlarmProperties component={component} tag={boundTag} setProperty={setProperty} />}
+      {!templateOnly && component.type === 'value-span' && <ValueProperties component={component} tag={boundTag} setProperty={setProperty} />}
+      {!templateOnly && component.type === 'gauge' && <GaugeProperties component={component} tag={boundTag} setProperty={setProperty} setProperties={setProperties} />}
+      {!templateOnly && component.type === 'control-button' && <ButtonProperties component={component} tags={tags} setProperty={setProperty} />}
+      {!templateOnly && component.type === 'tuning-slider' && <TuningProperties component={component} tag={boundTag} tags={tags} setProperty={setProperty} setProperties={setProperties} />}
+      {!templateOnly && component.type === 'operation-shifter' && <OperationShifterProperties component={component} components={components} tags={tags} directThingsBoard={directThingsBoard} setProperty={setProperty} />}
+      {!templateOnly && component.type === 'control-popup' && <PopupProperties component={component} components={components} setProperty={setProperty} onAddChild={onAddPopupChild} onCreateChild={onCreatePopupChild} onDetachChild={onDetachPopupChild} onReorderChild={onReorderPopupChild} onSelectChild={onSelectChild} />}
+      {!templateOnly && component.type === 'chart' && <ChartProperties component={component} tags={availableTags} setProperty={setProperty} onChange={onChange} />}
       {component.type === 'text-label' && <TextProperties component={component} setProperty={setProperty} />}
       {component.type === 'design-image' && <DesignImageProperties component={component} setProperty={setProperty} />}
+      {component.type === MARKUP_TYPE && <MarkupProperties properties={component.properties} setProperty={setProperty} />}
       <div className="sb-inspector-actions"><button type="button" onClick={onDuplicate}>Duplicate</button><button type="button" className="danger" onClick={onDelete}>Delete</button></div>
     </div>
   )
+}
+
+function WinccTemplateProperties({ component, setProperty }) {
+  const properties = component.properties
+  if (component.type === 'indicator-lamp') return <>
+    <label className="sb-check"><input type="checkbox" checked={properties.templateActive === true} onChange={event => setProperty('templateActive', event.target.checked)} /> Initially on</label>
+    <ColorField label="On color" value={properties.onColor} onChange={value => setProperty('onColor', value)} />
+    <ColorField label="Off color" value={properties.offColor} onChange={value => setProperty('offColor', value)} />
+  </>
+  if (component.type === 'value-span' || component.type === 'gauge') return <>
+    <NumberField label="Initial value" value={properties.templateValue ?? 0} onChange={value => setProperty('templateValue', value)} />
+    {component.type === 'value-span' && <>
+      <ColorField label="Text color" value={properties.textColor} onChange={value => setProperty('textColor', value)} />
+      <ColorField label="Background" value={properties.backgroundColor} onChange={value => setProperty('backgroundColor', value)} />
+    </>}
+  </>
+  if (component.type === 'control-button') return <ColorField label="Button color" value={properties.buttonColor} onChange={value => setProperty('buttonColor', value)} />
+  return null
+}
+
+function MarkupProperties({ properties, setProperty }) {
+  const { tool = 'pencil' } = properties
+  return <>
+    {tool === 'text' && <label>Annotation<textarea value={properties.text} maxLength={8192} rows={3} onChange={event => setProperty('text', event.target.value)} /></label>}
+    <div className="sb-form-grid">
+      {tool !== 'symbol' && <ColorField label={tool === 'text' ? 'Text color' : 'Stroke color'} value={properties.color} onChange={value => setProperty('color', value)} />}
+      {tool !== 'symbol' && tool !== 'text' && <label>Stroke width<input type="range" className="sb-markup-width" min="0.5" max="32" step="0.5" value={properties.strokeWidth} onChange={event => setProperty('strokeWidth', Number(event.target.value))} /></label>}
+      {tool === 'text' && <NumberField label="Font size" value={properties.fontSize} min={8} max={160} onChange={value => setProperty('fontSize', value)} />}
+      {tool === 'rounded-rectangle' && <NumberField label="Corner radius" value={properties.cornerRadius} min={0} max={200} onChange={value => setProperty('cornerRadius', value)} />}
+      {tool === 'curve' && <NumberField label="Bend" value={properties.bend} min={-1} max={1} step={.05} onChange={value => setProperty('bend', value)} />}
+      {tool === 'polygon' && <NumberField label="Sides" value={properties.sides} min={3} max={12} onChange={value => setProperty('sides', value)} />}
+      {tool === 'star' && <><NumberField label="Tips" value={properties.tips} min={3} max={12} onChange={value => setProperty('tips', value)} /><NumberField label="Inset" value={properties.innerRatio} min={.15} max={.85} step={.01} onChange={value => setProperty('innerRatio', value)} /></>}
+      <label>Opacity<input type="range" className="sb-markup-width" min="0" max="1" step="0.05" value={properties.opacity ?? 1} onChange={event => setProperty('opacity', Number(event.target.value))} /></label>
+      {markupUsesFill(tool) && <><label className="sb-check"><input type="checkbox" checked={properties.filled} onChange={event => setProperty('filled', event.target.checked)} /> Fill</label>
+        {properties.filled && <ColorField label="Fill color" value={properties.fillColor} onChange={value => setProperty('fillColor', value)} />}</>}
+    </div>
+  </>
 }
 
 function InspectorGroup({ title, className = '', children }) {
@@ -394,6 +448,55 @@ function LampProperties({ component, setProperty }) {
   const rule = component.properties?.rule || { operator: 'truthy' }
   const setRule = patch => setProperty('rule', { ...rule, ...patch })
   return <InspectorGroup title="Lamp state"><label>Shape<select value={component.properties?.shape || 'circle'} onChange={event => setProperty('shape', event.target.value)}><option value="circle">Circle</option><option value="square">Rounded square</option><option value="rectangle">Rectangle</option></select></label><label>Rule<select value={rule.operator} onChange={event => setRule({ operator: event.target.value })}>{RULE_OPERATORS.map(operator => <option value={operator} key={operator}>{operator}</option>)}</select></label>{!['truthy', 'between', 'outside'].includes(rule.operator) && <label>Compare value<input value={rule.value ?? ''} onChange={event => setRule({ value: parseMaybeNumber(event.target.value) })} /></label>}{['between', 'outside'].includes(rule.operator) && <div className="sb-form-grid"><NumberField label="Minimum" value={rule.min ?? 0} onChange={value => setRule({ min: value })} /><NumberField label="Maximum" value={rule.max ?? 100} onChange={value => setRule({ max: value })} /></div>}<div className="sb-form-grid"><ColorField label="ON color" value={component.properties?.onColor || '#22c55e'} onChange={value => setProperty('onColor', value)} /><ColorField label="OFF color" value={component.properties?.offColor || '#64748b'} onChange={value => setProperty('offColor', value)} /></div><label className="sb-check"><input type="checkbox" checked={component.properties?.glow !== false} onChange={event => setProperty('glow', event.target.checked)} /> Glow when active</label></InspectorGroup>
+}
+
+function ProcessEquipmentProperties({ component, setProperty }) {
+  const properties = component.properties || {}
+  const title = component.type === 'valve' ? 'Valve state' : `${COMPONENT_REGISTRY[component.type]?.label || 'Equipment'} state`
+  return (
+    <InspectorGroup title={title}>
+      <StateRuleProperties properties={properties} setProperty={setProperty} />
+      {component.type === 'valve' && <label>Orientation<select value={properties.orientation || 'horizontal'} onChange={event => setProperty('orientation', event.target.value)}><option value="horizontal">Horizontal</option><option value="vertical">Vertical</option></select></label>}
+      <div className="sb-form-grid">
+        <label>Active text<input value={properties.activeText || (component.type === 'valve' ? 'OPEN' : 'RUNNING')} onChange={event => setProperty('activeText', event.target.value)} /></label>
+        <label>Inactive text<input value={properties.inactiveText || (component.type === 'valve' ? 'CLOSED' : 'STOPPED')} onChange={event => setProperty('inactiveText', event.target.value)} /></label>
+        <ColorField label="Active color" value={properties.activeColor || '#22c55e'} onChange={value => setProperty('activeColor', value)} />
+        <ColorField label="Idle color" value={properties.idleColor || '#64748b'} onChange={value => setProperty('idleColor', value)} />
+      </div>
+      {component.type !== 'valve' && <label className="sb-check"><input type="checkbox" checked={properties.animate !== false} onChange={event => setProperty('animate', event.target.checked)} /> Animate while running</label>}
+      <label className="sb-check"><input type="checkbox" checked={properties.glow !== false} onChange={event => setProperty('glow', event.target.checked)} /> Glow while active</label>
+    </InspectorGroup>
+  )
+}
+
+function PipeProperties({ component, setProperty }) {
+  const properties = component.properties || {}
+  return (
+    <InspectorGroup title="Flow indication">
+      <StateRuleProperties properties={properties} setProperty={setProperty} />
+      <label>Stream direction<select value={properties.direction || 'forward'} onChange={event => setProperty('direction', event.target.value)}><option value="forward">Forward</option><option value="reverse">Reverse</option></select></label>
+      <div className="sb-form-grid">
+        <label>Active text<input value={properties.activeText || 'FLOW ACTIVE'} onChange={event => setProperty('activeText', event.target.value)} /></label>
+        <label>Inactive text<input value={properties.inactiveText || 'NO FLOW'} onChange={event => setProperty('inactiveText', event.target.value)} /></label>
+        <ColorField label="Flow color" value={properties.activeColor || '#20c4d9'} onChange={value => setProperty('activeColor', value)} />
+        <ColorField label="Idle color" value={properties.idleColor || '#475569'} onChange={value => setProperty('idleColor', value)} />
+      </div>
+      <label className="sb-check"><input type="checkbox" checked={properties.animate !== false} onChange={event => setProperty('animate', event.target.checked)} /> Animate stream while active</label>
+      <label className="sb-check"><input type="checkbox" checked={properties.glow !== false} onChange={event => setProperty('glow', event.target.checked)} /> Illuminate active stream</label>
+    </InspectorGroup>
+  )
+}
+
+function StateRuleProperties({ properties, setProperty }) {
+  const rule = properties.rule || { operator: 'truthy' }
+  const setRule = patch => setProperty('rule', { ...rule, ...patch })
+  return (
+    <>
+      <label>Active rule<select value={rule.operator} onChange={event => setRule({ operator: event.target.value })}>{RULE_OPERATORS.map(operator => <option value={operator} key={operator}>{operator}</option>)}</select></label>
+      {!['truthy', 'between', 'outside'].includes(rule.operator) && <label>Compare value<input value={rule.value ?? ''} onChange={event => setRule({ value: parseMaybeNumber(event.target.value) })} /></label>}
+      {['between', 'outside'].includes(rule.operator) && <div className="sb-form-grid"><NumberField label="Minimum" value={rule.min ?? 0} onChange={value => setRule({ min: value })} /><NumberField label="Maximum" value={rule.max ?? 100} onChange={value => setRule({ max: value })} /></div>}
+    </>
+  )
 }
 
 function AlarmProperties({ component, tag, setProperty }) {
@@ -514,7 +617,7 @@ function TuningProperties({ component, tag, tags, setProperty, setProperties }) 
   )
 }
 
-function OperationShifterProperties({ component, components, tags, setProperty }) {
+function OperationShifterProperties({ component, components, tags, directThingsBoard, setProperty }) {
   const properties = component.properties || {}
   const controls = components.filter(item => ['control-button', 'tuning-slider'].includes(item.type))
   const buttons = controls.filter(item => item.type === 'control-button')
@@ -583,7 +686,7 @@ function OperationShifterProperties({ component, components, tags, setProperty }
         </div>
       </InspectorGroup>
       <InspectorGroup title="Auto sequence recipe">
-        <p className="sb-muted">SIMULATION runs this recipe through the isolated simulation-sequence route. REAL PLC sends the complete recipe to Node-RED/PLC; browser timing is never used for real equipment.</p>
+        <p className="sb-muted">SIMULATION runs this recipe through the isolated simulation-sequence route. REAL PLC sends the complete recipe through {directThingsBoard ? 'the managed ThingsBoard/edge runtime' : 'Node-RED/PLC'}; browser timing is never used for real equipment.</p>
         <div className="sb-operation-sequence-list">
           {sequence.map((step, index) => (
             <div className="sb-operation-sequence-step" key={step.id}>

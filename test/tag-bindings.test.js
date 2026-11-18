@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { componentTagReferences, tagUsageCounts } from '../shared/tag-bindings.js'
+import { componentObservedTagId, componentTagReferences, tagUsageCounts } from '../shared/tag-bindings.js'
 
 test('feedback tags count as component bindings and cannot be mistaken for unused tags', () => {
   const components = [
@@ -36,4 +36,14 @@ test('one component counts a shared command and feedback tag only once', () => {
 test('Chart tag arrays remain unique component references', () => {
   const chart = { type: 'chart', binding: { tagIds: ['level', 'level', 'flow'] }, properties: {} }
   assert.deepEqual(componentTagReferences(chart), ['level', 'flow'])
+})
+
+test('a control button observes readable feedback while retaining its command binding', () => {
+  const button = {
+    type: 'control-button',
+    binding: { tagId: 'valve.command' },
+    properties: { feedbackTagId: 'valve.feedback' },
+  }
+  assert.equal(componentObservedTagId(button), 'valve.feedback')
+  assert.equal(componentObservedTagId({ type: 'indicator-lamp', binding: { tagId: 'valve.feedback' } }), 'valve.feedback')
 })

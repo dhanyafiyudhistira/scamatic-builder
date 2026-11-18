@@ -1,10 +1,20 @@
-export async function loadCommandAdmissionReads({ loadProject, loadRuntimeSession, loadDuplicate }) {
-  const [project, runtimeSession, duplicate] = await Promise.all([
+export async function loadCommandAdmissionReads({ loadProject, loadRuntimeSession, loadDuplicate, loadProjectAssignment = async () => undefined }) {
+  const [project, runtimeSession, duplicate, projectAssignment] = await Promise.all([
     loadProject(),
     loadRuntimeSession(),
     loadDuplicate(),
+    loadProjectAssignment(),
   ])
-  return { project, runtimeSession, duplicate }
+  return { project, runtimeSession, duplicate, projectAssignment }
+}
+
+export async function loadCommandStatusReads({ loadProject, loadRuntimeSession, loadProjectAssignment = async () => undefined }) {
+  const [project, runtimeSession, projectAssignment] = await Promise.all([
+    loadProject(),
+    loadRuntimeSession(),
+    loadProjectAssignment(),
+  ])
+  return { project, runtimeSession, projectAssignment }
 }
 
 export async function loadLiveCommandReads({

@@ -1,6 +1,7 @@
 import { Component, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { commandUiState, evaluateRule, formatRuntimeValue, tuningInteractionState, valueSeverity } from '../../shared/runtime-evaluator.js'
-import { commandResultRetentionMs, isPendingCommandStatus } from '../../shared/command-lifecycle.js'
+import { commandResultRetentionMs, commandStatusPresentation, isPendingCommandStatus } from '../../shared/command-lifecycle.js'
+import { createControlCommandIntentQueue } from '../../shared/control-command-intent.js'
 import { offsetBounds, resizeComponentBounds, resolveSmartSnap, selectionBounds } from '../../shared/placement.js'
 import { TelemetryChart } from './TelemetryChart.jsx'
 import { rootRuntimeComponents } from '../../shared/control-popup.js'
@@ -10,6 +11,12 @@ import { GAUGE_START_ANGLE, GAUGE_SWEEP_ANGLE, gaugeAngleFor, gaugeArcPath, gaug
 import { numericDisplayProperties, numericDisplayUnit, numericEngineering, numericValueOutOfRange, resolveGaugeZones, resolveNumericRange } from '../../shared/numeric-tag-config.js'
 import { evaluateAlarmState } from '../../shared/alarm.js'
 import { CHART_XLSX_MIME_TYPE, chartExportCsv, chartExportFileName, chartExportWorkbook, createChartExportData } from '../../shared/chart-export.js'
+import { DASHBOARD_BREAKPOINTS, dashboardBreakpointForWidth, responsiveDashboardEnabled, responsivePositionPatch, resolveResponsiveDashboard } from '../../shared/responsive-dashboard.js'
+import { isIotDashboardProject } from '../../shared/project-type.js'
+import { PROCESS_EQUIPMENT_TYPES } from '../../shared/component-registry.js'
+import { componentObservedTagId } from '../../shared/tag-bindings.js'
+import { isMarkupLayer, MARKUP_TYPE } from '../../shared/markup-stroke.js'
+import { MarkupGeometry, MarkupPad } from './MarkupLayer.jsx'
 
 export function RuntimeCanvas({
   schema,
@@ -22,6 +29,7 @@ export function RuntimeCanvas({
   onLoadChartHistory,
   selectedIds = [],
   editable = false,
+  templateOnly = false,
   boardTone,
   zoom = 1,
   actorRole = 'VIEWER',
@@ -35,10 +43,15 @@ export function RuntimeCanvas({
   onTransformStart,
   onTransformEnd,
   onDesignFileDrop,
+  markupWorkspace = false,
+  markupTool,
+  onMarkupCommit,
   onCommand,
   commandResults = {},
   commandConnectionAvailable = true,
+  responsiveBreakpoint = 'auto',
 }) {
+  const shellRef = useRef(null)
   const canvasRef = useRef(null)
   const [guides, setGuides] = useState({ x: null, y: null })
   const [coordinate, setCoordinate] = useState(null)
@@ -47,22 +60,78 @@ export function RuntimeCanvas({
   const [openPopupId, setOpenPopupId] = useState(null)
   const [fileDragOver, setFileDragOver] = useState(false)
   const [operationModes, setOperationModes] = useState({})
+  const [automaticBreakpoint, setAutomaticBreakpoint] = useState('desktop')
+  const coordinateFrameRef = useRef(null)
+  const pendingCoordinateRef = useRef(null)
   const popupReturnFocusRef = useRef(null)
   const commandHandlerRef = useRef(onCommand)
   commandHandlerRef.current = onCommand
-  const canvas = schema?.project?.canvas || { width: 1920, height: 1080, background: '#101418' }
+  const responsive = responsiveDashboardEnabled(schema)
+  const explicitBreakpoint = DASHBOARD_BREAKPOINTS.includes(responsiveBreakpoint) ? responsiveBreakpoint : null
+  const activeBreakpoint = responsive ? (explicitBreakpoint || automaticBreakpoint) : 'desktop'
+  const responsiveLayout = useMemo(() => resolveResponsiveDashboard(schema, activeBreakpoint), [activeBreakpoint, schema])
+  const canvas = responsiveLayout.canvas
+  const componentPositions = responsiveLayout.positions
+  const activeGridSize = responsive && activeBreakpoint !== 'desktop' ? responsiveLayout.gridSize : gridSize
   const tags = useMemo(() => new Map((schema?.tags || []).map(tag => [tag.id, tag])), [schema?.tags])
   const components = schema?.components || []
+  const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds])
   const componentById = useMemo(() => new Map(components.map(component => [component.id, component])), [components])
   const rootComponents = useMemo(() => rootRuntimeComponents(components), [components])
   const expandedChart = (schema?.components || []).find(component => component.id === expandedChartId && component.type === 'chart' && component.visible !== false)
   const openPopup = componentById.get(openPopupId)
   const operationShifters = useMemo(() => components.filter(component => component.type === 'operation-shifter'), [components])
+  useEffect(() => {
+    if (!responsive || explicitBreakpoint || !shellRef.current) return undefined
+    const node = shellRef.current
+    const update = width => setAutomaticBreakpoint(previous => {
+      const next = dashboardBreakpointForWidth(width)
+      return previous === next ? previous : next
+    })
+    update(node.getBoundingClientRect().width)
+    if (typeof globalThis.ResizeObserver === 'function') {
+      const observer = new globalThis.ResizeObserver(entries => update(entries[0]?.contentRect?.width || node.getBoundingClientRect().width))
+      observer.observe(node)
+      return () => observer.disconnect()
+    }
+    const onResize = () => update(node.getBoundingClientRect().width)
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [explicitBreakpoint, responsive])
+  const operationOwnerByComponent = useMemo(() => {
+    const owners = new Map()
+    for (const shifter of operationShifters) {
+      for (const componentId of shifter.properties?.controlledComponentIds || []) {
+        if (!owners.has(componentId)) owners.set(componentId, shifter)
+      }
+    }
+    return owners
+  }, [operationShifters])
   const invokeCommand = useCallback((...args) => commandHandlerRef.current?.(...args), [])
   const stableCommandHandler = onCommand ? invokeCommand : undefined
   const expandChart = useCallback(componentId => setExpandedChartId(componentId), [])
   const changeOperationMode = useCallback((componentId, mode) => {
     setOperationModes(previous => ({ ...previous, [componentId]: mode }))
+  }, [])
+  const scheduleCoordinate = useCallback(nextCoordinate => {
+    pendingCoordinateRef.current = nextCoordinate
+    if (coordinateFrameRef.current !== null) return
+    coordinateFrameRef.current = window.requestAnimationFrame(() => {
+      coordinateFrameRef.current = null
+      const next = pendingCoordinateRef.current
+      pendingCoordinateRef.current = null
+      setCoordinate(previous => previous?.x === next?.x && previous?.y === next?.y ? previous : next)
+    })
+  }, [])
+  const clearCoordinate = useCallback(() => {
+    pendingCoordinateRef.current = null
+    if (coordinateFrameRef.current !== null) window.cancelAnimationFrame(coordinateFrameRef.current)
+    coordinateFrameRef.current = null
+    setCoordinate(previous => previous === null ? previous : null)
+  }, [])
+
+  useEffect(() => () => {
+    if (coordinateFrameRef.current !== null) window.cancelAnimationFrame(coordinateFrameRef.current)
   }, [])
 
   useEffect(() => {
@@ -79,11 +148,11 @@ export function RuntimeCanvas({
     })
   }, [operationShifters, values])
 
-  const operationLockFor = componentId => {
-    const owner = operationShifters.find(shifter => (shifter.properties?.controlledComponentIds || []).includes(componentId))
+  const operationLockFor = useCallback(componentId => {
+    const owner = operationOwnerByComponent.get(componentId)
     const mode = owner ? operationModes[owner.id] || 'manual' : 'manual'
     return owner && mode !== 'manual' ? `${mode.toUpperCase()} LOCK` : ''
-  }
+  }, [operationModes, operationOwnerByComponent])
 
   useEffect(() => {
     if (editable || (expandedChartId && !expandedChart)) setExpandedChartId(null)
@@ -102,48 +171,56 @@ export function RuntimeCanvas({
     return () => window.removeEventListener('keydown', closeOnEscape)
   }, [expandedChartId])
 
-  const startTransform = (event, component, mode) => {
+  const changeRenderedPosition = useCallback((component, position, options) => {
+    onChange?.(component.id, responsive && activeBreakpoint !== 'desktop'
+      ? responsivePositionPatch(component, activeBreakpoint, position)
+      : { position }, options)
+  }, [activeBreakpoint, onChange, responsive])
+
+  const startTransform = useCallback((event, component, mode) => {
     if (!editable || component.locked || !canvasRef.current) return
     event.preventDefault()
     event.stopPropagation()
     const resizing = mode.startsWith('resize-')
     const additive = !resizing && (event.shiftKey || event.ctrlKey || event.metaKey)
-    const preserveGroup = mode === 'move' && !additive && selectedIds.length > 1 && selectedIds.includes(component.id)
+    const preserveGroup = mode === 'move' && !additive && selectedIds.length > 1 && selectedIdSet.has(component.id)
     if (!preserveGroup) onSelect?.(component.id, { additive })
     onTransformStart?.()
     const rect = canvasRef.current.getBoundingClientRect()
     const startX = event.clientX
     const startY = event.clientY
-    const components = schema?.components || []
-    const groupIds = !resizing && mode === 'move' && selectedIds.includes(component.id) && selectedIds.length > 1
+    const allComponents = schema?.components || []
+    const groupIds = !resizing && mode === 'move' && selectedIdSet.has(component.id) && selectedIds.length > 1
       ? new Set(selectedIds)
       : new Set([component.id])
-    const originals = components
+    const originals = allComponents
       .filter(item => groupIds.has(item.id) && !item.locked)
-      .map(item => ({ id: item.id, position: { ...item.position } }))
+      .map(item => ({ id: item.id, component: item, position: { ...(componentPositions.get(item.id) || item.position) } }))
     const groupBounds = selectionBounds(originals.map(item => ({ position: item.position })))
-    const targetBounds = components
+    const targetBounds = allComponents
       .filter(item => !groupIds.has(item.id) && item.visible !== false)
-      .map(item => item.position)
+      .map(item => componentPositions.get(item.id) || item.position)
     targetBounds.push({ x: 0, y: 0, width: canvas.width, height: canvas.height })
 
-    const move = pointer => {
+    let pointerFrame = null
+    let pendingPointer = null
+    const applyMove = pointer => {
       const rawDx = (pointer.clientX - startX) * (canvas.width / rect.width)
       const rawDy = (pointer.clientY - startY) * (canvas.height / rect.height)
-      const snap = value => snapToGrid ? snapValue(value, gridSize) : value
-      setCoordinate(pointerToLogical(pointer, rect, canvas))
+      const snap = value => snapToGrid ? snapValue(value, activeGridSize) : value
+      scheduleCoordinate(pointerToLogical(pointer, rect, canvas))
 
       if (resizing) {
         const original = originals[0].position
         const configuredAspectLock = component.type === 'design-image' && component.properties?.lockAspectRatio !== false
         const next = resizeComponentBounds(original, mode.slice('resize-'.length), rawDx, rawDy, canvas, {
           minSize: 24,
-          gridSize,
+          gridSize: activeGridSize,
           snapToGrid,
           lockAspect: pointer.shiftKey ? !configuredAspectLock : configuredAspectLock,
         })
         setTransformHud({ ...next, mode: 'resize' })
-        onChange?.(component.id, { position: next }, { transient: true })
+        changeRenderedPosition(component, next, { transient: true })
         return
       }
 
@@ -162,10 +239,25 @@ export function RuntimeCanvas({
       nextBounds = offsetBounds(groupBounds, dx, dy)
       setTransformHud({ ...nextBounds, mode: originals.length > 1 ? 'group' : 'move' })
       for (const original of originals) {
-        onChange?.(original.id, { position: { ...original.position, x: clean(original.position.x + dx), y: clean(original.position.y + dy) } }, { transient: true })
+        changeRenderedPosition(original.component, { ...original.position, x: clean(original.position.x + dx), y: clean(original.position.y + dy) }, { transient: true })
       }
     }
+    const move = pointer => {
+      pendingPointer = pointer
+      if (pointerFrame !== null) return
+      pointerFrame = window.requestAnimationFrame(() => {
+        pointerFrame = null
+        const latest = pendingPointer
+        pendingPointer = null
+        if (latest) applyMove(latest)
+      })
+    }
     const stop = () => {
+      if (pointerFrame !== null) window.cancelAnimationFrame(pointerFrame)
+      pointerFrame = null
+      const latest = pendingPointer
+      pendingPointer = null
+      if (latest) applyMove(latest)
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', stop)
       window.removeEventListener('pointercancel', stop)
@@ -176,7 +268,7 @@ export function RuntimeCanvas({
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', stop)
     window.addEventListener('pointercancel', stop)
-  }
+  }, [activeGridSize, canvas, changeRenderedPosition, componentPositions, editable, onSelect, onTransformEnd, onTransformStart, scheduleCoordinate, schema?.components, selectedIds, selectedIdSet, smartGuides, snapToGrid])
 
   const launchPopup = useCallback((componentId, trigger) => {
     popupReturnFocusRef.current = trigger || null
@@ -188,25 +280,29 @@ export function RuntimeCanvas({
     window.requestAnimationFrame(() => popupReturnFocusRef.current?.focus())
   }
 
+  const iotDashboard = isIotDashboardProject(schema)
+  const showEmptyHint = !markupWorkspace && (templateOnly
+    ? !rootComponents.some(component => component.visible !== false)
+    : !iotDashboard || !rootComponents.some(component => isMarkupLayer(component) && component.visible !== false))
   return (
-    <div className="sb-canvas-shell">
+    <div ref={shellRef} className={`sb-canvas-shell ${responsive ? `is-responsive-dashboard breakpoint-${activeBreakpoint}` : ''}`}>
       <div
         ref={canvasRef}
         className={`sb-logical-canvas ${editable ? 'is-editable' : ''} ${editable && showGrid ? 'show-grid' : ''} ${fileDragOver ? 'is-file-dragover' : ''} ${boardTone ? `board-tone-${boardTone}` : ''}`}
         style={{
           aspectRatio: `${canvas.width}/${canvas.height}`,
-          background: boardTone ? (boardTone === 'light' ? '#f2f3ef' : '#101418') : canvas.background,
-          '--grid-x': `${Math.max(4, gridSize) / canvas.width * 100}%`,
-          '--grid-y': `${Math.max(4, gridSize) / canvas.height * 100}%`,
-          '--major-grid-x': `${Math.max(4, gridSize) * 5 / canvas.width * 100}%`,
-          '--major-grid-y': `${Math.max(4, gridSize) * 5 / canvas.height * 100}%`,
+          background: boardTone ? (boardTone === 'light' ? '#f2f3ef' : markupWorkspace ? '#151719' : '#101418') : canvas.background,
+          '--grid-x': `${Math.max(4, activeGridSize) / canvas.width * 100}%`,
+          '--grid-y': `${Math.max(4, activeGridSize) / canvas.height * 100}%`,
+          '--major-grid-x': `${Math.max(4, activeGridSize) * 5 / canvas.width * 100}%`,
+          '--major-grid-y': `${Math.max(4, activeGridSize) * 5 / canvas.height * 100}%`,
           width: `${Math.max(.35, Math.min(2.5, zoom)) * 100}%`,
-          maxWidth: zoom > 1 ? 'none' : '1500px',
-          maxHeight: zoom > 1 ? 'none' : '100%',
+          maxWidth: zoom > 1 ? 'none' : responsive ? `${canvas.width}px` : '1500px',
+          maxHeight: zoom > 1 || (responsive && activeBreakpoint !== 'desktop') ? 'none' : '100%',
         }}
         onPointerDown={event => { if (event.target === event.currentTarget) onSelect?.(null, { additive: false }) }}
-        onPointerMove={event => editable && setCoordinate(pointerToLogical(event, event.currentTarget.getBoundingClientRect(), canvas))}
-        onPointerLeave={() => !transformHud && setCoordinate(null)}
+        onPointerMove={event => editable && !markupTool && scheduleCoordinate(pointerToLogical(event, event.currentTarget.getBoundingClientRect(), canvas))}
+        onPointerLeave={() => !transformHud && clearCoordinate()}
         onDragOver={event => {
           if (!editable || !onDesignFileDrop || !Array.from(event.dataTransfer?.types || []).includes('Files')) return
           event.preventDefault()
@@ -224,25 +320,30 @@ export function RuntimeCanvas({
       >
         {svg
           ? <div className="sb-svg-background" aria-hidden="true" dangerouslySetInnerHTML={{ __html: svg }} />
-          : <div className="sb-empty-canvas">Upload an SVG schematic to begin</div>}
+          : showEmptyHint && <div className="sb-empty-canvas">{templateOnly ? 'Add components to design your WinCC screen' : iotDashboard ? 'Add widgets or connect ThingsBoard telemetry to begin' : 'Upload an SVG schematic to begin'}</div>}
         {editable && fileDragOver && <div className="sb-canvas-file-drop" aria-hidden="true"><strong>DROP IMAGE HERE</strong><span>PNG, JPG, or SVG · positioned at your cursor</span></div>}
 
         {rootComponents.map(component => {
           if (component.visible === false) return null
-          const value = values[component.binding?.tagId]
-          const quality = qualities[component.binding?.tagId] || 'good'
-          const selected = selectedIds.includes(component.id)
+          const observedTagId = componentObservedTagId(component)
+          const value = values[observedTagId]
+          const quality = qualities[observedTagId] || 'good'
+          const selected = selectedIdSet.has(component.id)
+          const markupReference = markupWorkspace && !isMarkupLayer(component)
           return <RuntimeOverlay
             key={component.id}
             component={component}
+            layoutPosition={componentPositions.get(component.id)}
             designAsset={designAssets[component.properties?.assetId]}
             canvas={canvas}
             tags={tags}
             value={value}
             quality={quality}
+            templateOnly={templateOnly}
             selected={selected}
             selectedCount={selectedIds.length}
             editable={editable}
+            markupReference={markupReference}
             actorRole={actorRole}
             onCommand={stableCommandHandler}
             commandResult={commandResults[component.id]}
@@ -252,16 +353,16 @@ export function RuntimeCanvas({
             operationMode={operationModes[component.id] || 'manual'}
             onOperationModeChange={changeOperationMode}
             operationLockLabel={operationLockFor(component.id)}
-            componentById={componentById}
-            onStartTransform={editable ? startTransform : null}
+            onStartTransform={editable && !markupReference ? startTransform : null}
             onSelect={onSelect}
           />
         })}
-        {editable && showRulers && <CanvasRulers canvas={canvas} gridSize={gridSize} />}
+        {editable && showRulers && <CanvasRulers canvas={canvas} gridSize={activeGridSize} />}
         {editable && guides.x !== null && <span className="sb-smart-guide vertical" style={{ left: `${guides.x / canvas.width * 100}%` }} />}
         {editable && guides.y !== null && <span className="sb-smart-guide horizontal" style={{ top: `${guides.y / canvas.height * 100}%` }} />}
         {editable && transformHud && <CoordinateHud data={transformHud} />}
-        {editable && coordinate && !transformHud && <div className="sb-cursor-coordinate">X {formatCoordinate(coordinate.x)} · Y {formatCoordinate(coordinate.y)}</div>}
+        {editable && coordinate && !transformHud && !markupTool && <div className="sb-cursor-coordinate">X {formatCoordinate(coordinate.x)} · Y {formatCoordinate(coordinate.y)}</div>}
+        {editable && markupTool && <MarkupPad key={`${activeBreakpoint}-${markupTool.symbol?.id || markupTool.id}`} canvas={canvas} pointAt={pointerToLogical} tool={markupTool} onCommit={geometry => onMarkupCommit(geometry, { breakpoint: activeBreakpoint, canvas })} />}
         {!editable && expandedChart && (
           <ExpandedChart
             component={expandedChart}
@@ -286,7 +387,6 @@ export function RuntimeCanvas({
             operationModes={operationModes}
             onOperationModeChange={changeOperationMode}
             operationLockFor={operationLockFor}
-            componentById={componentById}
             onClose={closePopup}
           />
         )}
@@ -297,14 +397,17 @@ export function RuntimeCanvas({
 
 const RuntimeOverlay = memo(function RuntimeOverlay({
   component,
+  layoutPosition,
   designAsset,
   canvas,
   tags,
   value,
   quality,
+  templateOnly,
   selected,
   selectedCount,
   editable,
+  markupReference,
   actorRole,
   onCommand,
   commandResult,
@@ -314,11 +417,11 @@ const RuntimeOverlay = memo(function RuntimeOverlay({
   operationMode,
   onOperationModeChange,
   operationLockLabel,
-  componentById,
   onStartTransform,
   onSelect,
 }) {
-  const position = component.position
+  const position = layoutPosition || component.position
+  const markupClass = component.type === MARKUP_TYPE ? 'is-markup-stroke' : isMarkupLayer(component) ? 'is-markup-image' : ''
   const tag = tags.get(component.binding?.tagId)
   const chartTags = useMemo(
     () => (component.binding?.tagIds || []).map(tagId => tags.get(tagId)).filter(Boolean),
@@ -327,7 +430,8 @@ const RuntimeOverlay = memo(function RuntimeOverlay({
 
   return (
     <div
-      className={`sb-overlay ${selected ? 'is-selected' : ''} ${component.locked ? 'is-locked' : ''}`}
+      className={`sb-overlay ${selected && !markupReference ? 'is-selected' : ''} ${component.locked ? 'is-locked' : ''} ${markupClass} ${markupReference ? 'is-markup-reference' : ''}`}
+      inert={markupReference ? '' : undefined}
       style={{
         left: `${position.x / canvas.width * 100}%`,
         top: `${position.y / canvas.height * 100}%`,
@@ -337,7 +441,7 @@ const RuntimeOverlay = memo(function RuntimeOverlay({
         zIndex: component.zIndex || 1,
       }}
       onPointerDown={onStartTransform ? event => onStartTransform(event, component, 'move') : undefined}
-      onClick={editable ? event => {
+      onClick={editable && !markupReference ? event => {
         event.stopPropagation()
         if (selected && selectedCount > 1) return
         onSelect?.(component.id, { additive: event.shiftKey || event.ctrlKey || event.metaKey })
@@ -346,10 +450,12 @@ const RuntimeOverlay = memo(function RuntimeOverlay({
       <RuntimeComponentBoundary componentName={component.name}>
         <RuntimeComponent
           component={component}
+          layoutPosition={position}
           designAsset={designAsset}
           tag={tag}
           value={value}
           quality={quality}
+          templateOnly={templateOnly}
           chartTags={chartTags}
           editable={editable}
           actorRole={actorRole}
@@ -361,10 +467,9 @@ const RuntimeOverlay = memo(function RuntimeOverlay({
           operationMode={operationMode}
           onOperationModeChange={mode => onOperationModeChange(component.id, mode)}
           operationLockLabel={operationLockLabel}
-          componentById={componentById}
         />
       </RuntimeComponentBoundary>
-      {editable && selected && !component.locked && RESIZE_HANDLES.map(handle => <button
+      {editable && selected && !markupReference && !component.locked && RESIZE_HANDLES.map(handle => <button
         type="button"
         className={`sb-resize-handle handle-${handle}`}
         aria-label={`Resize ${component.name} from ${handle}`}
@@ -434,25 +539,31 @@ class RuntimeComponentBoundary extends Component {
   render() { return this.state.failed ? <div className="sb-runtime-component-error" role="status"><strong>COMPONENT ERROR</strong><span>{this.props.componentName}</span></div> : this.props.children }
 }
 
-function RuntimeComponent({ component, designAsset, tag, value, quality, chartTags, editable, actorRole, onCommand, commandResult, onExpandChart, onOpenPopup, commandConnectionAvailable, operationMode = 'manual', onOperationModeChange, operationLockLabel = '', componentById }) {
-  const [commandState, setCommandState] = useState('idle')
+function RuntimeComponent({ component, layoutPosition, designAsset, tag, value, quality, chartTags, editable, templateOnly = false, actorRole, onCommand, commandResult, onExpandChart, onOpenPopup, commandConnectionAvailable, operationMode = 'manual', onOperationModeChange, operationLockLabel = '' }) {
   const properties = component.properties || {}
   const qualityLabel = quality !== 'good' ? quality.toUpperCase() : null
-  const visibleCommandState = commandResult?.status || commandState
 
   if (component.type === 'indicator-lamp') {
-    const active = evaluateRule(value, properties.rule)
+    const active = templateOnly ? properties.templateActive === true : evaluateRule(value, properties.rule)
     const color = active ? (properties.onColor || '#22c55e') : (properties.offColor || '#64748b')
     return (
-      <div className={`sb-lamp-component quality-${quality}`} title={`${tag?.name || 'Unbound'}: ${String(value ?? '--')} · ${quality}`}>
+      <div className={`sb-lamp-component quality-${quality}`} title={templateOnly ? undefined : `${tag?.name || 'Unbound'}: ${String(value ?? '--')} · ${quality}`}>
         <span
           className={`sb-runtime-lamp ${active && properties.glow !== false ? 'has-glow' : ''}`}
           style={{ '--lamp-color': color, borderRadius: properties.shape === 'square' ? '20%' : properties.shape === 'rectangle' ? '8%' : '50%' }}
         />
         <span className="sb-lamp-label">{properties.label || component.name || 'LAMP'}</span>
-        <span className="sb-lamp-state">{qualityLabel || (tag ? (active ? 'ON' : 'OFF') : 'UNBOUND')}</span>
+        <span className="sb-lamp-state">{qualityLabel || (tag || templateOnly ? (active ? 'ON' : 'OFF') : 'UNBOUND')}</span>
       </div>
     )
+  }
+
+  if (PROCESS_EQUIPMENT_TYPES.includes(component.type)) {
+    return <ProcessEquipmentComponent component={component} tag={tag} value={value} quality={quality} />
+  }
+
+  if (component.type === 'pipe') {
+    return <PipeComponent component={component} tag={tag} value={value} quality={quality} />
   }
 
   if (component.type === 'alarm') {
@@ -460,6 +571,10 @@ function RuntimeComponent({ component, designAsset, tag, value, quality, chartTa
   }
 
   if (component.type === 'value-span') {
+    if (templateOnly) return <div className="sb-value-component" style={{ color: properties.textColor, background: properties.backgroundColor }}>
+      <span className="sb-value-label">{properties.label || component.name}</span>
+      <strong>{properties.templateValue ?? 0}</strong>
+    </div>
     const displayProperties = numericDisplayProperties(tag, properties)
     const outOfRange = numericValueOutOfRange(tag, value, properties)
     const severity = outOfRange ? 'critical' : valueSeverity(value, properties)
@@ -474,7 +589,7 @@ function RuntimeComponent({ component, designAsset, tag, value, quality, chartTa
   }
 
   if (component.type === 'gauge') {
-    return <GaugeComponent component={component} tag={tag} value={value} quality={quality} />
+    return <GaugeComponent component={component} tag={tag} value={templateOnly ? properties.templateValue ?? 0 : value} quality={quality} templateOnly={templateOnly} />
   }
 
   if (component.type === 'tuning-slider') {
@@ -524,38 +639,10 @@ function RuntimeComponent({ component, designAsset, tag, value, quality, chartTa
   }
 
   if (component.type === 'control-button') {
-    const permitted = canExecuteCommand(actorRole, properties.requiredRole)
-    const commandUi = commandUiState({
-      tag,
-      quality,
-      editable,
-      hasCommandHandler: Boolean(onCommand),
-      permitted,
-      connectionAvailable: commandConnectionAvailable,
-      commandState: visibleCommandState,
-      interlockLabel: operationLockLabel,
-    })
-    const runCommand = async event => {
-      event.stopPropagation()
-      if (commandUi.disabled) return
-      if (properties.confirmation === 'single' && !window.confirm(`Send command “${properties.label || component.name}”?`)) return
-      setCommandState('requested')
-      let terminalState = 'failed'
-      try {
-        const result = await onCommand(component, tag)
-        terminalState = result?.status || (result?.ok ? 'acknowledged' : 'failed')
-      } catch {
-        terminalState = 'failed'
-      }
-      setCommandState(terminalState)
-      window.setTimeout(() => setCommandState('idle'), commandResultRetentionMs(terminalState))
-    }
-    return (
-      <button type="button" className={`sb-control-component state-${commandUi.label.toLowerCase().replaceAll(' ', '-')}`} style={{ '--button-color': properties.buttonColor || '#f6b73c' }} disabled={commandUi.disabled} onClick={runCommand}>
-        <strong>{isPendingCommandStatus(visibleCommandState) ? 'SENDING…' : properties.label || component.name}</strong>
-        <span>{commandUi.label}</span>
-      </button>
-    )
+    if (templateOnly) return <div className="sb-control-component sb-wincc-template-button" style={{ '--button-color': properties.buttonColor || '#f6b73c' }}>
+      <strong>{properties.label || component.name}</strong>
+    </div>
+    return <ControlButtonComponent component={component} tag={tag} value={value} quality={quality} editable={editable} actorRole={actorRole} onCommand={onCommand} commandResult={commandResult} commandConnectionAvailable={commandConnectionAvailable} operationLockLabel={operationLockLabel} />
   }
 
   if (component.type === 'text-label') {
@@ -580,12 +667,213 @@ function RuntimeComponent({ component, designAsset, tag, value, quality, chartTa
       </div>
     )
   }
+  if (component.type === MARKUP_TYPE) {
+    const { width, height } = layoutPosition || component.position
+    return <MarkupGeometry properties={properties} width={width} height={height} />
+  }
+
   if (component.type === 'design-image') {
+    if (designAsset?.loading) return <div className="sb-design-image-pending" aria-label="Loading image" />
     return designAsset?.src
       ? <div className="sb-design-image-component" style={{ opacity: properties.opacity ?? 1 }}><img src={designAsset.src} alt={editable ? component.name || designAsset.name : ''} draggable="false" style={{ objectFit: properties.objectFit || 'contain' }} /></div>
       : <div className="sb-design-image-missing" role="status">IMAGE UNAVAILABLE</div>
   }
   return <div className="sb-invalid-component">Unsupported component</div>
+}
+
+function ControlButtonComponent({ component, tag, value, quality, editable, actorRole, onCommand, commandResult, commandConnectionAvailable, operationLockLabel }) {
+  const properties = component.properties || {}
+  const action = properties.action || 'toggle-boolean'
+  const queueRef = useRef(null)
+  if (!queueRef.current) queueRef.current = createControlCommandIntentQueue({ action, currentValue: value, payload: properties.payload })
+  queueRef.current.configure({ action, payload: properties.payload })
+  const [queueState, setQueueState] = useState(() => queueRef.current.snapshot())
+  const [commandState, setCommandState] = useState('idle')
+  const resetTimerRef = useRef(null)
+
+  useEffect(() => {
+    setQueueState(queueRef.current.sync(value))
+  }, [value])
+
+  useEffect(() => () => window.clearTimeout(resetTimerRef.current), [])
+
+  const permitted = canExecuteCommand(actorRole, properties.requiredRole)
+  const admissionUi = commandUiState({
+    tag,
+    quality,
+    editable,
+    hasCommandHandler: Boolean(onCommand),
+    permitted,
+    connectionAvailable: commandConnectionAvailable,
+    commandState: 'idle',
+    interlockLabel: operationLockLabel,
+  })
+  const visibleCommandState = queueState.inFlight ? 'requested' : commandResult?.status || commandState
+  const presentation = commandStatusPresentation(visibleCommandState)
+  const statusLabel = admissionUi.disabled ? admissionUi.label : queueState.queued ? 'QUEUED' : presentation.label
+
+  const dispatchQueuedCommands = async initialIntent => {
+    let intent = initialIntent
+    let terminalState = 'failed'
+    while (intent.kind === 'dispatch') {
+      setCommandState('requested')
+      let result
+      try {
+        result = await onCommand(component, tag, intent.value, { clientIntentAt: intent.intentAt })
+        terminalState = result?.status || (result?.ok ? 'acknowledged' : 'failed')
+      } catch {
+        result = { ok: false, status: 'failed' }
+        terminalState = 'failed'
+      }
+      intent = queueRef.current.settle(result)
+      setQueueState(intent.state)
+    }
+    setCommandState(terminalState)
+    window.clearTimeout(resetTimerRef.current)
+    resetTimerRef.current = window.setTimeout(() => setCommandState('idle'), commandResultRetentionMs(terminalState))
+  }
+
+  const runCommand = event => {
+    event.stopPropagation()
+    if (admissionUi.disabled) return
+    const clientIntentAt = Date.now()
+    if (properties.confirmation === 'single' && !window.confirm(`Send command “${properties.label || component.name}”?`)) return
+    const intent = queueRef.current.press(value, { intentAt: clientIntentAt })
+    setQueueState(intent.state)
+    if (intent.kind === 'dispatch') void dispatchQueuedCommands(intent)
+  }
+
+  return (
+    <button type="button" className={`sb-control-component state-${statusLabel.toLowerCase().replaceAll(' ', '-')}`} style={{ '--button-color': properties.buttonColor || '#f6b73c' }} disabled={admissionUi.disabled} onClick={runCommand}>
+      <strong>{queueState.queued ? 'QUEUED…' : queueState.inFlight ? 'SENDING…' : properties.label || component.name}</strong>
+      <span>{statusLabel}</span>
+    </button>
+  )
+}
+
+function ProcessEquipmentComponent({ component, tag, value, quality }) {
+  const properties = component.properties || {}
+  const active = Boolean(tag) && quality === 'good' && evaluateRule(value, properties.rule)
+  const stateLabel = !tag
+    ? 'UNBOUND'
+    : quality !== 'good'
+      ? quality.toUpperCase()
+      : active
+        ? properties.activeText || (component.type === 'valve' ? 'OPEN' : 'RUNNING')
+        : properties.inactiveText || (component.type === 'valve' ? 'CLOSED' : 'STOPPED')
+  const className = [
+    'sb-process-equipment',
+    `type-${component.type}`,
+    active ? 'is-active' : 'is-idle',
+    active && properties.glow !== false ? 'has-glow' : '',
+    active && properties.animate !== false ? 'is-animated' : '',
+    component.type === 'valve' && properties.orientation === 'vertical' ? 'is-vertical' : '',
+    `quality-${quality}`,
+  ].filter(Boolean).join(' ')
+  return (
+    <div
+      className={className}
+      role="status"
+      aria-label={`${properties.label || component.name}: ${stateLabel}`}
+      title={`${tag?.name || 'Unbound'}: ${String(value ?? '--')} · ${quality}`}
+      style={{
+        '--equipment-color': active ? properties.activeColor || '#22c55e' : properties.idleColor || '#64748b',
+        '--equipment-active-color': properties.activeColor || '#22c55e',
+      }}
+    >
+      <svg viewBox="0 0 180 100" aria-hidden="true">
+        {component.type === 'valve' && <ValveSymbol />}
+        {component.type === 'motor' && <MotorSymbol />}
+        {component.type === 'pump' && <PumpSymbol />}
+        {component.type === 'fan' && <FanSymbol />}
+      </svg>
+      <span className="sb-equipment-caption"><strong>{properties.label || component.name}</strong><small>{stateLabel}</small></span>
+    </div>
+  )
+}
+
+function ValveSymbol() {
+  return (
+    <g className="sb-equipment-orientation">
+      <path className="sb-equipment-pipe" d="M8 51h47m70 0h47" />
+      <path className="sb-equipment-body" d="M55 25l35 26-35 25zm70 0L90 51l35 25z" />
+      <path className="sb-equipment-detail" d="M90 49V16m-18 0h36" />
+      <rect className="sb-equipment-actuator" x="74" y="7" width="32" height="15" rx="2" />
+    </g>
+  )
+}
+
+function MotorSymbol() {
+  return (
+    <>
+      <path className="sb-equipment-pipe" d="M137 49h35" />
+      <path className="sb-equipment-base" d="M45 78h90m-77 0v9m64-9v9" />
+      <rect className="sb-equipment-body" x="43" y="22" width="96" height="57" rx="8" />
+      <path className="sb-equipment-detail" d="M56 29v43m14-43v43m50-43v43" />
+      <g className="sb-equipment-motion"><circle cx="91" cy="50" r="20" /><path d="M91 30v8m0 24v8m-20-20h8m24 0h8" /></g>
+      <text className="sb-equipment-letter" x="91" y="56">M</text>
+    </>
+  )
+}
+
+function PumpSymbol() {
+  return (
+    <>
+      <path className="sb-equipment-pipe" d="M8 57h42m80 0h42m-42 0V20h30" />
+      <circle className="sb-equipment-body" cx="90" cy="57" r="40" />
+      <g className="sb-equipment-motion"><path d="M70 70c4-27 34-33 47-12-18-8-28 4-29 17z" /><circle cx="90" cy="57" r="6" /></g>
+      <path className="sb-equipment-base" d="M57 91h67" />
+    </>
+  )
+}
+
+function FanSymbol() {
+  return (
+    <>
+      <circle className="sb-equipment-body" cx="90" cy="50" r="43" />
+      <g className="sb-equipment-motion">
+        <path d="M90 48c-8-15-5-30 8-34 12 11 10 25-3 37z" />
+        <path d="M92 50c15-8 30-5 34 8-11 12-25 10-37-3z" />
+        <path d="M90 52c8 15 5 30-8 34-12-11-10-25 3-37z" />
+        <path d="M88 50c-15 8-30 5-34-8 11-12 25-10 37 3z" />
+      </g>
+      <circle className="sb-equipment-hub" cx="90" cy="50" r="7" />
+      <path className="sb-equipment-base" d="M61 94h58" />
+    </>
+  )
+}
+
+function PipeComponent({ component, tag, value, quality }) {
+  const properties = component.properties || {}
+  const active = Boolean(tag) && quality === 'good' && evaluateRule(value, properties.rule)
+  const stateLabel = !tag ? 'UNBOUND' : quality !== 'good' ? quality.toUpperCase() : active ? properties.activeText || 'FLOW ACTIVE' : properties.inactiveText || 'NO FLOW'
+  const className = [
+    'sb-pipe-component',
+    active ? 'is-active' : 'is-idle',
+    active && properties.glow !== false ? 'has-glow' : '',
+    active && properties.animate !== false ? 'is-animated' : '',
+    properties.direction === 'reverse' ? 'is-reverse' : '',
+    `quality-${quality}`,
+  ].filter(Boolean).join(' ')
+  return (
+    <div
+      className={className}
+      role="status"
+      aria-label={`${properties.label || component.name}: ${stateLabel}`}
+      title={`${tag?.name || 'Unbound'}: ${String(value ?? '--')} · ${quality}`}
+      style={{
+        '--pipe-color': active ? properties.activeColor || '#20c4d9' : properties.idleColor || '#475569',
+        '--pipe-active-color': properties.activeColor || '#20c4d9',
+      }}
+    >
+      <svg viewBox="0 0 300 54" preserveAspectRatio="none" aria-hidden="true">
+        <path className="sb-pipe-casing" d="M5 27h290" />
+        <path className="sb-pipe-fill" d="M5 27h290" />
+        <path className="sb-pipe-stream" d="M5 27h290" />
+      </svg>
+      <span className="sb-pipe-caption"><strong>{properties.label || component.name}</strong><small><i aria-hidden="true" />{stateLabel}</small></span>
+    </div>
+  )
 }
 
 export function AlarmComponent({ component, tag, value, quality = 'good', editable = false }) {
@@ -685,7 +973,7 @@ function useAlarmTone({ active, enabled, frequencyHz, volume, pulseMs }) {
   return { silenced, setSilenced }
 }
 
-export function GaugeComponent({ component, tag, value, quality = 'good' }) {
+export function GaugeComponent({ component, tag, value, quality = 'good', templateOnly = false }) {
   const properties = component.properties || {}
   const range = resolveNumericRange(tag, properties, 'display')
   const zones = resolveGaugeZones(range, properties)
@@ -696,7 +984,7 @@ export function GaugeComponent({ component, tag, value, quality = 'good' }) {
   const highStartAngle = gaugeAngleFor(state.highZoneStart, resolvedProperties)
   const unit = resolvedProperties.suffix || ''
   const label = properties.label || component.name || 'GAUGE'
-  const status = !tag ? 'UNBOUND' : quality !== 'good' ? String(quality).toUpperCase() : ''
+  const status = templateOnly ? '' : !tag ? 'UNBOUND' : quality !== 'good' ? String(quality).toUpperCase() : ''
   const ariaValue = `${label}: ${state.display}${unit ? ` ${unit}` : ''}${status ? `, ${status}` : ''}`
   return (
     <div
@@ -709,7 +997,7 @@ export function GaugeComponent({ component, tag, value, quality = 'good' }) {
         '--gauge-face': properties.faceColor || '#d8e4e8',
         '--gauge-text': properties.textColor || '#263b45',
       }}
-      title={`${tag?.name || 'Unbound'} · ${quality}`}
+      title={templateOnly ? undefined : `${tag?.name || 'Unbound'} · ${quality}`}
     >
       <svg viewBox="0 0 200 200" role="img" aria-label={ariaValue} preserveAspectRatio="xMidYMid meet">
         <circle className="sb-gauge-shadow" cx="100" cy="100" r="96" />
@@ -740,7 +1028,7 @@ export function GaugeComponent({ component, tag, value, quality = 'good' }) {
   )
 }
 
-function ControlPopupDialog({ component, childComponents, tags, values, qualities, actorRole, onCommand, commandResults, commandConnectionAvailable, operationModes, onOperationModeChange, operationLockFor, componentById, onClose }) {
+function ControlPopupDialog({ component, childComponents, tags, values, qualities, actorRole, onCommand, commandResults, commandConnectionAvailable, operationModes, onOperationModeChange, operationLockFor, onClose }) {
   const dialogRef = useRef(null)
   const closeRef = useRef(null)
   const properties = component.properties || {}
@@ -792,14 +1080,15 @@ function ControlPopupDialog({ component, childComponents, tags, values, qualitie
         <div className="sb-control-popup-grid">
           {childComponents.map(child => {
             const tag = tags.get(child.binding?.tagId)
-            const quality = qualities[child.binding?.tagId] || 'good'
+            const observedTagId = componentObservedTagId(child)
+            const quality = qualities[observedTagId] || 'good'
             return (
               <div className={`sb-control-popup-item type-${child.type}`} key={child.id}>
                 <RuntimeComponentBoundary componentName={child.name}>
                   <RuntimeComponent
                     component={child}
                     tag={tag}
-                    value={values[child.binding?.tagId]}
+                    value={values[observedTagId]}
                     quality={quality}
                     chartTags={[]}
                     editable={false}
@@ -810,7 +1099,6 @@ function ControlPopupDialog({ component, childComponents, tags, values, qualitie
                     operationMode={operationModes[child.id] || 'manual'}
                     onOperationModeChange={mode => onOperationModeChange(child.id, mode)}
                     operationLockLabel={operationLockFor(child.id)}
-                    componentById={componentById}
                   />
                 </RuntimeComponentBoundary>
               </div>
@@ -962,7 +1250,7 @@ function ExpandedChart({ component, tags, histories, historyStorage, onLoadHisto
           <span>{rangeId === 'live' ? 'LIVE TELEMETRY' : 'HISTORICAL TELEMETRY'} · {status}</span>
           <strong>{component.properties?.label || component.name || 'TELEMETRY CHART'}</strong>
         </div>
-        <button ref={closeRef} type="button" onClick={onClose} aria-label="Minimize chart"><span aria-hidden="true">—</span> Minimize</button>
+        <button ref={closeRef} type="button" onClick={onClose} aria-label="Minimize chart" title="Minimize chart"><span aria-hidden="true">—</span></button>
       </header>
       <div className="sb-chart-history-toolbar" aria-label="Chart time range">
         <div

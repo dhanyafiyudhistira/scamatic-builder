@@ -6,6 +6,7 @@ import { useBoardTone } from '../platform/BoardTone.jsx'
 import { appendRuntimeHistory, seedRuntimeHistory } from '../../shared/runtime-history.js'
 import { commandCompletionBudgetMs, commandResultCanReplace, commandResultRetentionMs, commandStatusPresentation, commandStatusRank, isPendingCommandStatus } from '../../shared/command-lifecycle.js'
 import { runtimeProfileMetadata } from '../../shared/runtime-profile.js'
+import { hostedRuntimeProfile } from '../../shared/hosted-runtime-policy.js'
 import { advanceSimulationValue, applySimulationRpc, simulationTelemetryBaseline, simulationTelemetryDelta } from '../../shared/simulation-bridge.js'
 import { initialSimulationBridgeHealth, simulationCommandConnectionAvailable, simulationStandbyRetryDelay, updateSimulationBridgeHealth, updateSimulationBridgeLease } from '../../shared/simulation-health.js'
 import { createSimulationTelemetryQueue } from '../../shared/simulation-telemetry-queue.js'
@@ -13,9 +14,13 @@ import { createRuntimeHistoryArchiveQueue } from '../../shared/runtime-history-a
 import { nextRuntimeResponderIdentity } from '../../shared/runtime-responder.js'
 import { createRuntimeCommandMetricsRecorder, runtimeCommandMetricsCsv, runtimeCommandMetricsStorageKey, runtimeCommandMetricsSummary } from '../../shared/runtime-command-metrics.js'
 import { numericEngineering, resolveNumericRange } from '../../shared/numeric-tag-config.js'
+import { createRuntimeTelemetryFrame } from '../../shared/runtime-telemetry-frame.js'
 import { AuthScreen } from '../platform/AuthScreen.jsx'
+import { connectRuntimeStream, resolveDesignAssets } from '../platform/desktop.js'
+import { InfoPopover, InfoPopoverSection } from '../platform/InfoPopover.jsx'
+import { projectTypeMetadata, projectTypeOf } from '../../shared/project-type.js'
 
-export default function RuntimeApp({ slug, metricsEnabled = false }) {
+export default function RuntimeApp({ slug, metricsEnabled = false, hostedOnly = false }) {
   const [session, setSession] = useState({ loading: true, user: null })
   const [runtime, setRuntime] = useState(null)
   const [runtimeSession, setRuntimeSession] = useState(null)
@@ -51,7 +56,8 @@ export default function RuntimeApp({ slug, metricsEnabled = false }) {
   const previousRuntimeStateRef = useRef(state)
   if (!simulationHistoryArchiveRef.current) simulationHistoryArchiveRef.current = createRuntimeHistoryArchiveQueue()
   const [boardTone, setBoardTone] = useBoardTone()
-  const profile = runtime?.profile || runtimeSession?.profile || runtimeProfileMetadata(runtime?.schema)
+  const publishedProfile = runtime?.profile || runtimeSession?.profile || runtimeProfileMetadata(runtime?.schema)
+  const profile = hostedOnly ? hostedRuntimeProfile(publishedProfile, runtime?.deployment?.policy || runtimeSession?.deployment?.policy) : publishedProfile
 
   useEffect(() => { valuesRef.current = values }, [values])
 
@@ -220,7 +226,7 @@ export default function RuntimeApp({ slug, metricsEnabled = false }) {
     return data
   }, [runtime?.projectId, runtimeSession?.telemetry?.bridge, runtimeSession?.telemetry?.mode, runtimeSession?.token, updateSimulationLease])
 
-  const createRuntimeSession = useCallback(projectId => {
+  const createRuntimeSession = useCallback((projectId, { excludeEngine = null } = {}) => {
     const responder = nextRuntimeResponderIdentity()
     return apiRequest('/api/runtime-session', {
       method: 'POST',
@@ -228,6 +234,7 @@ export default function RuntimeApp({ slug, metricsEnabled = false }) {
         projectId,
         responderId: responder.id,
         responderGeneration: responder.generation,
+        ...(excludeEngine ? { excludeEngine } : {}),
       }),
     })
   }, [])
@@ -284,16 +291,17 @@ export default function RuntimeApp({ slug, metricsEnabled = false }) {
       setState('loading-schema'); setError(''); setLockedProjectId(null)
       try {
         const data = await apiRequest(`/api/runtime?slug=${encodeURIComponent(slug)}`)
+        const runtimeData = { ...data, designAssets: await resolveDesignAssets(data.designAssets || {}) }
         if (cancelled) return
-        setRuntime(data)
-        const initialValues = Object.fromEntries(Object.entries(data.values || {}).map(([tagId, sample]) => [tagId, sample.value]))
+        setRuntime(runtimeData)
+        const initialValues = Object.fromEntries(Object.entries(runtimeData.values || {}).map(([tagId, sample]) => [tagId, sample.value]))
         valuesRef.current = initialValues
-        simulationTargetsRef.current = { ...(data.simulationTargets || {}) }
+        simulationTargetsRef.current = { ...(runtimeData.simulationTargets || {}) }
         setValues(initialValues)
-        setQualities(Object.fromEntries(Object.entries(data.values || {}).map(([tagId, sample]) => [tagId, sample.quality || 'good'])))
-        setHistories(seedRuntimeHistory(data.values || {}, data.history || {}))
+        setQualities(Object.fromEntries(Object.entries(runtimeData.values || {}).map(([tagId, sample]) => [tagId, sample.quality || 'good'])))
+        setHistories(seedRuntimeHistory(runtimeData.values || {}, runtimeData.history || {}))
         setState('connecting')
-        const scoped = await createRuntimeSession(data.projectId)
+        const scoped = await createRuntimeSession(runtimeData.projectId)
         if (cancelled) return
         setRuntimeSession(scoped)
         const waitsForTransport = ['poll', 'stream', 'simulation'].includes(scoped.telemetry?.mode) || Boolean(scoped.stream?.url)
@@ -317,36 +325,50 @@ export default function RuntimeApp({ slug, metricsEnabled = false }) {
     let disposed = false
     let reconnectTimer = null
     let reconnectAttempt = 0
-    const socket = new WebSocket(`${runtimeSession.stream.url}?ticket=${encodeURIComponent(runtimeSession.stream.ticket)}`)
-    socket.addEventListener('open', () => setState('online'))
-    socket.addEventListener('message', event => {
+    let disconnect = () => {}
+    const telemetryFrame = createRuntimeTelemetryFrame({
+      schedule: callback => window.setTimeout(callback, 16),
+      cancel: timer => window.clearTimeout(timer),
+      onFlush: events => {
+        if (disposed || events.length === 0) return
+        setValues(previous => {
+          const next = { ...previous }
+          for (const item of events) next[item.tagId] = item.value
+          return next
+        })
+        setQualities(previous => {
+          const next = { ...previous }
+          for (const item of events) next[item.tagId] = item.quality
+          return next
+        })
+        setHistories(previous => appendRuntimeHistory(previous, events))
+      },
+    })
+    const handleMessage = data => {
       try {
-        const message = JSON.parse(event.data)
+        const message = JSON.parse(data)
+        if (message.type === 'ready') {
+          setState('online')
+          return
+        }
         if (message.type === 'command-status') {
           receiveCommandPush(message.command)
           return
         }
         if (message.type !== 'tag-batch' || !Array.isArray(message.events)) return
-        setValues(previous => {
-          const next = { ...previous }
-          for (const item of message.events) next[item.tagId] = item.value
-          return next
-        })
-        setQualities(previous => {
-          const next = { ...previous }
-          for (const item of message.events) next[item.tagId] = item.quality
-          return next
-        })
-        setHistories(previous => appendRuntimeHistory(previous, message.events))
+        telemetryFrame.enqueue(message.events)
       } catch { /* Ignore malformed worker frames. */ }
-    })
-    socket.addEventListener('close', () => {
+    }
+    const handleClose = () => {
       if (disposed) return
+      telemetryFrame.flush()
       setState('reconnecting')
       const reconnect = async () => {
         if (disposed) return
         try {
-          const scoped = await createRuntimeSession(runtime.projectId)
+          const scoped = await createRuntimeSession(runtime.projectId, {
+            excludeEngine: runtimeSession.engine?.selected === 'isaac' ? 'isaac' : null,
+          })
           if (!disposed) {
             setRuntimeSession(scoped)
             setState('connecting')
@@ -360,10 +382,29 @@ export default function RuntimeApp({ slug, metricsEnabled = false }) {
         }
       }
       reconnectTimer = window.setTimeout(reconnect, 250)
+    }
+    void connectRuntimeStream({
+      url: runtimeSession.stream.url,
+      ticket: runtimeSession.stream.ticket,
+      onOpen: () => setState('connecting'),
+      onMessage: handleMessage,
+      onClose: handleClose,
+      onError: () => setState('degraded'),
+    }).then(close => {
+      if (disposed) void close()
+      else disconnect = close
+    }).catch(() => {
+      if (disposed) return
+      setState('degraded')
+      handleClose()
     })
-    socket.addEventListener('error', () => setState('degraded'))
-    return () => { disposed = true; window.clearTimeout(reconnectTimer); socket.close() }
-  }, [createRuntimeSession, receiveCommandPush, runtime?.projectId, runtimeSession?.stream?.ticket, runtimeSession?.stream?.url])
+    return () => {
+      disposed = true
+      window.clearTimeout(reconnectTimer)
+      telemetryFrame.clear()
+      void disconnect()
+    }
+  }, [createRuntimeSession, receiveCommandPush, runtime?.projectId, runtimeSession?.engine?.selected, runtimeSession?.stream?.ticket, runtimeSession?.stream?.url])
 
   useEffect(() => {
     if (runtimeSession?.telemetry?.mode !== 'poll' || !runtime?.projectId || !runtimeSession?.token) return
@@ -839,8 +880,13 @@ export default function RuntimeApp({ slug, metricsEnabled = false }) {
     return () => { cancelled = true }
   }, [rememberCommandResult, runtime?.projectId, runtime?.schema?.components, runtimeSession?.stream?.url, runtimeSession?.token, waitForCommandPush])
 
-  const runCommand = async (component, tag, requestedValue) => {
-    const clientStartedAt = Date.now()
+  const runCommand = async (component, tag, requestedValue, commandContext = {}) => {
+    const clientDispatchedAt = Date.now()
+    const suppliedIntentAt = Number(commandContext?.clientIntentAt)
+    const clientStartedAt = Number.isFinite(suppliedIntentAt) && suppliedIntentAt >= 0 && suppliedIntentAt <= clientDispatchedAt
+      ? suppliedIntentAt
+      : clientDispatchedAt
+    const clientIntentToDispatchMs = Math.round(clientDispatchedAt - clientStartedAt)
     const commandRequestId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`
     if (commandMetricsRecorderRef.current?.start(commandRequestId, { startedAt: clientStartedAt })) scheduleCommandMetricsRefresh()
     if (profile.id === 'simulation' && component.type === 'operation-shifter') cancelSimulationSequence(component.id)
@@ -926,7 +972,10 @@ export default function RuntimeApp({ slug, metricsEnabled = false }) {
           }, result.resetAfterMs)
         }
       }
-      return rememberCommandResult(component, result)
+      return rememberCommandResult(component, {
+        ...result,
+        timing: { ...(result?.timing || {}), clientIntentToDispatchMs },
+      })
     } catch (requestError) {
       const rejected = Number(requestError.status) >= 400 && Number(requestError.status) < 500
       return rememberCommandResult(component, {
@@ -937,6 +986,7 @@ export default function RuntimeApp({ slug, metricsEnabled = false }) {
         code: requestError.code || 'COMMAND_STATUS_UNKNOWN',
         tagId: tag?.id,
         correlationId: requestError.correlationId || null,
+        timing: { clientIntentToDispatchMs },
       })
     }
   }
@@ -958,8 +1008,8 @@ export default function RuntimeApp({ slug, metricsEnabled = false }) {
   const statusLabel = useMemo(() => state.replaceAll('-', ' ').toUpperCase(), [state])
   const profileStatusLabel = profile.id === 'monitor' ? 'MONITORING' : profile.id.toUpperCase()
   if (session.loading) return <RuntimeState title="Checking runtime access…" />
-  if (!session.user) return <AuthScreen onAuthenticated={checkSession} runtime allowSignup={false} />
-  if (state === 'project-locked' && lockedProjectId) return <RuntimeProjectUnlock projectId={lockedProjectId} onUnlocked={() => setBootstrapAttempt(attempt => attempt + 1)} />
+  if (!session.user) return <AuthScreen onAuthenticated={checkSession} runtime allowSignup={false} hostedOnly={hostedOnly} />
+  if (state === 'project-locked' && lockedProjectId) return <RuntimeProjectUnlock projectId={lockedProjectId} hostedOnly={hostedOnly} onUnlocked={() => setBootstrapAttempt(attempt => attempt + 1)} />
   if (error) return <RuntimeState title={error} detail={statusLabel} />
   if (!runtime) return <RuntimeState title="Preparing published runtime…" detail={statusLabel} />
   const runtimeConnecting = !runtimeSession || ['connecting', 'reconnecting'].includes(state)
@@ -970,18 +1020,20 @@ export default function RuntimeApp({ slug, metricsEnabled = false }) {
     && simulationCommandConnectionAvailable(profile.id, state)
     && !runtimeConnecting
     && profile.commandEnabled
+  const projectType = projectTypeOf(runtime.schema)
+  const typeMetadata = projectTypeMetadata(projectType)
   return (
-    <div className="sb-published-runtime">
+    <div className={`sb-published-runtime mode-${projectType}`}>
       <div className="sb-runtime-toolbar">
         <div className="sb-runtime-project">
           <strong>{runtime.schema.project.name}</strong>
-          <span>Published v{runtime.version} · {runtime.environment.toUpperCase()}</span>
+          <span>{typeMetadata.label} · Published v{runtime.version} · {hostedOnly ? `HOSTED · ${profile.id === 'simulation' ? 'SIMULATION' : 'MONITOR ONLY'}` : runtime.environment.toUpperCase()}</span>
         </div>
         <div className={`sb-runtime-state state-${localSimulationOnly ? 'degraded' : state}`}>{localSimulationOnly ? 'LOCAL ONLY' : statusLabel} / {profileStatusLabel}</div>
         <div className="sb-runtime-toolbar-actions">
           {metricsEnabled && <RuntimeMetricsPanel summary={commandMetrics} profile={profile.id} onReset={resetCommandMetrics} onExport={exportCommandMetrics} />}
           <RuntimeViewMenu boardTone={boardTone} onBoardToneChange={setBoardTone} />
-          <a href="/">Builder</a>
+          {!hostedOnly && <a href="/">Builder</a>}
         </div>
       </div>
       {(runtimeRecovering || showRuntimeReady) && <RuntimeConnectionNotice state={showRuntimeReady && !runtimeRecovering ? 'ready' : state} profile={profile.id} bridgeHealth={simulationBridgeHealth} />}
@@ -1012,10 +1064,11 @@ function RuntimeConnectionNotice({ state, profile, bridgeHealth }) {
           : { title: 'CONNECTING RUNTIME', detail: 'Session restored · validating telemetry transport…' }
   return (
     <section className={`sb-runtime-connection-notice ${ready ? 'is-ready' : 'is-recovering'}`} role="status" aria-live="polite" aria-atomic="true">
-      <span className={ready ? 'sb-runtime-connection-check' : 'sb-runtime-connection-spinner'} aria-hidden="true">{ready ? '✓' : ''}</span>
+      <span className={ready ? 'sb-runtime-connection-check' : 'sb-runtime-connection-spinner'} aria-hidden="true">{ready ? <img className="sb-check-icon" src="/check.svg" alt="" /> : ''}</span>
       <span className="sb-runtime-connection-copy">
         <strong>{content.title}</strong>
         <small>{content.detail}</small>
+        {state === 'degraded' && <small>Do click Ctrl + R to restart the runtime.</small>}
         <span className="sb-runtime-connection-progress" role="progressbar" aria-label={content.title} aria-valuemin="0" aria-valuemax="100" aria-valuenow={ready ? '100' : undefined}>
           <i />
         </span>
@@ -1036,10 +1089,8 @@ function CommandNotice({ result, profile, metricsEnabled, bridge, bridgeHealth, 
       <header>
         <span>{simulationAcknowledged ? 'ACKNOWLEDGED LOCALLY' : result.presentation.label}</span>
         <div className="sb-runtime-message-actions">
-          <details className="sb-runtime-message-info">
-            <summary aria-label="Show command request details" title="Command request details">i</summary>
-            <div className="sb-runtime-message-info-popover">
-              <strong>COMMAND DETAILS</strong>
+          <InfoPopover className="sb-runtime-message-info" label="Show command request details" title="Command request details" align="end">
+            <InfoPopoverSection title="COMMAND DETAILS">
               <dl>
                 <div><dt>Request</dt><dd>{result.requestId || '—'}</dd></div>
                 <div><dt>Correlation</dt><dd>{result.correlationId || 'pending'}</dd></div>
@@ -1061,8 +1112,8 @@ function CommandNotice({ result, profile, metricsEnabled, bridge, bridgeHealth, 
                   {result.timing?.serverResponseReadyMs != null && <div><dt>Response ready</dt><dd>{formatRpcDuration(result.timing.serverResponseReadyMs)}</dd></div>}
                 </>}
               </dl>
-            </div>
-          </details>
+            </InfoPopoverSection>
+          </InfoPopover>
           <button type="button" onClick={onDismiss} aria-label="Dismiss command result">×</button>
         </div>
       </header>
@@ -1091,7 +1142,9 @@ async function reconcileCommandStatus({ projectId, runtimeToken, requestId, init
         continue
       }
     } else {
-      await new Promise(resolve => window.setTimeout(resolve, 500))
+      // Keep the no-stream fallback responsive without busy polling. The
+      // status endpoint uses leased rate-limit permits for this cadence.
+      await new Promise(resolve => window.setTimeout(resolve, 250))
     }
     if (Date.now() >= deadline) break
     latest = await apiRequest(`/api/commands?projectId=${encodeURIComponent(projectId)}&requestId=${encodeURIComponent(requestId)}`, {
@@ -1137,10 +1190,12 @@ function RuntimeMetricsPanel({ summary, profile, onReset, onExport }) {
   const metrics = summary?.metrics || {}
   const metricRows = profile === 'simulation'
     ? [
+        ['Intent → dispatch', metrics.clientIntentToDispatchMs],
         ['API (legacy)', metrics.apiAuthorizationMs],
         ['Admission total', metrics.admissionTotalMs],
         ['Admission reads', metrics.admissionReadsMs],
         ['Simulation state', metrics.simulationStateReadsMs],
+        ['Atomic completion', metrics.simulationTransactionMs],
         ['Command create', metrics.commandCreateMs],
         ['Authorization save', metrics.authorizationPersistMs],
         ['Authorization audit', metrics.authorizationAuditMs],
@@ -1151,7 +1206,9 @@ function RuntimeMetricsPanel({ summary, profile, onReset, onExport }) {
         ['Client E2E', metrics.clientEndToEndMs],
       ]
     : [
+        ['Intent → dispatch', metrics.clientIntentToDispatchMs],
         ['API', metrics.apiAuthorizationMs],
+        ['Atomic authorization', metrics.authorizationTransactionMs],
         ['Worker queue', metrics.workerQueueMs],
         ['Server total', metrics.serverTotalMs],
         ['Client E2E', metrics.clientEndToEndMs],
@@ -1304,7 +1361,7 @@ function RuntimeViewMenu({ boardTone, onBoardToneChange }) {
   )
 }
 
-function RuntimeProjectUnlock({ projectId, onUnlocked }) {
+function RuntimeProjectUnlock({ projectId, onUnlocked, hostedOnly = false }) {
   const [pin, setPin] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -1334,7 +1391,7 @@ function RuntimeProjectUnlock({ projectId, onUnlocked }) {
         <label>6-digit PIN<input className="sb-project-pin-input" type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength="6" autoComplete="off" value={pin} onChange={event => setPin(event.target.value.replace(/\D/g, '').slice(0, 6))} required autoFocus /></label>
         {error && <div className="sb-form-error">{error}</div>}
         <button type="submit" className="primary" disabled={busy || pin.length !== 6}>{busy ? 'Unlocking…' : 'Unlock project'}</button>
-        <a className="sb-runtime-pin-back" href="/">Back to Builder</a>
+        {!hostedOnly && <a className="sb-runtime-pin-back" href="/">Back to Builder</a>}
       </form>
     </div>
   )

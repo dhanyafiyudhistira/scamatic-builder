@@ -8,10 +8,13 @@ import { deleteProjectChartTelemetry } from '../_lib/chart-telemetry-store.js'
 import { loadWorkspaceChartStorage } from '../_lib/chart-storage-configuration.js'
 import { enforceRateLimit } from '../_lib/security.js'
 import { grantProjectUnlock, hashProjectPin, projectPinError, projectSecuritySnapshot, revokeProjectUnlock, revokeProjectUnlocks, unlockedProjectIds, verifyProjectPin } from '../_lib/project-pin.js'
+import { runtimeEngine, validRuntimeEngine } from '../../shared/runtime-engine.js'
+import { runtimeWorkerMode, validRuntimeWorkerMode } from '../../shared/runtime-worker-mode.js'
+import { DEFAULT_OUTPUT_TARGET, DEFAULT_PROJECT_TYPE, SCADA_OUTPUT_TARGETS, SCADA_PROJECT_TYPE, WINCC_OUTPUT_TARGET, projectOutputTarget, projectTypeMetadata, projectTypeOf, validProjectType } from '../../shared/project-type.js'
 
 const slugPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 
-export default async function handler(req, res) {
+export default async function handler(req, res, { onRuntimeWorkerModeChanged = () => {} } = {}) {
   const principal = await requirePrincipal(req, res)
   if (!principal) return
 
@@ -35,11 +38,19 @@ export default async function handler(req, res) {
 
     if (req.method === 'POST') {
       if (!requireWorkspacePermission(principal, res, PERMISSIONS.PROJECT_CREATE) || !requireCsrf(req, res, principal)) return
-      const { name, slug, description = '', width = 1920, height = 1080 } = req.body || {}
+      const { name, slug, description = '', projectType = DEFAULT_PROJECT_TYPE, outputTarget = DEFAULT_OUTPUT_TARGET, width, height } = req.body || {}
       const normalizedName = String(name || '').trim()
       const normalizedSlug = String(slug || '').trim().toLowerCase()
-      const canvasWidth = Number(width)
-      const canvasHeight = Number(height)
+      if (!validProjectType(projectType)) {
+        return res.status(400).json({ error: 'Project type must be scada or iot-dashboard.', code: 'PROJECT_TYPE_INVALID' })
+      }
+      const normalizedProjectType = projectTypeOf(projectType)
+      if (!SCADA_OUTPUT_TARGETS.includes(outputTarget) || (normalizedProjectType !== SCADA_PROJECT_TYPE && outputTarget !== DEFAULT_OUTPUT_TARGET)) {
+        return res.status(400).json({ error: 'WinCC Unified is available for SCADA Builder projects.', code: 'OUTPUT_TARGET_INVALID' })
+      }
+      const typeMetadata = projectTypeMetadata(normalizedProjectType)
+      const canvasWidth = Number(width ?? typeMetadata.canvas.width)
+      const canvasHeight = Number(height ?? typeMetadata.canvas.height)
       if (normalizedName.length < 2 || normalizedName.length > 80) {
         return res.status(400).json({ error: 'Project name must contain 2–80 characters.' })
       }
@@ -54,14 +65,17 @@ export default async function handler(req, res) {
         workspaceId: principal.workspaceId,
         name: normalizedName,
         slug: normalizedSlug,
+        projectType: normalizedProjectType,
+        outputTarget,
         description: String(description).slice(0, 500),
-        canvas: { width: canvasWidth, height: canvasHeight, background: '#101418' },
+        canvas: { width: canvasWidth, height: canvasHeight, background: typeMetadata.canvas.background },
         createdBy: principal.id,
         updatedBy: principal.id,
       })
-      const schema = createProjectSchema({ id: project.id, name: project.name, slug: project.slug, width: canvasWidth, height: canvasHeight })
+      const schema = createProjectSchema({ id: project.id, name: project.name, slug: project.slug, projectType: normalizedProjectType, width: canvasWidth, height: canvasHeight })
+      if (outputTarget === WINCC_OUTPUT_TARGET) schema.dataSources = []
       await ProjectDraft.create({ _id: project.id, schema, revision: 1, updatedBy: principal.id })
-      await AuditEvent.create({ workspaceId: principal.workspaceId, projectId: project.id, actorId: principal.id, action: 'project.create', targetType: 'project', targetId: project.id })
+      await AuditEvent.create({ workspaceId: principal.workspaceId, projectId: project.id, actorId: principal.id, action: 'project.create', targetType: 'project', targetId: project.id, metadata: { projectType: normalizedProjectType, outputTarget } })
       return res.status(201).json({ project: toClientProject(project.toObject(), true), revision: 1 })
     }
 
@@ -161,6 +175,57 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true, project: toClientProject(project.toObject(), true) })
       }
 
+      if (action === 'set-runtime-engine') {
+        const preference = String(req.body?.runtimeEnginePreference || '').trim().toLowerCase()
+        if (!validRuntimeEngine(preference)) {
+          return res.status(400).json({ error: 'Runtime engine must be standard or isaac.', code: 'RUNTIME_ENGINE_INVALID' })
+        }
+        const previousPreference = runtimeEngine(project)
+        const previousCanaryEnabled = project.isaacCanaryEnabled === true
+        project.runtimeEnginePreference = preference
+        if (preference === 'standard') project.isaacCanaryEnabled = false
+        project.updatedBy = principal.id
+        await project.save()
+        await AuditEvent.create({
+          workspaceId: principal.workspaceId,
+          projectId,
+          actorId: principal.id,
+          action: 'project.runtime-engine.updated',
+          targetType: 'project',
+          targetId: projectId,
+          metadata: { previousPreference, runtimeEnginePreference: preference, previousCanaryEnabled, isaacCanaryEnabled: project.isaacCanaryEnabled === true },
+        })
+        return res.status(200).json({ ok: true, project: toClientProject(project.toObject(), true) })
+      }
+
+      if (action === 'set-runtime-worker-mode') {
+        if (!requireWorkspacePermission(principal, res, PERMISSIONS.WORKSPACE_MANAGE)) return
+        const mode = String(req.body?.runtimeWorkerMode || '').trim().toLowerCase()
+        if (!validRuntimeWorkerMode(mode)) {
+          return res.status(400).json({ error: 'Runtime worker mode must be smart, always-on, or on-demand.', code: 'RUNTIME_WORKER_MODE_INVALID' })
+        }
+        const updatedProject = await runMongoTransaction(async session => {
+          const transactionalProject = await Project.findOne({ _id: projectId, workspaceId: principal.workspaceId }).session(session)
+          if (!transactionalProject) throw new Error('Project disappeared while updating its runtime worker mode.')
+          const previousMode = runtimeWorkerMode(transactionalProject)
+          transactionalProject.runtimeWorkerMode = mode
+          transactionalProject.updatedBy = principal.id
+          await transactionalProject.save({ session })
+          await AuditEvent.create([{
+            workspaceId: principal.workspaceId,
+            projectId,
+            actorId: principal.id,
+            action: 'project.runtime-worker-mode.updated',
+            targetType: 'project',
+            targetId: projectId,
+            metadata: { previousMode, runtimeWorkerMode: mode },
+          }], { session })
+          return transactionalProject.toObject()
+        }, { requireTransaction: true })
+        try { onRuntimeWorkerModeChanged({ projectId, workspaceId: principal.workspaceId, runtimeWorkerMode: mode }) } catch {}
+        return res.status(200).json({ ok: true, project: toClientProject(updatedProject, true) })
+      }
+
       if (action === 'rename') {
         const name = String(req.body?.name || '').trim()
         if (name.length < 2 || name.length > 80) return res.status(400).json({ error: 'Project name must contain 2–80 characters.' })
@@ -242,6 +307,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: `Method ${req.method} not allowed` })
   } catch (error) {
     if (error?.code === 11000) return res.status(409).json({ error: 'Project slug already exists in this workspace.' })
+    if (error?.code === 'MONGO_TRANSACTIONS_REQUIRED') return res.status(503).json({ error: error.message, code: error.code })
     return res.status(500).json({ error: 'Unable to process project request.' })
   }
 }
@@ -251,10 +317,15 @@ function toClientProject(project, unlocked = false) {
     id: project._id,
     name: project.name,
     slug: project.slug,
+    projectType: projectTypeOf(project),
+    outputTarget: projectOutputTarget(project),
     description: project.description,
     canvas: project.canvas,
     svgAssetId: project.svgAssetId,
     activeVersionId: project.activeVersionId,
+    runtimeEnginePreference: runtimeEngine(project),
+    isaacCanaryEnabled: project.isaacCanaryEnabled === true,
+    runtimeWorkerMode: runtimeWorkerMode(project),
     hiddenAt: project.hiddenAt || null,
     security: projectSecuritySnapshot(project, unlocked),
     createdAt: project.createdAt,

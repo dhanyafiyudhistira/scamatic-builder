@@ -6,6 +6,13 @@ export function componentTagReferences(component) {
   return [...new Set(references.filter(Boolean))]
 }
 
+export function componentObservedTagId(component) {
+  if (component?.type === 'control-button' && component.properties?.feedbackTagId) {
+    return component.properties.feedbackTagId
+  }
+  return component?.binding?.tagId
+}
+
 export function tagUsageCounts(components = []) {
   const counts = new Map()
   for (const component of components) {

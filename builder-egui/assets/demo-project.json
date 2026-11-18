@@ -1,0 +1,284 @@
+{
+  "format": "scamatic-egui-draft/v1",
+  "schema": {
+    "schemaVersion": "1.8.0",
+    "project": {
+      "id": "egui-demo-project",
+      "name": "SCAMATIC Canvas Lab",
+      "slug": "scamatic-canvas-lab",
+      "projectType": "scada",
+      "runtimeProfile": "simulation",
+      "canvas": {
+        "width": 1200,
+        "height": 760,
+        "background": "#151719"
+      },
+      "svgAssetId": "egui-demo-schematic"
+    },
+    "dataSources": [
+      {
+        "id": "source_mock",
+        "type": "mock",
+        "environmentRef": "development",
+        "connectorRef": null
+      }
+    ],
+    "tags": [
+      {
+        "id": "pump-running",
+        "name": "Pump running",
+        "sourceId": "source_mock",
+        "path": "PumpRunning",
+        "dataType": "boolean",
+        "access": "read"
+      },
+      {
+        "id": "tank-level",
+        "name": "Tank level",
+        "sourceId": "source_mock",
+        "path": "TankLevel",
+        "dataType": "number",
+        "access": "read",
+        "engineering": {
+          "min": 0,
+          "max": 100,
+          "unit": "%",
+          "decimals": 1
+        }
+      }
+    ],
+    "components": [
+      {
+        "id": "heading",
+        "type": "text-label",
+        "name": "Text 1",
+        "position": {
+          "x": 60,
+          "y": 45,
+          "width": 700,
+          "height": 62,
+          "rotation": 0
+        },
+        "zIndex": 1,
+        "visible": true,
+        "locked": false,
+        "binding": {
+          "tagId": null
+        },
+        "properties": {
+          "text": "WATER TREATMENT / DESIGN STUDY",
+          "textColor": "#e2e3e6",
+          "fontSize": 28,
+          "fontWeight": 700,
+          "fontStyle": "normal",
+          "fontFamily": "sans-serif",
+          "textAlign": "left",
+          "verticalAlign": "middle",
+          "transparentBackground": true,
+          "backgroundColor": "#101418"
+        },
+        "metadata": {}
+      },
+      {
+        "id": "pump",
+        "type": "pump",
+        "name": "Pump 2",
+        "position": {
+          "x": 170,
+          "y": 230,
+          "width": 200,
+          "height": 145,
+          "rotation": 0
+        },
+        "zIndex": 2,
+        "visible": true,
+        "locked": false,
+        "binding": {
+          "tagId": "pump-running"
+        },
+        "properties": {
+          "label": "FEED PUMP P-101",
+          "activeText": "RUNNING",
+          "inactiveText": "STOPPED",
+          "activeColor": "#22c55e",
+          "idleColor": "#64748b",
+          "glow": true,
+          "animate": true,
+          "rule": {
+            "operator": "truthy"
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "id": "valve",
+        "type": "valve",
+        "name": "Valve 3",
+        "position": {
+          "x": 560,
+          "y": 250,
+          "width": 170,
+          "height": 120,
+          "rotation": 0
+        },
+        "zIndex": 3,
+        "visible": true,
+        "locked": false,
+        "binding": {
+          "tagId": "pump-running"
+        },
+        "properties": {
+          "label": "INLET VALVE",
+          "activeText": "OPEN",
+          "inactiveText": "CLOSED",
+          "activeColor": "#22c55e",
+          "idleColor": "#64748b",
+          "orientation": "horizontal",
+          "glow": true,
+          "animate": false,
+          "rule": {
+            "operator": "truthy"
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "id": "status",
+        "type": "indicator-lamp",
+        "name": "Indicator Lamp 4",
+        "position": {
+          "x": 900,
+          "y": 180,
+          "width": 125,
+          "height": 125,
+          "rotation": 0
+        },
+        "zIndex": 4,
+        "visible": true,
+        "locked": false,
+        "binding": {
+          "tagId": "pump-running"
+        },
+        "properties": {
+          "label": "PUMP STATUS",
+          "shape": "circle",
+          "onColor": "#22c55e",
+          "offColor": "#7b7e85",
+          "alarmColor": "#ef4444",
+          "glow": true,
+          "rule": {
+            "operator": "truthy"
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "id": "level",
+        "type": "gauge",
+        "name": "Gauge 5",
+        "position": {
+          "x": 860,
+          "y": 380,
+          "width": 250,
+          "height": 220,
+          "rotation": 0
+        },
+        "zIndex": 5,
+        "visible": true,
+        "locked": false,
+        "binding": {
+          "tagId": "tank-level"
+        },
+        "properties": {
+          "label": "TANK LEVEL",
+          "rangeMode": "inherit",
+          "min": 0,
+          "max": 100,
+          "lowZoneEnd": 30,
+          "highZoneStart": 70,
+          "tickCount": 10,
+          "decimals": 1,
+          "scale": 1,
+          "offset": 0,
+          "unitMode": "inherit",
+          "suffix": "",
+          "fallback": "--",
+          "lowColor": "#38bdf8",
+          "normalColor": "#a9bec7",
+          "highColor": "#fb7185",
+          "needleColor": "#ff4b1f",
+          "faceColor": "#d8e4e8",
+          "textColor": "#263b45",
+          "showDigital": true
+        },
+        "metadata": {}
+      },
+      {
+        "id": "value",
+        "type": "value-span",
+        "name": "Value Span 6",
+        "position": {
+          "x": 170,
+          "y": 480,
+          "width": 240,
+          "height": 90,
+          "rotation": 0
+        },
+        "zIndex": 6,
+        "visible": true,
+        "locked": false,
+        "binding": {
+          "tagId": "tank-level"
+        },
+        "properties": {
+          "label": "PROCESS LEVEL",
+          "prefix": "",
+          "suffix": "%",
+          "decimals": 1,
+          "scale": 1,
+          "offset": 0,
+          "fallback": "--",
+          "textColor": "#d8f7fa",
+          "backgroundColor": "#0a1117",
+          "warningColor": "#f59e0b",
+          "criticalColor": "#ef4444",
+          "warningHigh": null,
+          "criticalHigh": null
+        },
+        "metadata": {}
+      },
+      {
+        "id": "note",
+        "type": "text-label",
+        "name": "Text 7",
+        "position": {
+          "x": 60,
+          "y": 660,
+          "width": 1000,
+          "height": 50,
+          "rotation": 0
+        },
+        "zIndex": 7,
+        "visible": true,
+        "locked": false,
+        "binding": {
+          "tagId": null
+        },
+        "properties": {
+          "text": "Select an object, drag to move, use the corner handle to resize.",
+          "textColor": "#989ba2",
+          "fontSize": 17,
+          "fontWeight": 700,
+          "fontStyle": "normal",
+          "fontFamily": "sans-serif",
+          "textAlign": "left",
+          "verticalAlign": "middle",
+          "transparentBackground": true,
+          "backgroundColor": "#101418"
+        },
+        "metadata": {}
+      }
+    ]
+  },
+  "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1200 760\"><path d=\"M360 300H560M730 300H815V475H860\" fill=\"none\" stroke=\"#979ba2\" stroke-width=\"8\"/><rect x=\"805\" y=\"135\" width=\"320\" height=\"500\" rx=\"18\" fill=\"none\" stroke=\"#3c3e42\" stroke-width=\"2\"/></svg>"
+}

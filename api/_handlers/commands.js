@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto'
-import { connectMongo } from '../_lib/mongo.js'
+import { connectMongo, runMongoTransaction } from '../_lib/mongo.js'
 import { AuditEvent, CommandEvent, Connector, ConnectorEnvironment, Project, ProjectVersion, RuntimeSession, TagValueSnapshot } from '../_lib/models.js'
 import { requireCsrf, requirePrincipal } from '../_lib/auth.js'
-import { PERMISSIONS, requireProjectPermission, roleMeetsRequirement } from '../_lib/authorization.js'
+import { loadProjectPermissionAssignment, PERMISSIONS, requireProjectPermission, roleMeetsRequirement } from '../_lib/authorization.js'
 import { enforceRateLimit, requestId as correlationIdFor } from '../_lib/security.js'
 import { executeMockCommand, initialMockValue } from '../../shared/runtime-evaluator.js'
 import { commandAcknowledgment, commandAcknowledgmentTimeout } from '../../shared/command-acknowledgment.js'
@@ -10,10 +10,10 @@ import { usesServerlessConnectorExecution } from '../_lib/connector-execution.js
 import { sendThingsBoardRpc, waitForThingsBoardFeedback } from '../_lib/thingsboard-serverless.js'
 import { withThingsBoardAccessToken } from '../_lib/thingsboard-auth.js'
 import { runtimeCommandExecutionPlan, runtimeProfile } from '../../shared/runtime-profile.js'
-import { previousSimulationCommandValue, simulationCommandReadScope } from '../../shared/simulation-command-state.js'
+import { previousSimulationCommandValue, simulationCommandHistoryRequired, simulationCommandReadScope } from '../../shared/simulation-command-state.js'
 import { commandTimingProjection } from '../../shared/command-lifecycle.js'
 import { createCommandPhaseTimer } from '../../shared/command-phase-timing.js'
-import { loadCommandAdmissionReads, loadLiveCommandReads } from '../_lib/command-read-context.js'
+import { loadCommandAdmissionReads, loadCommandStatusReads, loadLiveCommandReads } from '../_lib/command-read-context.js'
 import { createBoundedAsyncCache } from '../_lib/bounded-async-cache.js'
 
 const publishedVersionCache = createBoundedAsyncCache({
@@ -21,7 +21,7 @@ const publishedVersionCache = createBoundedAsyncCache({
   ttlMs: process.env.COMMAND_VERSION_CACHE_TTL_MS,
 })
 
-export default async function handler(req, res, { onWorkerCommandAuthorized = null } = {}) {
+export default async function handler(req, res, { onWorkerCommandAuthorized = null, simulationOnly = false } = {}) {
   const phaseTimer = createCommandPhaseTimer({ enabled: req.method === 'POST' && req.body?.includeMetrics === true })
   const requestReceivedAt = new Date()
   const principal = await phaseTimer.measure('principalAuthMs', () => requirePrincipal(req, res))
@@ -36,7 +36,10 @@ export default async function handler(req, res, { onWorkerCommandAuthorized = nu
   if (!projectId || !componentId || !/^[a-zA-Z0-9_-]{8,100}$/.test(String(requestId || '')) || !runtimeToken) return res.status(400).json({ error: 'projectId, componentId, runtimeToken, and requestId are required.' })
   const withinRateLimit = await phaseTimer.measure(
     'rateLimitPersistMs',
-    () => enforceRateLimit(req, res, 'runtime-command', { limit: 30, windowMs: 60_000, identity: `${principal.id}:${projectId}` }),
+    // Reserve a small permit lease so sustained operator input does not add a
+    // MongoDB write to every command while the global fixed-window ceiling is
+    // still enforced across server processes.
+    () => enforceRateLimit(req, res, 'runtime-command', { limit: 120, windowMs: 60_000, leaseSize: 12, identity: `${principal.id}:${projectId}` }),
   )
   if (!withinRateLimit) return
   const correlationId = correlationIdFor(req)
@@ -45,17 +48,18 @@ export default async function handler(req, res, { onWorkerCommandAuthorized = nu
   // These reads share no mutable state. Running them together removes two
   // MongoDB round-trips from the command admission path while preserving the
   // authorization and response decision order below.
-  const { project, runtimeSession, duplicate } = await phaseTimer.measure(
+  const { project, runtimeSession, duplicate, projectAssignment } = await phaseTimer.measure(
     'admissionReadsMs',
     () => loadCommandAdmissionReads({
       loadProject: () => Project.findById(projectId),
       loadRuntimeSession: () => RuntimeSession.findOne({ _id: digest(runtimeToken), authSessionId: principal.sessionId, userId: principal.id, projectId, revokedAt: null, expiresAt: { $gt: new Date() } }).lean(),
       loadDuplicate: () => CommandEvent.findOne({ projectId, requestId }).lean(),
+      loadProjectAssignment: () => loadProjectPermissionAssignment(principal, projectId),
     }),
   )
   const authorization = project && await phaseTimer.measure(
     'authorizationPolicyMs',
-    () => requireProjectPermission(principal, res, project, PERMISSIONS.COMMAND_EXECUTE),
+    () => requireProjectPermission(principal, res, project, PERMISSIONS.COMMAND_EXECUTE, { projectAssignment }),
   )
   if (!authorization) return
   if (!runtimeSession || runtimeSession.versionId !== project.activeVersionId || !runtimeSession.capabilities.includes(PERMISSIONS.COMMAND_EXECUTE)) return reject(res, principal, project, { requestId, componentId, correlationId, reason: 'Runtime session is invalid or stale.', code: 'RUNTIME_SESSION_INVALID' })
@@ -72,6 +76,7 @@ export default async function handler(req, res, { onWorkerCommandAuthorized = nu
       () => ProjectVersion.findById(project.activeVersionId).lean(),
     ),
   )
+  if (simulationOnly && runtimeProfile(version?.schema) !== 'simulation') return res.status(409).json({ error: 'Hosted simulation commands require the published SIMULATION profile.', code: 'HOSTED_SIMULATION_PROFILE_REQUIRED' })
   const component = version?.schema?.components?.find(item => item.id === componentId)
   const tag = component && version.schema.tags?.find(item => item.id === component.binding?.tagId)
   const source = tag && version.schema.dataSources?.find(item => item.id === tag.sourceId)
@@ -89,7 +94,7 @@ export default async function handler(req, res, { onWorkerCommandAuthorized = nu
   let environment = null
   if (profile === 'simulation') {
     const readScope = simulationCommandReadScope(version.schema, component, tag)
-    const historyEffects = readScope
+    const historyEffects = readScope && simulationCommandHistoryRequired(component, value)
       ? [
           { componentId: readScope.componentId, tagId: readScope.tagId },
           ...(readScope.resetComponentIds.length
@@ -146,35 +151,42 @@ export default async function handler(req, res, { onWorkerCommandAuthorized = nu
   const serverlessExecution = executionPlan.executionMode === 'serverless'
   const initialLifecycleAt = new Date()
   const initiallyDispatched = executionPlan.initialStatus === 'dispatched'
-  const event = await phaseTimer.measure(
-    'commandCreateMs',
-    () => CommandEvent.create({
-      requestId,
-      workspaceId: principal.workspaceId,
-      projectId,
-      versionId: version._id,
-      componentId,
-      tagId: tag.id,
-      actorId: principal.id,
-      executionMode: executionPlan.executionMode,
-      status: executionPlan.initialStatus,
-      action,
-      payloadSummary: { action, value: evaluated.value },
-      correlationId,
-      requestReceivedAt,
-      authorizedAt: initiallyDispatched ? initialLifecycleAt : null,
-      dispatchedAt: initiallyDispatched ? initialLifecycleAt : null,
-    }),
-  )
+  const eventFields = {
+    requestId,
+    workspaceId: principal.workspaceId,
+    projectId,
+    versionId: version._id,
+    componentId,
+    tagId: tag.id,
+    actorId: principal.id,
+    executionMode: executionPlan.executionMode,
+    status: executionPlan.initialStatus,
+    action,
+    payloadSummary: { action, value: evaluated.value },
+    correlationId,
+    requestReceivedAt,
+    authorizedAt: initiallyDispatched ? initialLifecycleAt : null,
+    dispatchedAt: initiallyDispatched ? initialLifecycleAt : null,
+  }
+  // Worker authorization and completed Simulation commands are inserted only
+  // inside their audit transaction. Avoiding an early `requested` insert keeps
+  // the safety boundary atomic while removing unnecessary MongoDB round-trips.
+  const event = executionPlan.executionMode === 'worker' || profile === 'simulation'
+    ? new CommandEvent(eventFields)
+    : await phaseTimer.measure('commandCreateMs', () => CommandEvent.create(eventFields))
   if (profile === 'simulation') {
-    event.status = 'authorized'
-    event.authorizedAt = new Date()
-    await phaseTimer.measure('authorizationPersistMs', () => event.save())
-    await phaseTimer.measure(
-      'authorizationAuditMs',
-      () => auditCommandAuthorized({ principal, projectId, componentId, correlationId, requestId, tagId: tag.id, sourceId: source.id }),
-    )
-    return executeMock(event, evaluated, principal, res, phaseTimer)
+    try {
+      const completedEvent = await phaseTimer.measure(
+        'simulationTransactionMs',
+        () => persistSimulationCommandCompletion({ event, result: evaluated, principal, sourceId: source.id }),
+      )
+      return res.status(evaluated.ok ? 200 : 502).json(commandResponse(completedEvent, false, phaseTimer.snapshot()))
+    } catch (error) {
+      if (error?.code === 'MONGO_TRANSACTIONS_REQUIRED') {
+        return res.status(503).json({ error: error.message, code: error.code, correlationId })
+      }
+      throw error
+    }
   }
   if (process.env.CONNECTOR_PLATFORM_ENABLED !== 'true' || process.env.CONNECTOR_LIVE_COMMANDS_ENABLED !== 'true') return finishUnavailable(event, res, 'Live connector commands are disabled.', 'LIVE_COMMANDS_DISABLED')
   if (!connector || !environment) return finishUnavailable(event, res, 'Connector configuration is unavailable.', 'CONNECTOR_UNAVAILABLE')
@@ -184,27 +196,134 @@ export default async function handler(req, res, { onWorkerCommandAuthorized = nu
     return executeServerlessCommand({ event, evaluated, principal, res, version, component, connector, environment })
   }
   if (environment.health?.state !== 'online') return finishUnavailable(event, res, 'Connector is not online.', 'CONNECTOR_OFFLINE')
-  await persistWorkerCommandAuthorization({
-    event,
-    audit: () => auditCommandAuthorized({ principal, projectId, componentId, correlationId, requestId, tagId: tag.id, sourceId: source.id }),
-    onAuthorized: onWorkerCommandAuthorized,
-  })
-  return res.status(202).json(commandResponse(event.toObject(), false))
+  let authorizedEvent
+  try {
+    authorizedEvent = await phaseTimer.measure(
+      'authorizationTransactionMs',
+      () => persistWorkerCommandAuthorization({
+        event,
+        audit: session => auditCommandAuthorized({ principal, projectId, componentId, correlationId, requestId, tagId: tag.id, sourceId: source.id }, { session }),
+        onAuthorized: onWorkerCommandAuthorized,
+      }),
+    )
+  } catch (error) {
+    if (error?.code === 'MONGO_TRANSACTIONS_REQUIRED') {
+      return res.status(503).json({ error: error.message, code: error.code, correlationId })
+    }
+    throw error
+  }
+  return res.status(202).json(commandResponse(authorizedEvent, false, phaseTimer.snapshot()))
 }
 
-export async function persistWorkerCommandAuthorization({ event, audit, onAuthorized = null, now = () => new Date() } = {}) {
-  if (!event || typeof event.save !== 'function') throw new TypeError('A command event with save() is required.')
+export async function persistWorkerCommandAuthorization({
+  event,
+  audit,
+  onAuthorized = null,
+  now = () => new Date(),
+  transaction = runMongoTransaction,
+  authorize = authorizeWorkerCommand,
+} = {}) {
+  if (!event?._id) throw new TypeError('A command event with an identifier is required.')
   if (typeof audit !== 'function') throw new TypeError('An authorization audit callback is required.')
-  event.status = 'authorized'
-  event.authorizedAt = now()
-  await event.save()
-  await audit()
+  if (typeof transaction !== 'function' || typeof authorize !== 'function') throw new TypeError('Transactional command authorization is required.')
+  let authorizedEvent = null
+  await transaction(async session => {
+    await audit(session)
+    const authorizedAt = now()
+    authorizedEvent = await authorize(event, authorizedAt, session)
+    if (!authorizedEvent) {
+      throw Object.assign(new Error('Command authorization state changed before it could be committed.'), {
+        code: 'COMMAND_AUTHORIZATION_STATE_CONFLICT',
+        statusCode: 409,
+      })
+    }
+  })
   if (typeof onAuthorized === 'function') {
-    try { onAuthorized() } catch {
+    try { onAuthorized(authorizedEvent) } catch {
       // Worker wake-up is best-effort; the durable polling fallback remains active.
     }
   }
-  return event
+  return authorizedEvent
+}
+
+export async function authorizeWorkerCommand(event, authorizedAt, session, commandEvents = CommandEvent) {
+  if (event?.isNew === true && typeof event.toObject === 'function') {
+    const payload = { ...event.toObject(), status: 'authorized', authorizedAt }
+    const created = await commandEvents.create([payload], session ? { session } : undefined)
+    const authorized = Array.isArray(created) ? created[0] : created
+    return authorized?.toObject?.() || authorized || null
+  }
+  const options = { new: true, ...(session ? { session } : {}) }
+  return commandEvents.findOneAndUpdate(
+    { _id: event._id, status: 'requested', executionMode: 'worker' },
+    { $set: { status: 'authorized', authorizedAt } },
+    options,
+  ).lean()
+}
+
+export async function persistSimulationCommandCompletion({
+  event,
+  result,
+  principal,
+  sourceId = null,
+  now = () => new Date(),
+  transaction = runMongoTransaction,
+  commandEvents = CommandEvent,
+  auditEvents = AuditEvent,
+} = {}) {
+  if (!event?._id || typeof event.toObject !== 'function') throw new TypeError('A new command event with an identifier is required.')
+  if (!principal?.id || !principal?.workspaceId) throw new TypeError('An authenticated principal is required.')
+  if (!result || typeof transaction !== 'function') throw new TypeError('A command result and transaction are required.')
+
+  let completedEvent = null
+  await transaction(async session => {
+    const authorizedAt = now()
+    const dispatchedAt = now()
+    const completedAt = now()
+    const status = result.ok ? 'acknowledged' : 'failed'
+    const resultSummary = {
+      ok: result.ok,
+      message: result.message,
+      value: result.value,
+      resetAfterMs: result.resetAfterMs || null,
+    }
+    const command = {
+      ...event.toObject(),
+      status,
+      authorizedAt,
+      dispatchedAt,
+      completedAt,
+      resultSummary,
+    }
+    const auditOptions = { ordered: true, ...(session ? { session } : {}) }
+    await auditEvents.insertMany([
+      {
+        workspaceId: principal.workspaceId,
+        projectId: event.projectId,
+        actorId: principal.id,
+        action: 'command.authorized',
+        targetType: 'component',
+        targetId: event.componentId,
+        correlationId: event.correlationId,
+        metadata: { requestId: event.requestId, tagId: event.tagId, sourceId },
+      },
+      {
+        workspaceId: principal.workspaceId,
+        projectId: event.projectId,
+        actorId: principal.id,
+        action: result.ok ? 'command.acknowledged' : 'command.failed',
+        targetType: 'component',
+        targetId: event.componentId,
+        correlationId: event.correlationId,
+        metadata: { requestId: event.requestId, tagId: event.tagId, action: event.action, result: status },
+      },
+    ], auditOptions)
+    const created = await commandEvents.create([command], session ? { session } : undefined)
+    const persisted = Array.isArray(created) ? created[0] : created
+    completedEvent = persisted?.toObject?.() || persisted || null
+    if (!completedEvent) throw new Error('Simulation command completion was not persisted.')
+  })
+  return completedEvent
 }
 
 async function commandStatus(req, res, principal) {
@@ -217,11 +336,14 @@ async function commandStatus(req, res, principal) {
     return res.status(400).json({ error: 'projectId, X-Runtime-Token, and either requestId or recent=1 are required.', code: 'COMMAND_STATUS_INPUT_INVALID', correlationId })
   }
   await connectMongo()
-  if (!(await enforceRateLimit(req, res, 'runtime-command-status', { limit: 180, windowMs: 60_000, identity: `${principal.id}:${projectId}` }))) return
-  const project = await Project.findById(projectId)
-  const authorization = project && await requireProjectPermission(principal, res, project, PERMISSIONS.COMMAND_EXECUTE)
+  if (!(await enforceRateLimit(req, res, 'runtime-command-status', { limit: 300, windowMs: 60_000, leaseSize: 20, identity: `${principal.id}:${projectId}` }))) return
+  const { project, runtimeSession, projectAssignment } = await loadCommandStatusReads({
+    loadProject: () => Project.findById(projectId),
+    loadRuntimeSession: () => RuntimeSession.findOne({ _id: digest(runtimeToken), authSessionId: principal.sessionId, userId: principal.id, projectId, revokedAt: null, expiresAt: { $gt: new Date() } }).lean(),
+    loadProjectAssignment: () => loadProjectPermissionAssignment(principal, projectId),
+  })
+  const authorization = project && await requireProjectPermission(principal, res, project, PERMISSIONS.COMMAND_EXECUTE, { projectAssignment })
   if (!authorization) return
-  const runtimeSession = await RuntimeSession.findOne({ _id: digest(runtimeToken), authSessionId: principal.sessionId, userId: principal.id, projectId, revokedAt: null, expiresAt: { $gt: new Date() } }).lean()
   if (!runtimeSession || runtimeSession.versionId !== project.activeVersionId || !runtimeSession.capabilities.includes(PERMISSIONS.COMMAND_EXECUTE)) {
     return res.status(403).json({ error: 'Runtime session is invalid or stale.', code: 'RUNTIME_SESSION_INVALID', correlationId })
   }
@@ -232,21 +354,6 @@ async function commandStatus(req, res, principal) {
   const event = await CommandEvent.findOne({ projectId, requestId, actorId: principal.id }).lean()
   if (!event) return res.status(404).json({ error: 'Command request was not found.', code: 'COMMAND_NOT_FOUND', correlationId })
   return res.status(200).json(commandResponse(event, false))
-}
-
-async function executeMock(event, result, principal, res, phaseTimer) {
-  event.status = 'dispatched'
-  event.dispatchedAt = new Date()
-  await phaseTimer.measure('dispatchPersistMs', () => event.save())
-  event.status = result.ok ? 'acknowledged' : 'failed'
-  event.resultSummary = { ok: result.ok, message: result.message, value: result.value, resetAfterMs: result.resetAfterMs || null }
-  event.completedAt = new Date()
-  await phaseTimer.measure('terminalPersistMs', () => event.save())
-  await phaseTimer.measure(
-    'terminalAuditMs',
-    () => AuditEvent.create({ workspaceId: principal.workspaceId, projectId: event.projectId, actorId: principal.id, action: result.ok ? 'command.acknowledged' : 'command.failed', targetType: 'component', targetId: event.componentId, correlationId: event.correlationId, metadata: { requestId: event.requestId, tagId: event.tagId, action: event.action, result: event.status } }),
-  )
-  return res.status(result.ok ? 200 : 502).json(commandResponse(event.toObject(), false, phaseTimer.snapshot()))
 }
 
 async function executeServerlessCommand({ event, evaluated, principal, res, version, component, connector, environment }) {
@@ -444,8 +551,9 @@ async function finishUnavailable(event, res, message, code) {
   return res.status(409).json(commandResponse(event.toObject(), false))
 }
 
-function auditCommandAuthorized({ principal, projectId, componentId, correlationId, requestId, tagId, sourceId }) {
-  return AuditEvent.create({ workspaceId: principal.workspaceId, projectId, actorId: principal.id, action: 'command.authorized', targetType: 'component', targetId: componentId, correlationId, metadata: { requestId, tagId, sourceId } })
+function auditCommandAuthorized({ principal, projectId, componentId, correlationId, requestId, tagId, sourceId }, { session = null } = {}) {
+  const event = new AuditEvent({ workspaceId: principal.workspaceId, projectId, actorId: principal.id, action: 'command.authorized', targetType: 'component', targetId: componentId, correlationId, metadata: { requestId, tagId, sourceId } })
+  return event.save(session ? { session } : undefined)
 }
 
 async function reject(res, principal, project, details) {

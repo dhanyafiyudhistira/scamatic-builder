@@ -21,3 +21,10 @@ export function detachUnusedConnectorSources(schema, connectorId) {
     },
   }
 }
+
+export function connectorDeletionBlock({ enabled = false, draftAttached = false, draftDirty = false } = {}) {
+  if (enabled) return { code: 'CONNECTOR_ENABLED', message: 'Disable the connector before deleting it.' }
+  if (draftAttached) return { code: 'CONNECTOR_IN_DRAFT', message: 'Detach the connector from the saved draft before deleting it.' }
+  if (draftDirty) return { code: 'DRAFT_DIRTY', message: 'Save the draft before deleting the connector.' }
+  return null
+}

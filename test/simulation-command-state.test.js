@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { previousSimulationCommandValue, simulationCommandReadScope, simulationCommandState } from '../shared/simulation-command-state.js'
+import { newestSimulationSample, previousSimulationCommandValue, reconcileSimulationControlState, simulationCommandHistoryRequired, simulationCommandReadScope, simulationCommandState } from '../shared/simulation-command-state.js'
 
 const schema = {
   tags: [
@@ -58,4 +58,28 @@ test('the newest relevant toggle effect is sufficient to reconstruct its previou
   const newestReset = { ...acknowledged, componentId: 'operation', tagId: 'mode.command', resultSummary: { value: { mode: 'reset' } } }
   assert.equal(previousSimulationCommandValue(schema, [newestButton], schema.components[0], schema.tags[2]), true)
   assert.equal(previousSimulationCommandValue(schema, [newestReset], schema.components[0], schema.tags[2]), false)
+})
+
+test('an explicit toggle intent does not reload history that cannot affect its result', () => {
+  assert.equal(simulationCommandHistoryRequired(schema.components[0], undefined), true)
+  assert.equal(simulationCommandHistoryRequired(schema.components[0], true), false)
+  assert.equal(simulationCommandHistoryRequired(schema.components[0], false), false)
+  assert.equal(simulationCommandHistoryRequired(schema.components[1], undefined), false)
+})
+
+test('bootstrap keeps the newest state across snapshot and command history', () => {
+  const snapshot = { value: false, timestamp: '2026-08-01T00:00:00.000Z' }
+  const restored = { value: true, timestamp: '2026-08-01T00:00:01.000Z' }
+  assert.equal(newestSimulationSample(snapshot, restored), restored)
+  assert.equal(newestSimulationSample(restored, snapshot), restored)
+})
+
+test('bootstrap mirrors readable feedback into a toggle command intent', () => {
+  const feedback = { value: true, timestamp: '2026-08-01T00:00:00.000Z', quality: 'good' }
+  const reconciled = reconcileSimulationControlState(schema, {
+    'valve.command': { value: false, timestamp: '2026-07-31T23:59:59.000Z', quality: 'good' },
+    'valve.feedback': feedback,
+  })
+  assert.deepEqual(reconciled['valve.command'], feedback)
+  assert.notEqual(reconciled['valve.command'], feedback)
 })

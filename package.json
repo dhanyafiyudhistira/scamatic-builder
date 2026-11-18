@@ -1,7 +1,7 @@
 {
   "name": "nextporto-wtp-hmi",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.29",
   "type": "module",
   "scripts": {
     "dev":          "concurrently -n vite,api -c cyan,yellow \"vite\" \"node server/index.js\"",
@@ -10,6 +10,7 @@
     "dev:worker":   "node server/connector-worker.js",
     "start":        "node server/index.js",
     "build":        "vite build",
+    "build:hosted-runtime": "vite build --config vite.hosted.config.js",
     "preview":      "vite preview",
     "test":         "node --test",
     "check":        "npm run test && npm run build",
@@ -21,10 +22,26 @@
     "smoke:control-plane": "node scripts/smoke-control-plane.js",
     "audit:rpc-retention": "node scripts/audit-rpc-retention.js",
     "migrate:rpc-retention": "node scripts/migrate-rpc-retention.js",
+    "rotate:master-key": "node scripts/rotate-connector-master-key.js",
+    "desktop:dev": "tauri dev",
+    "egui:prepare": "node scripts/prepare-egui-builder.js",
+    "egui:dev": "npm run egui:prepare && cargo run --manifest-path builder-egui/Cargo.toml --target-dir target/egui-builder --",
+    "egui:build": "npm run egui:prepare && cargo build --release --manifest-path builder-egui/Cargo.toml --target-dir target/egui-builder",
+    "egui:test": "npm run egui:prepare && cargo test --manifest-path builder-egui/Cargo.toml --target-dir target/egui-builder && cargo build --manifest-path builder-egui/Cargo.toml --target-dir target/egui-builder && node scripts/verify-egui-builder.js",
+    "desktop:check": "cargo test --workspace",
+    "desktop:build": "tauri build",
+    "desktop:prepare-runtime": "node scripts/prepare-desktop-runtime.js",
+    "desktop:verify-install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-windows-install.ps1",
+    "desktop:verify-release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-windows-release.ps1",
+    "desktop:build:local": "npm run build && npm run build:hosted-runtime && cargo build --release -p scamatic-data-plane -p scamatic-runtime-service && npm run desktop:prepare-runtime && tauri build --ci --features local-runtime --bundles nsis --config src-tauri/tauri.local.conf.json",
+    "desktop:release:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-signed-windows-release.ps1",
     "rust:fmt":    "cargo fmt --manifest-path data-plane-rs/Cargo.toml --check",
     "rust:test":   "cargo test --manifest-path data-plane-rs/Cargo.toml",
     "rust:build":  "cargo build --release --manifest-path data-plane-rs/Cargo.toml",
-    "smoke:rust-shadow": "node scripts/smoke-rust-shadow.js"
+    "bench:isaac": "cargo test --release -p scamatic-data-plane --test telemetry_perf -- --ignored --nocapture",
+    "bench:rpc": "node scripts/benchmark-local-rpc.js",
+    "smoke:rust-shadow": "node scripts/smoke-rust-shadow.js",
+    "smoke:isaac-canary": "node scripts/smoke-isaac-canary.js"
   },
   "dependencies": {
     "body-parser": "^1.20.6",
@@ -34,11 +51,13 @@
     "express":   "^4.21.0",
     "mongodb":   "^6.20.0",
     "mongoose":  "^8.6.0",
+    "@tauri-apps/api": "2.11.1",
     "react":     "^18.3.1",
     "react-dom": "^18.3.1",
     "ws":        "^8.18.0"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "2.11.4",
     "@vitejs/plugin-react": "^4.3.1",
     "concurrently":         "^9.0.0",
     "vite":                 "^5.4.10"

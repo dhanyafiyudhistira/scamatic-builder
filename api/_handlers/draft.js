@@ -3,6 +3,7 @@ import { Project, ProjectDraft, ScadaAsset } from '../_lib/models.js'
 import { requireCsrf, requirePrincipal } from '../_lib/auth.js'
 import { PERMISSIONS, requireProjectPermission } from '../_lib/authorization.js'
 import { hasBlockingIssues, migrateProjectSchema, validateProjectSchema } from '../../shared/project-schema.js'
+import { WINCC_OUTPUT_TARGET, projectOutputTarget } from '../../shared/project-type.js'
 import { DESIGN_IMAGE_TYPE, publicDesignAssets, referencedDesignAssetIds } from '../_lib/design-assets.js'
 
 export default async function handler(req, res) {
@@ -18,15 +19,12 @@ export default async function handler(req, res) {
 
     if (req.method === 'GET') {
       if (!(await requireProjectPermission(principal, res, project, PERMISSIONS.BUILDER_READ))) return
-      const draft = await ProjectDraft.findById(projectId).lean()
-      if (!draft) return res.status(404).json({ error: 'Project draft not found.' })
-      const asset = project.svgAssetId ? await ScadaAsset.findById(project.svgAssetId).lean() : null
-      const schema = migrateProjectSchema(draft.schema)
-      const designAssetIds = referencedDesignAssetIds(schema)
-      const designAssetRecords = designAssetIds.length
-        ? await ScadaAsset.find({ _id: { $in: designAssetIds }, projectId, kind: DESIGN_IMAGE_TYPE }).select({ content: 0 }).lean()
-        : []
-      return res.status(200).json({ schema, revision: draft.revision, svg: asset?.content || null, designAssets: publicDesignAssets(designAssetRecords) })
+      const [data, asset] = await Promise.all([
+        loadDraftWithDesignAssets(projectId),
+        project.svgAssetId ? ScadaAsset.findById(project.svgAssetId).select({ content: 1 }).lean().exec() : null,
+      ])
+      if (!data) return res.status(404).json({ error: 'Project draft not found.' })
+      return res.status(200).json({ ...data, svg: asset?.content || null })
     }
 
     if (req.method === 'PUT') {
@@ -34,7 +32,7 @@ export default async function handler(req, res) {
       const { schema: inputSchema, revision } = req.body || {}
       const schema = migrateProjectSchema(inputSchema)
       if (schema?.project?.id !== projectId) return res.status(400).json({ error: 'Schema project id does not match projectId.' })
-      const issues = validateProjectSchema(schema)
+      const issues = validateProjectSchema(schema, { templateOnly: projectOutputTarget(project) === WINCC_OUTPUT_TARGET })
       if (hasBlockingIssues(issues)) return res.status(422).json({ error: 'Draft schema is invalid.', issues })
       const currentRevision = Number(revision)
       if (!Number.isInteger(currentRevision) || currentRevision < 1) return res.status(400).json({ error: 'A valid draft revision is required.' })
@@ -54,4 +52,15 @@ export default async function handler(req, res) {
   } catch {
     return res.status(500).json({ error: 'Unable to load or save project draft.' })
   }
+}
+
+async function loadDraftWithDesignAssets(projectId) {
+  const draft = await ProjectDraft.findById(projectId).select({ schema: 1, revision: 1 }).lean()
+  if (!draft) return null
+  const schema = migrateProjectSchema(draft.schema)
+  const ids = referencedDesignAssetIds(schema)
+  const assets = ids.length
+    ? await ScadaAsset.find({ _id: { $in: ids }, projectId, kind: DESIGN_IMAGE_TYPE }).select({ metadata: 1, projectId: 1 }).lean()
+    : []
+  return { schema, revision: draft.revision, designAssets: publicDesignAssets(assets) }
 }

@@ -1,7 +1,13 @@
 :8088 {
 	encode zstd gzip
 
-	# Optional TLS/edge layer. Express owns the frontend, REST API, and WebSocket
-	# upgrade on one origin; Caddy is not required for local/LAN installation.
-	reverse_proxy 127.0.0.1:3001
+	# Isaac remains loopback-only. Caddy exposes only its authenticated stream;
+	# Express continues to own the frontend, REST API, and Standard WebSocket.
+	handle /isaac-stream {
+		reverse_proxy 127.0.0.1:3003
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:3001
+	}
 }

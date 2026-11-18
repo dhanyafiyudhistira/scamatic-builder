@@ -31,15 +31,18 @@ test('runtime command recorder tracks only locally started commands and deduplic
   let now = 1_000
   const recorder = createRuntimeCommandMetricsRecorder({ storage: null, now: () => now })
   assert.equal(recorder.record({ requestId: 'restored', status: 'acknowledged', timing: { serverTotalMs: 500 } }), false)
-  assert.equal(recorder.start('request-1'), true)
+  assert.equal(recorder.start('request-1', { startedAt: 950 }), true)
   now = 1_275
-  assert.equal(recorder.record({ requestId: 'request-1', status: 'acknowledged', timing: { mode: 'simulation', apiAuthorizationMs: 179, workerQueueMs: 63, serverTotalMs: 275, terminalPersistMs: 18, terminalAuditMs: 16, serverResponseReadyMs: 309 } }), true)
+  assert.equal(recorder.record({ requestId: 'request-1', status: 'acknowledged', timing: { mode: 'simulation', apiAuthorizationMs: 179, authorizationTransactionMs: 41, simulationTransactionMs: 35, workerQueueMs: 63, serverTotalMs: 275, terminalPersistMs: 18, terminalAuditMs: 16, serverResponseReadyMs: 309, clientIntentToDispatchMs: 50 } }), true)
   assert.equal(recorder.record({ requestId: 'request-1', status: 'acknowledged', timing: { mode: 'simulation', gatewayRpcMs: 20 } }), true)
 
   const summary = recorder.summary()
   assert.equal(summary.count, 1)
-  assert.equal(summary.metrics.clientEndToEndMs.p50, 275)
+  assert.equal(summary.metrics.clientEndToEndMs.p50, 325)
   assert.equal(summary.metrics.serverTotalMs.p95, 275)
+  assert.equal(summary.metrics.authorizationTransactionMs.p50, 41)
+  assert.equal(summary.metrics.simulationTransactionMs.p50, 35)
+  assert.equal(summary.metrics.clientIntentToDispatchMs.p50, 50)
   assert.equal(summary.metrics.terminalPersistMs.p50, 18)
   assert.equal(summary.metrics.serverResponseReadyMs.p50, 309)
   assert.equal(recorder.samples()[0].gatewayRpcMs, 20)
@@ -99,11 +102,15 @@ test('runtime command metrics export a spreadsheet-safe bounded CSV', () => {
     apiAuthorizationMs: 179,
     serverTotalMs: 275,
     terminalPersistMs: 18,
+    simulationTransactionMs: 35,
+    clientIntentToDispatchMs: 12,
     serverResponseReadyMs: 309,
   }])
   assert.match(csv, /^requestId,observedAt,status,mode,/)
   assert.match(csv, /request-1,2026-08-13T00:00:00.000Z,acknowledged,simulation,179/)
   assert.match(csv, /terminalPersistMs/)
+  assert.match(csv, /simulationTransactionMs/)
+  assert.match(csv, /clientIntentToDispatchMs/)
   assert.match(csv, /serverResponseReadyMs/)
 })
 

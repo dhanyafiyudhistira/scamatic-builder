@@ -1,0 +1,26 @@
+[package]
+name = "scamatic-egui-builder"
+version = "0.1.17"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+description = "Experimental standalone SCAMATIC canvas editor"
+
+# Keep the experimental GUI's dependencies and lockfile separate from production.
+[workspace]
+
+[dependencies]
+base64 = "0.22"
+eframe = { version = "=0.37.0", default-features = false, features = ["default_fonts", "glow", "accesskit"] }
+egui_extras = { version = "=0.37.0", default-features = false, features = ["svg", "svg_text", "svg_images", "image"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+rfd = { version = "0.17", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+strip = true

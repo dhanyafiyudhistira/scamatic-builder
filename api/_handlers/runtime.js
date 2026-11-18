@@ -7,10 +7,11 @@ import { runtimeChartHistoryRequest } from '../../shared/runtime-chart-history.j
 import { readChartTelemetryHistory } from '../_lib/chart-telemetry-store.js'
 import { loadWorkspaceChartStorage } from '../_lib/chart-storage-configuration.js'
 import { runtimeProfileMetadata, runtimeUsesLiveTelemetry } from '../../shared/runtime-profile.js'
-import { simulationCommandState } from '../../shared/simulation-command-state.js'
+import { newestSimulationSample, reconcileSimulationControlState, simulationCommandState } from '../../shared/simulation-command-state.js'
 import { DESIGN_IMAGE_TYPE, publicDesignAssets, referencedDesignAssetIds } from '../_lib/design-assets.js'
+import { projectRequiresSchematicAsset } from '../../shared/project-type.js'
 
-export default async function handler(req, res) {
+export default async function handler(req, res, { simulationOnly = false } = {}) {
   const principal = await requirePrincipal(req, res)
   if (!principal) return
   if (req.method !== 'GET') {
@@ -26,17 +27,18 @@ export default async function handler(req, res) {
     const version = await ProjectVersion.findById(project.activeVersionId).lean()
     if (!version) return res.status(409).json({ error: 'Active published version is unavailable.', code: 'VERSION_MISSING' })
     const assetId = version.assetId || version.schema?.project?.svgAssetId
-    const asset = await ScadaAsset.findOne({ _id: assetId, projectId: project.id }).lean()
-    if (!asset) return res.status(409).json({ error: 'Published SVG asset is unavailable.', code: 'ASSET_MISSING' })
-    if (version.assetChecksum && asset.checksum !== version.assetChecksum) return res.status(409).json({ error: 'Published asset integrity check failed.', code: 'ASSET_MISMATCH' })
+    const asset = assetId ? await ScadaAsset.findOne({ _id: assetId, projectId: project.id }).lean() : null
+    if ((projectRequiresSchematicAsset(version.schema) || assetId) && !asset) return res.status(409).json({ error: 'Published SVG asset is unavailable.', code: 'ASSET_MISSING' })
+    if (version.assetChecksum && (!asset || asset.checksum !== version.assetChecksum)) return res.status(409).json({ error: 'Published asset integrity check failed.', code: 'ASSET_MISMATCH' })
     const designAssetIds = referencedDesignAssetIds(version.schema)
     const designAssetRecords = designAssetIds.length
       ? await ScadaAsset.find({ _id: { $in: designAssetIds }, projectId: project.id, kind: DESIGN_IMAGE_TYPE }).select({ content: 0 }).lean()
       : []
     if (designAssetRecords.length !== designAssetIds.length) return res.status(409).json({ error: 'A published design element is unavailable.', code: 'DESIGN_ASSET_MISSING' })
     const profile = runtimeProfileMetadata(version.schema)
+    if (simulationOnly && profile.id !== 'simulation') return res.status(409).json({ error: 'Hosted simulation requires the published SIMULATION profile.', code: 'HOSTED_SIMULATION_PROFILE_REQUIRED' })
     const [snapshots, recentSimulationCommands] = await Promise.all([
-      TagValueSnapshot.find({ workspaceId: principal.workspaceId, projectId: project.id }).lean(),
+      simulationOnly ? [] : TagValueSnapshot.find({ workspaceId: principal.workspaceId, projectId: project.id }).lean(),
       profile.id === 'simulation'
         ? CommandEvent.find({
             workspaceId: principal.workspaceId,
@@ -51,16 +53,24 @@ export default async function handler(req, res) {
     const restoredCommandsByTag = simulationCommandState(version.schema, recentSimulationCommands)
     const simulationTargets = simulationCommandTargets(version.schema, recentSimulationCommands)
     const liveTelemetry = runtimeUsesLiveTelemetry(version.schema)
-    const values = Object.fromEntries((version.schema.tags || []).map(tag => {
+    const hydratedValues = Object.fromEntries((version.schema.tags || []).map(tag => {
       const source = version.schema.dataSources?.find(item => item.id === tag.sourceId)
       const snapshot = byTag.get(tag.id)
-      // Simulation Bridge snapshots are authoritative across a browser reload as
-      // well. Ignoring them here would replace active outputs with type defaults.
-      if (source?.type !== 'mock' && snapshot) return [tag.id, { value: snapshot.value, timestamp: snapshot.sourceTimestamp, receivedAt: snapshot.receivedAt, quality: snapshot.quality, sequence: snapshot.sequence }]
+      const snapshotSample = snapshot
+        ? { value: snapshot.value, timestamp: snapshot.sourceTimestamp, receivedAt: snapshot.receivedAt, quality: snapshot.quality, sequence: snapshot.sequence }
+        : null
       const restored = restoredCommandsByTag.get(tag.id)
+      // Simulation Bridge snapshots are authoritative across a browser reload as
+      // well, unless a later acknowledged Simulation command is newer.
+      if (source?.type !== 'mock' && snapshotSample) {
+        return [tag.id, profile.id === 'simulation' ? newestSimulationSample(snapshotSample, restored) : snapshotSample]
+      }
       if (restored) return [tag.id, restored]
       return [tag.id, { value: initialMockValue(tag), timestamp: new Date().toISOString(), quality: liveTelemetry && source?.type !== 'mock' ? 'disconnected' : 'good', sequence: 0 }]
     }))
+    const values = profile.id === 'simulation'
+      ? reconcileSimulationControlState(version.schema, hydratedValues)
+      : hydratedValues
     let chartStorage
     let chartConfigurationError = false
     try {
@@ -94,7 +104,7 @@ export default async function handler(req, res) {
       }
     }
     res.setHeader('Cache-Control', 'private, no-store')
-    return res.status(200).json({ projectId: project.id, schema: version.schema, svg: asset.content, designAssets: publicDesignAssets(designAssetRecords), versionId: version._id, version: version.version, checksum: version.checksum, environment: version.environmentRef || 'mock', profile, values, simulationTargets, history, historyStorage })
+    return res.status(200).json({ projectId: project.id, schema: version.schema, svg: asset?.content || null, designAssets: publicDesignAssets(designAssetRecords), versionId: version._id, version: version.version, checksum: version.checksum, environment: version.environmentRef || 'mock', profile, values, simulationTargets, history, historyStorage })
   } catch {
     return res.status(500).json({ error: 'Unable to load published runtime.' })
   }

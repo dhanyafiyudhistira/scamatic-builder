@@ -117,7 +117,7 @@ export function ValidationConsole({ open, minimized, schema, issues, origin = 'L
         </div>
 
         <div className="sb-validation-console-output" tabIndex="0">
-          {diagnostics.length === 0 && <div className="sb-validation-console-pass"><span>✓</span><strong>No validation issues</strong><p>The current project schema is ready to publish.</p></div>}
+          {diagnostics.length === 0 && <div className="sb-validation-console-pass"><span><img className="sb-check-icon" src="/check.svg" alt="" /></span><strong>No validation issues</strong><p>The current project schema is ready to publish.</p></div>}
           {diagnostics.length > 0 && filtered.length === 0 && <div className="sb-validation-console-empty"><strong>No matching diagnostics</strong><p>Adjust the search text or severity filter.</p></div>}
           {filtered.map(diagnostic => (
             <article className={`sb-validation-diagnostic ${diagnostic.severity}`} key={diagnostic.id}>

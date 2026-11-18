@@ -1,30 +1,45 @@
-import { COMPONENT_REGISTRY } from './component-registry.js'
+import { COMPONENT_REGISTRY, PROCESS_EQUIPMENT_TYPES, SCADA_PROCESS_COMPONENT_TYPES, componentAvailableForProject } from './component-registry.js'
+import { MARKUP_TYPE, markupPropertyIssues } from './markup-stroke.js'
 import { RULE_OPERATORS } from './runtime-evaluator.js'
 import { CONTROL_POPUP_CHILD_TYPES, CONTROL_POPUP_MAX_CHILDREN, CONTROL_POPUP_TYPE } from './control-popup.js'
 import { MAX_STALE_AFTER_MS, MIN_STALE_AFTER_MS, normalizeTagFreshness, TAG_FRESHNESS_MODES } from './tag-freshness.js'
 import { RUNTIME_PROFILES, runtimeProfile } from './runtime-profile.js'
 import { hasNumericEngineering, normalizeNumericTagConfiguration, numericEngineering, numericWriteConstraints, NUMERIC_FORMAT_MODES, NUMERIC_RANGE_MODES, resolveGaugeZones, resolveNumericRange } from './numeric-tag-config.js'
 import { ALARM_FREQUENCY_RANGE, ALARM_PRESENTATIONS, ALARM_PULSE_RANGE, ALARM_RULE_MODES, ALARM_VOLUME_RANGE, NUMERIC_ALARM_RULE_OPERATORS } from './alarm.js'
+import { DEFAULT_PROJECT_TYPE, PROJECT_TYPES, isIotDashboardProject, projectTypeMetadata, projectTypeOf, winccTemplateSchema } from './project-type.js'
+import { DASHBOARD_BREAKPOINTS, createResponsiveDashboardLayout, dashboardCanvas, validResponsivePosition } from './responsive-dashboard.js'
 
-export const PROJECT_SCHEMA_VERSION = '1.6.0'
-export const LEGACY_PROJECT_SCHEMA_VERSIONS = Object.freeze(['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0'])
+export const PROJECT_SCHEMA_VERSION = '1.8.0'
+export const LEGACY_PROJECT_SCHEMA_VERSIONS = Object.freeze(['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0'])
 export const COMPONENT_TYPES = Object.keys(COMPONENT_REGISTRY)
 
 const COMMAND_COMPONENT_TYPES = new Set(['control-button', 'tuning-slider', 'operation-shifter'])
+const PROCESS_EQUIPMENT_TYPE_SET = new Set(PROCESS_EQUIPMENT_TYPES)
+const SCADA_PROCESS_COMPONENT_TYPE_SET = new Set(SCADA_PROCESS_COMPONENT_TYPES)
+const PIPE_DIRECTIONS = new Set(['forward', 'reverse'])
+const VALVE_ORIENTATIONS = new Set(['horizontal', 'vertical'])
 const COMMAND_CONFIRMATIONS = new Set(['none', 'single'])
 const COMMAND_ROLES = new Set(['VIEWER', 'EDITOR', 'OPERATOR', 'ADMIN', 'OWNER'])
 const CONTROL_ACTIONS = new Set(['toggle-boolean', 'set-value', 'pulse'])
+const LEGACY_IOT_DASHBOARD_BACKGROUNDS = new Set(['#0b1020'])
 
-export function createProjectSchema({ id, name, slug, width = 1920, height = 1080 }) {
+export function createProjectSchema({ id, name, slug, projectType = DEFAULT_PROJECT_TYPE, width, height }) {
+  const type = projectTypeOf(projectType)
+  const defaults = projectTypeMetadata(type).canvas
+  const canvas = { width: width ?? defaults.width, height: height ?? defaults.height, background: defaults.background }
+  const dashboardLayout = isIotDashboardProject(type) ? createResponsiveDashboardLayout() : null
+  if (dashboardLayout) dashboardLayout.breakpoints.desktop = { ...dashboardLayout.breakpoints.desktop, width: canvas.width, height: canvas.height }
   return {
     schemaVersion: PROJECT_SCHEMA_VERSION,
     project: {
       id,
       name,
       slug,
+      projectType: type,
       runtimeProfile: 'simulation',
-      canvas: { width, height, background: '#101418' },
+      canvas,
       svgAssetId: null,
+      ...(dashboardLayout ? { dashboardLayout } : {}),
     },
     dataSources: [{ id: 'source_mock', type: 'mock', environmentRef: 'development', connectorRef: null }],
     tags: [],
@@ -32,7 +47,8 @@ export function createProjectSchema({ id, name, slug, width = 1920, height = 108
   }
 }
 
-export function validateProjectSchema(schema, { requireAsset = false } = {}) {
+export function validateProjectSchema(schema, { requireAsset = false, templateOnly = false } = {}) {
+  if (templateOnly) schema = winccTemplateSchema(schema)
   const issues = []
   const addIssue = (severity, code, message, path = '', details = {}) => issues.push({ severity, code, message, path, ...details })
   const error = (code, message, path = '', details) => addIssue('error', code, message, path, details)
@@ -53,6 +69,9 @@ export function validateProjectSchema(schema, { requireAsset = false } = {}) {
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(String(schema.project.slug || '')) || String(schema.project.slug).length > 80) {
       error('project.identity', 'Project slug must use lowercase letters, numbers, and single hyphens only.', 'project.slug')
     }
+    if (!PROJECT_TYPES.includes(schema.project.projectType)) {
+      error('project.type', 'Project type must be scada or iot-dashboard.', 'project.projectType')
+    }
   }
   if (!RUNTIME_PROFILES.includes(schema.project?.runtimeProfile)) {
     error('project.runtimeProfile', 'Runtime profile must be simulation, real, or monitor.', 'project.runtimeProfile')
@@ -63,6 +82,25 @@ export function validateProjectSchema(schema, { requireAsset = false } = {}) {
     error('canvas.invalid', 'Canvas dimensions must be finite and at least 320 × 240.', 'project.canvas')
   }
   if (canvas?.background != null && !boundedText(canvas.background, 120)) error('canvas.background', 'Canvas background must be a non-empty CSS color value no longer than 120 characters.', 'project.canvas.background')
+  if (isIotDashboardProject(schema)) {
+    const layout = schema.project?.dashboardLayout
+    if (!isPlainObject(layout) || layout.mode !== 'responsive-grid') {
+      error('dashboard.layout', 'IoT Dashboard projects require responsive-grid layout metadata.', 'project.dashboardLayout')
+    } else {
+      if (!Number.isInteger(layout.gap) || layout.gap < 0 || layout.gap > 64) error('dashboard.gap', 'Dashboard grid gap must be an integer between 0 and 64 pixels.', 'project.dashboardLayout.gap')
+      for (const breakpoint of DASHBOARD_BREAKPOINTS) {
+        const config = layout.breakpoints?.[breakpoint]
+        const path = `project.dashboardLayout.breakpoints.${breakpoint}`
+        if (!isPlainObject(config)) {
+          error('dashboard.breakpoint', `Dashboard ${breakpoint} breakpoint configuration is required.`, path)
+          continue
+        }
+        if (!Number.isInteger(config.width) || config.width < 320 || config.width > 4000) error('dashboard.breakpoint.width', `${breakpoint} width must be an integer between 320 and 4000.`, `${path}.width`)
+        if (!Number.isInteger(config.height) || config.height < 240 || config.height > 10000) error('dashboard.breakpoint.height', `${breakpoint} height must be an integer between 240 and 10000.`, `${path}.height`)
+        if (!Number.isInteger(config.columns) || config.columns < 1 || config.columns > 24) error('dashboard.breakpoint.columns', `${breakpoint} columns must be an integer between 1 and 24.`, `${path}.columns`)
+      }
+    }
+  }
   if (requireAsset && !schema.project?.svgAssetId) {
     error('asset.missing', 'A sanitized SVG asset is required before publish.', 'project.svgAssetId')
   }
@@ -183,6 +221,8 @@ export function validateProjectSchema(schema, { requireAsset = false } = {}) {
     if (!boundedText(component.name, 160)) error('component.name', 'Every component requires a display name no longer than 160 characters.', `${path}.name`)
     if (!COMPONENT_TYPES.includes(component?.type)) {
       error('component.type', `Unsupported component type: ${component?.type ?? 'missing'}.`, `${path}.type`)
+    } else if (!componentAvailableForProject(component.type, projectTypeOf(schema))) {
+      error('component.projectType', `${COMPONENT_REGISTRY[component.type].label} is available only in SCADA projects.`, `${path}.type`)
     }
     const position = component?.position
     for (const key of ['x', 'y', 'width', 'height', 'rotation']) {
@@ -194,16 +234,34 @@ export function validateProjectSchema(schema, { requireAsset = false } = {}) {
     if (component.zIndex != null && (!Number.isInteger(component.zIndex) || component.zIndex < 1 || component.zIndex > 1_000_000)) error('component.layer', 'Component layer must be an integer between 1 and 1,000,000.', `${path}.zIndex`)
     if (component.visible != null && typeof component.visible !== 'boolean') error('component.visible', 'Component visibility must be a boolean.', `${path}.visible`)
     if (component.locked != null && typeof component.locked !== 'boolean') error('component.locked', 'Component lock state must be a boolean.', `${path}.locked`)
+    if (component.responsivePositions != null) {
+      if (!isPlainObject(component.responsivePositions)) error('component.responsive', 'Responsive positions must be an object.', `${path}.responsivePositions`)
+      else for (const [breakpoint, responsivePosition] of Object.entries(component.responsivePositions)) {
+        const responsivePath = `${path}.responsivePositions.${breakpoint}`
+        if (!['tablet', 'mobile'].includes(breakpoint)) error('component.responsive.breakpoint', `Unsupported component breakpoint: ${breakpoint}.`, responsivePath)
+        else if (!validResponsivePosition(responsivePosition)) error('component.responsive.position', 'Responsive position requires bounded finite x, y, width, height, and rotation values.', responsivePath)
+        else {
+          const breakpointCanvas = dashboardCanvas(schema, breakpoint)
+          if (responsivePosition.x + responsivePosition.width > breakpointCanvas.width) warning('component.responsive.bounds', `${component?.name || 'Component'} extends beyond the ${breakpoint} dashboard width.`, responsivePath)
+        }
+      }
+    }
     if (component.binding != null && !isPlainObject(component.binding)) error('binding.invalid', 'Component binding must be an object.', `${path}.binding`)
     if (!isPlainObject(component.properties)) error('component.properties', 'Component properties must be an object.', `${path}.properties`)
+    if (templateOnly && component.properties?.templateValue != null && !Number.isFinite(component.properties.templateValue)) {
+      error('wincc.value', 'Initial template value must be numeric.', `${path}.properties.templateValue`)
+    }
+    if (templateOnly && component.properties?.templateActive != null && typeof component.properties.templateActive !== 'boolean') {
+      error('wincc.state', 'Initial indicator state must be on or off.', `${path}.properties.templateActive`)
+    }
     if (canvas && Number.isFinite(position?.x) && Number.isFinite(position?.y) && (position.x < 0 || position.y < 0 || position.x + position.width > canvas.width || position.y + position.height > canvas.height)) {
       warning('component.bounds', `${component?.name || 'Component'} extends outside the logical canvas.`, `${path}.position`)
     }
     const tagId = component?.binding?.tagId
     const isChart = component?.type === 'chart'
-    const requiresBinding = !['text-label', 'design-image', CONTROL_POPUP_TYPE].includes(component?.type) && !isChart
+    const requiresBinding = !['text-label', 'design-image', MARKUP_TYPE, CONTROL_POPUP_TYPE].includes(component?.type) && !isChart
     if (!tagId) {
-      if (requiresBinding) warning('binding.missing', `${component?.name || 'Component'} has no tag binding.`, `${path}.binding`)
+      if (requiresBinding && !templateOnly) warning('binding.missing', `${component?.name || 'Component'} has no tag binding.`, `${path}.binding`)
     } else if (!tagIds.has(tagId)) error('binding.broken', `Binding references missing tag: ${tagId}.`, `${path}.binding.tagId`)
 
     if (tagId && tagIds.has(tagId)) {
@@ -212,6 +270,9 @@ export function validateProjectSchema(schema, { requireAsset = false } = {}) {
       if (tag && !allowedTypes.includes(tag.dataType)) {
         error('binding.type', `${component.name || component.type} cannot bind to ${tag.dataType} tag ${tagId}.`, `${path}.binding.tagId`)
       }
+      if (tag && SCADA_PROCESS_COMPONENT_TYPE_SET.has(component.type) && tag.access === 'write') {
+        error('binding.writeonly', `${component.name || component.type} requires a readable process-state tag.`, `${path}.binding.tagId`)
+      }
     }
 
     if (isChart) {
@@ -219,7 +280,7 @@ export function validateProjectSchema(schema, { requireAsset = false } = {}) {
       if (!Array.isArray(chartTagIds)) {
         error('chart.binding', 'Chart binding must contain a tagIds array.', `${path}.binding.tagIds`)
       } else {
-        if (chartTagIds.length === 0) warning('binding.missing', `${component?.name || 'Chart'} has no tag bindings.`, `${path}.binding.tagIds`)
+        if (chartTagIds.length === 0 && !templateOnly) warning('binding.missing', `${component?.name || 'Chart'} has no tag bindings.`, `${path}.binding.tagIds`)
         if (chartTagIds.length > 8) error('chart.tags.limit', 'Chart can display at most 8 tags.', `${path}.binding.tagIds`)
         if (new Set(chartTagIds).size !== chartTagIds.length) error('chart.tags.duplicate', 'Chart tag bindings must be unique.', `${path}.binding.tagIds`)
         chartTagIds.forEach((chartTagId, chartTagIndex) => {
@@ -247,6 +308,21 @@ export function validateProjectSchema(schema, { requireAsset = false } = {}) {
       error('rule.value', `${rule.operator} rule requires a finite comparison value.`, `${path}.properties.rule.value`)
     } else if (['between', 'outside'].includes(rule?.operator) && (!Number.isFinite(Number(rule.min)) || !Number.isFinite(Number(rule.max)) || Number(rule.max) < Number(rule.min))) {
       error('rule.range', `${rule.operator === 'outside' ? 'Outside' : 'Between'} rule requires finite minimum and maximum values in ascending order.`, `${path}.properties.rule`)
+    }
+
+    if (SCADA_PROCESS_COMPONENT_TYPE_SET.has(component?.type)) {
+      const properties = component.properties || {}
+      for (const key of ['activeColor', 'idleColor']) {
+        if (properties[key] != null && (typeof properties[key] !== 'string' || !/^#[0-9a-f]{6}$/i.test(properties[key]))) error('process.color', 'Process component colors must use six-digit hexadecimal values.', `${path}.properties.${key}`)
+      }
+      for (const key of ['activeText', 'inactiveText']) {
+        if (properties[key] != null && !boundedText(properties[key], 40)) error('process.stateText', 'Process state text must contain 1 to 40 safe characters.', `${path}.properties.${key}`)
+      }
+      if (properties.glow != null && typeof properties.glow !== 'boolean') error('process.glow', 'Process component glow must be a boolean.', `${path}.properties.glow`)
+      if (properties.animate != null && typeof properties.animate !== 'boolean') error('process.animate', 'Process component animation must be a boolean.', `${path}.properties.animate`)
+      if (component.type === 'valve' && !VALVE_ORIENTATIONS.has(properties.orientation || 'horizontal')) error('valve.orientation', 'Valve orientation must be horizontal or vertical.', `${path}.properties.orientation`)
+      if (component.type === 'pipe' && !PIPE_DIRECTIONS.has(properties.direction || 'forward')) error('pipe.direction', 'Pipe stream direction must be forward or reverse.', `${path}.properties.direction`)
+      if (component.type !== 'pipe' && !PROCESS_EQUIPMENT_TYPE_SET.has(component.type)) error('process.type', 'Unsupported process equipment type.', `${path}.type`)
     }
 
     if (component?.type === 'alarm') {
@@ -417,6 +493,9 @@ export function validateProjectSchema(schema, { requireAsset = false } = {}) {
     }
 
     if (component?.type === 'design-image') {
+      if (component.properties?.markup != null && typeof component.properties.markup !== 'boolean') {
+        error('designImage.markup', 'Custom Image markup status must be a boolean.', `${path}.properties.markup`)
+      }
       if (!component.properties?.assetId || typeof component.properties.assetId !== 'string' || component.properties.assetId.length > 200) {
         error('designImage.asset', 'Custom Image requires a valid uploaded asset.', `${path}.properties.assetId`)
       }
@@ -429,6 +508,11 @@ export function validateProjectSchema(schema, { requireAsset = false } = {}) {
       const opacity = Number(component.properties?.opacity ?? 1)
       if (!Number.isFinite(opacity) || opacity < 0 || opacity > 1) {
         error('designImage.opacity', 'Custom Image opacity must be between 0 and 1.', `${path}.properties.opacity`)
+      }
+    }
+    if (component.type === MARKUP_TYPE) {
+      for (const issue of markupPropertyIssues(component.properties || {})) {
+        error(issue.code, issue.message, `${path}.properties.${issue.field}`)
       }
     }
   })
@@ -479,7 +563,9 @@ export function migrateProjectSchema(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return input
   const schema = structuredClone(input)
   if (schema.schemaVersion === PROJECT_SCHEMA_VERSION) {
-    schema.project = { ...schema.project, runtimeProfile: runtimeProfile(schema) }
+    schema.project = { ...schema.project, projectType: schema.project?.projectType || DEFAULT_PROJECT_TYPE, runtimeProfile: runtimeProfile(schema) }
+    migrateIotDashboardCanvasTheme(schema)
+    if (isIotDashboardProject(schema) && !schema.project.dashboardLayout) schema.project.dashboardLayout = createResponsiveDashboardLayout()
     if (Array.isArray(schema.tags)) schema.tags = schema.tags.map(normalizeTagFreshness)
     if (Array.isArray(schema.components)) schema.components = schema.components.map(normalizeOperationShifterGeometry)
     migrateNumericConfiguration(schema, { legacy: false })
@@ -507,10 +593,22 @@ export function migrateProjectSchema(input) {
       return { ...component, properties }
     })
   }
-  migrateNumericConfiguration(schema, { legacy: true })
-  schema.project = { ...schema.project, runtimeProfile: runtimeProfile(schema) }
+  migrateNumericConfiguration(schema, { legacy: !['1.6.0', '1.7.0'].includes(sourceVersion) })
+  schema.project = { ...schema.project, projectType: schema.project?.projectType || DEFAULT_PROJECT_TYPE, runtimeProfile: runtimeProfile(schema) }
+  migrateIotDashboardCanvasTheme(schema)
+  if (isIotDashboardProject(schema) && !schema.project.dashboardLayout) schema.project.dashboardLayout = createResponsiveDashboardLayout()
   schema.schemaVersion = PROJECT_SCHEMA_VERSION
   return schema
+}
+
+function migrateIotDashboardCanvasTheme(schema) {
+  const canvas = schema.project?.canvas
+  const background = String(canvas?.background || '').trim().toLowerCase()
+  if (!isIotDashboardProject(schema) || !LEGACY_IOT_DASHBOARD_BACKGROUNDS.has(background)) return
+  schema.project = {
+    ...schema.project,
+    canvas: { ...canvas, background: projectTypeMetadata(schema).canvas.background },
+  }
 }
 
 function migrateNumericConfiguration(schema, { legacy }) {

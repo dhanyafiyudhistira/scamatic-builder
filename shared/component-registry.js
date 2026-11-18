@@ -1,3 +1,5 @@
+import { MARKUP_DEFAULT_COLOR, MARKUP_DEFAULT_WIDTH, MARKUP_TYPE } from './markup-stroke.js'
+
 export const COMPONENT_REGISTRY = Object.freeze({
   'indicator-lamp': {
     type: 'indicator-lamp',
@@ -11,6 +13,93 @@ export const COMPONENT_REGISTRY = Object.freeze({
       offColor: '#64748b',
       alarmColor: '#ef4444',
       glow: true,
+      rule: { operator: 'truthy' },
+    },
+  },
+  valve: {
+    type: 'valve',
+    label: 'Valve',
+    projectTypes: ['scada'],
+    allowedDataTypes: ['boolean', 'number', 'string', 'enum'],
+    defaultSize: { width: 180, height: 120 },
+    defaultProperties: {
+      label: 'VALVE',
+      activeText: 'OPEN',
+      inactiveText: 'CLOSED',
+      activeColor: '#22c55e',
+      idleColor: '#64748b',
+      orientation: 'horizontal',
+      glow: true,
+      animate: false,
+      rule: { operator: 'truthy' },
+    },
+  },
+  motor: {
+    type: 'motor',
+    label: 'Motor',
+    projectTypes: ['scada'],
+    allowedDataTypes: ['boolean', 'number', 'string', 'enum'],
+    defaultSize: { width: 180, height: 120 },
+    defaultProperties: {
+      label: 'MOTOR',
+      activeText: 'RUNNING',
+      inactiveText: 'STOPPED',
+      activeColor: '#22c55e',
+      idleColor: '#64748b',
+      glow: true,
+      animate: true,
+      rule: { operator: 'truthy' },
+    },
+  },
+  pump: {
+    type: 'pump',
+    label: 'Pump',
+    projectTypes: ['scada'],
+    allowedDataTypes: ['boolean', 'number', 'string', 'enum'],
+    defaultSize: { width: 190, height: 130 },
+    defaultProperties: {
+      label: 'PUMP',
+      activeText: 'RUNNING',
+      inactiveText: 'STOPPED',
+      activeColor: '#22c55e',
+      idleColor: '#64748b',
+      glow: true,
+      animate: true,
+      rule: { operator: 'truthy' },
+    },
+  },
+  fan: {
+    type: 'fan',
+    label: 'Fan',
+    projectTypes: ['scada'],
+    allowedDataTypes: ['boolean', 'number', 'string', 'enum'],
+    defaultSize: { width: 170, height: 140 },
+    defaultProperties: {
+      label: 'FAN',
+      activeText: 'RUNNING',
+      inactiveText: 'STOPPED',
+      activeColor: '#22c55e',
+      idleColor: '#64748b',
+      glow: true,
+      animate: true,
+      rule: { operator: 'truthy' },
+    },
+  },
+  pipe: {
+    type: 'pipe',
+    label: 'Pipe',
+    projectTypes: ['scada'],
+    allowedDataTypes: ['boolean', 'number', 'string', 'enum'],
+    defaultSize: { width: 300, height: 80 },
+    defaultProperties: {
+      label: 'FLOW',
+      activeText: 'FLOW ACTIVE',
+      inactiveText: 'NO FLOW',
+      activeColor: '#20c4d9',
+      idleColor: '#475569',
+      direction: 'forward',
+      glow: true,
+      animate: true,
       rule: { operator: 'truthy' },
     },
   },
@@ -197,12 +286,34 @@ export const COMPONENT_REGISTRY = Object.freeze({
     defaultProperties: {
       assetId: null,
       fileName: 'Custom element',
+      markup: false,
       objectFit: 'contain',
       lockAspectRatio: true,
       opacity: 1,
     },
   },
+  [MARKUP_TYPE]: {
+    type: MARKUP_TYPE,
+    label: 'Markup',
+    library: false,
+    allowedDataTypes: [],
+    defaultSize: { width: 24, height: 24 },
+    defaultProperties: { points: [], color: MARKUP_DEFAULT_COLOR, strokeWidth: MARKUP_DEFAULT_WIDTH },
+  },
 })
+
+export const PROCESS_EQUIPMENT_TYPES = Object.freeze(['valve', 'motor', 'pump', 'fan'])
+export const SCADA_PROCESS_COMPONENT_TYPES = Object.freeze([...PROCESS_EQUIPMENT_TYPES, 'pipe'])
+
+export function componentAvailableForProject(type, projectType) {
+  const definition = COMPONENT_REGISTRY[type]
+  if (!definition) return false
+  return !Array.isArray(definition.projectTypes) || definition.projectTypes.includes(projectType)
+}
+
+export function componentDefinitionsForProject(projectType) {
+  return Object.values(COMPONENT_REGISTRY).filter(definition => definition.library !== false && componentAvailableForProject(definition.type, projectType))
+}
 
 export function createComponentInstance(type, { id, canvas, tagId = null, index = 0 }) {
   const definition = COMPONENT_REGISTRY[type]

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { compatibleTags, createComponentInstance } from '../shared/component-registry.js'
+import { compatibleTags, componentAvailableForProject, componentDefinitionsForProject, createComponentInstance } from '../shared/component-registry.js'
 import { commandUiState, evaluateOperationShift, evaluateRule, executeMockCommand, formatRuntimeValue, tuningInteractionState, valueSeverity } from '../shared/runtime-evaluator.js'
 import { validateProjectSchema } from '../shared/project-schema.js'
 import { describeVersion, nextVersionNumber, restoredFromVersionNumber } from '../shared/version-history.js'
@@ -9,7 +9,7 @@ import { auditActionCategory, auditActionLabel } from '../shared/audit-display.j
 const canvas = { width: 1920, height: 1080 }
 
 test('component registry creates all MVP component types with logical positions', () => {
-  for (const type of ['indicator-lamp', 'alarm', 'value-span', 'gauge', 'control-button', 'tuning-slider', 'operation-shifter', 'control-popup', 'chart', 'text-label']) {
+  for (const type of ['indicator-lamp', 'valve', 'motor', 'pump', 'fan', 'pipe', 'alarm', 'value-span', 'gauge', 'control-button', 'tuning-slider', 'operation-shifter', 'control-popup', 'chart', 'text-label']) {
     const component = createComponentInstance(type, { id: `id-${type}`, canvas, index: 0 })
     assert.equal(component.type, type)
     assert.ok(component.position.width > 0)
@@ -34,6 +34,20 @@ test('registry filters compatible tags by component type', () => {
   assert.deepEqual(compatibleTags('chart', tags).map(tag => tag.id), ['number'])
   assert.deepEqual(compatibleTags('text-label', tags), [])
   assert.deepEqual(compatibleTags('control-popup', tags), [])
+  for (const type of ['valve', 'motor', 'pump', 'fan', 'pipe']) {
+    assert.deepEqual(compatibleTags(type, tags).map(tag => tag.id), ['bool', 'number', 'mode'])
+  }
+})
+
+test('process equipment remains available only to the SCADA component library', () => {
+  const scadaTypes = componentDefinitionsForProject('scada').map(definition => definition.type)
+  const iotTypes = componentDefinitionsForProject('iot-dashboard').map(definition => definition.type)
+  for (const type of ['valve', 'motor', 'pump', 'fan', 'pipe']) {
+    assert.equal(componentAvailableForProject(type, 'scada'), true)
+    assert.equal(componentAvailableForProject(type, 'iot-dashboard'), false)
+    assert.equal(scadaTypes.includes(type), true)
+    assert.equal(iotTypes.includes(type), false)
+  }
 })
 
 test('Operation Shifter keeps independent dark and light board palettes', () => {
@@ -93,6 +107,8 @@ test('mock command enforces writable access and returns acknowledgment values', 
   const result = executeMockCommand(component, { access: 'read-write', dataType: 'boolean' }, false)
   assert.equal(result.ok, true)
   assert.equal(result.value, true)
+  assert.equal(executeMockCommand(component, { access: 'read-write', dataType: 'boolean' }, false, false).value, false)
+  assert.equal(executeMockCommand(component, { access: 'read-write', dataType: 'boolean' }, false, 'false').ok, false)
 })
 
 test('tuning slider accepts aligned numeric setpoints and rejects unsafe payloads', () => {
@@ -139,6 +155,7 @@ test('restored versions expose immutable lineage and the next explicit version n
 test('technical audit actions become compact human-readable labels', () => {
   assert.equal(auditActionLabel('command.accepted_by_gateway'), 'Command accepted by gateway')
   assert.equal(auditActionLabel('connector.rpc_test_succeeded'), 'Connector RPC test succeeded')
+  assert.equal(auditActionLabel('project.isaac-canary.updated'), 'Project Isaac canary updated')
   assert.equal(auditActionCategory('project.rollback'), 'PROJECT')
   assert.equal(auditActionCategory(''), 'SYSTEM')
 })

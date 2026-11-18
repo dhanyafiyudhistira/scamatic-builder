@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiRequest, logout } from './platform/api'
 import { RuntimeCanvas } from './platform/RuntimeCanvas'
-import { ThemeToneToggle, useThemeTone } from './platform/ThemeTone'
+import { ThemeToneToggle } from './platform/ThemeTone'
 import { BoardToneToggle, useBoardTone } from './platform/BoardTone'
 import { useEditorHistory } from './platform/useEditorHistory'
 import { ComponentInspector, ComponentLibrary, LayersPanel, MockControls, TagManager } from './platform/BuilderPanels'
-import { COMPONENT_REGISTRY, compatibleTags, createComponentInstance } from '../shared/component-registry.js'
+import { COMPONENT_REGISTRY, compatibleTags, componentAvailableForProject, componentDefinitionsForProject, createComponentInstance } from '../shared/component-registry.js'
+import { isMarkupLayer, MARKUP_TOOLS, MARKUP_TYPE, markupBox } from '../shared/markup-stroke.js'
 import { executeMockCommand, initialMockValue } from '../shared/runtime-evaluator.js'
 import { hasBlockingIssues, validateProjectSchema } from '../shared/project-schema.js'
 import { applyNodeRedImportPlan } from '../shared/node-red-import.js'
@@ -18,17 +19,26 @@ import { ChartStorageManager } from './platform/ChartStorageManager.jsx'
 import { assignControlToPopup, copySafeComponent, detachControlFromPopup, removeComponentsAndCleanPopups, reorderPopupControl } from '../shared/control-popup.js'
 import { RUNTIME_PROFILES, runtimeProfileMetadata } from '../shared/runtime-profile.js'
 import { RuntimeProfileBanner, RuntimeProfileSelector } from './platform/RuntimeProfile.jsx'
+import { RuntimeEngineSelector } from './platform/RuntimeEngine.jsx'
+import { RUNTIME_ENGINES, runtimeEngine, runtimeEngineMetadata } from '../shared/runtime-engine.js'
+import { RUNTIME_WORKER_MODES, runtimeWorkerMode, runtimeWorkerModeMetadata } from '../shared/runtime-worker-mode.js'
 import { validationNoticeDetails } from '../shared/validation-notice.js'
 import { encodeHardPassword } from '../shared/hard-password.js'
 import { runtimeHrefWithMetrics } from '../shared/runtime-metrics-option.js'
 import { validationSummary } from '../shared/validation-diagnostics.js'
 import { ValidationConsole } from './platform/ValidationConsole.jsx'
 import { AuthScreen } from './platform/AuthScreen.jsx'
+import { isDesktopApp, openApplicationRoute, resolveDesignAsset } from './platform/desktop.js'
+import { InfoPopover, InfoPopoverIntro, InfoPopoverSection } from './platform/InfoPopover.jsx'
+import { DEFAULT_OUTPUT_TARGET, IOT_DASHBOARD_PROJECT_TYPE, PROJECT_TYPES, SCADA_PROJECT_TYPE, WINCC_TEMPLATE_COMPONENT_TYPES, WINCC_OUTPUT_TARGET, isIotDashboardProject, projectOutputTarget, projectRequiresSchematicAsset, projectTypeMetadata, projectTypeOf, winccTemplateSchema } from '../shared/project-type.js'
+import { DASHBOARD_BREAKPOINTS, dashboardBreakpointMetadata, responsivePositionPatch, resolveResponsiveDashboard } from '../shared/responsive-dashboard.js'
+import { MarkupIcon, symbolPlacement } from './platform/MarkupLayer.jsx'
+import { MarkupWorkspace } from './platform/MarkupWorkspace.jsx'
 
 const makeId = prefix => `${prefix}_${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`
 const recoveryKey = projectId => `scamatic.recovery.${projectId}`
-const componentTypeCount = Object.values(COMPONENT_REGISTRY).filter(definition => definition.library !== false).length
 const sidebarLayoutKey = 'scamatic.builder.sidebar-widths'
+const designElementAccept = '.png,.jpg,.jpeg,.svg,image/png,image/jpeg,image/svg+xml'
 const SIDEBAR_LIMITS = Object.freeze({
   left: { min: 260, max: 650 },
   right: { min: 280, max: 700 },
@@ -56,6 +66,18 @@ function persistSidebarWidths(widths) {
   try { globalThis.localStorage?.setItem(sidebarLayoutKey, JSON.stringify(widths)) } catch { /* Storage can be unavailable in private contexts. */ }
 }
 
+function placeMarkupLayer(component, position, { breakpoint, canvas }, schema) {
+  const base = schema.project.canvas
+  if (breakpoint === 'desktop') component.position = position
+  else {
+    const scaleX = base.width / canvas.width
+    const scaleY = base.height / canvas.height
+    component.position = markupBox(base, position.x * scaleX, position.y * scaleY, position.width * scaleX, position.height * scaleY)
+    Object.assign(component, responsivePositionPatch(component, breakpoint, position))
+  }
+  component.zIndex = Math.min(1_000_000, schema.components.reduce((highest, layer) => Math.max(highest, layer.zIndex || 1), 0) + 1)
+}
+
 export default function BuilderPlatform() {
   const [session, setSession] = useState({ loading: true, user: null })
   const [projects, setProjects] = useState([])
@@ -64,9 +86,11 @@ export default function BuilderPlatform() {
   const draft = editor.value
   const draftRef = useRef(draft)
   const clipboardRef = useRef([])
-  const savingRef = useRef(false)
+  const savingRef = useRef(null)
+  const markupSavingRef = useRef(false)
   const sidebarWidthsRef = useRef(null)
   const sidebarResizeCleanupRef = useRef(null)
+  const projectOpenRef = useRef(null)
   const [sidebarWidths, setSidebarWidths] = useState(initialSidebarWidths)
   const [revision, setRevision] = useState(null)
   const [svg, setSvg] = useState(null)
@@ -75,6 +99,13 @@ export default function BuilderPlatform() {
   const [mockValues, setMockValues] = useState({})
   const [dirty, setDirty] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [openingProject, setOpeningProject] = useState(null)
+  const [markupTool, setMarkupTool] = useState(null)
+  const markupActive = Boolean(markupTool)
+  const [markupZoom, setMarkupZoom] = useState(1)
+  const [markupShowGrid, setMarkupShowGrid] = useState(false)
+  const [markupSaving, setMarkupSaving] = useState(false)
+  const [markupSaveDialog, setMarkupSaveDialog] = useState(false)
   const [notice, setNotice] = useState(null)
   const [preview, setPreview] = useState(false)
   const [snapToGrid, setSnapToGrid] = useState(true)
@@ -84,7 +115,6 @@ export default function BuilderPlatform() {
   const [gridSize, setGridSize] = useState(20)
   const [zoom, setZoom] = useState(1)
   const [boardTone, setBoardTone] = useBoardTone()
-  const [themeTone, setThemeTone] = useThemeTone()
   const [autoSave, setAutoSave] = useState(true)
   const [commandMessage, setCommandMessage] = useState('')
   const [lastSavedAt, setLastSavedAt] = useState(null)
@@ -94,16 +124,24 @@ export default function BuilderPlatform() {
   const [validationConsoleOpen, setValidationConsoleOpen] = useState(false)
   const [validationConsoleMinimized, setValidationConsoleMinimized] = useState(false)
   const [validationConsoleSource, setValidationConsoleSource] = useState(null)
+  const [dashboardBreakpoint, setDashboardBreakpoint] = useState('desktop')
 
   useEffect(() => { draftRef.current = draft }, [draft])
   useEffect(() => { sidebarWidthsRef.current = sidebarWidths }, [sidebarWidths])
   useEffect(() => () => sidebarResizeCleanupRef.current?.(), [])
+  useEffect(() => () => projectOpenRef.current?.abort(), [])
   useEffect(() => {
     if (!notice?.floating) return
     const timer = window.setTimeout(() => setNotice(current => current === notice ? null : current), 2400)
     return () => window.clearTimeout(timer)
   }, [notice])
-  const issues = useMemo(() => draft ? validateProjectSchema(draft, { requireAsset: true }) : [], [draft])
+  const activeProjectType = projectTypeOf(draft)
+  const iotDashboard = isIotDashboardProject(draft)
+  const winccProject = projectOutputTarget(currentProject) === WINCC_OUTPUT_TARGET
+  const activeProjectTypeMetadata = projectTypeMetadata(draft)
+  const componentTypeCount = componentDefinitionsForProject(activeProjectType).length
+  const canvasSchema = useMemo(() => winccProject ? winccTemplateSchema(draft) : draft, [draft, winccProject])
+  const issues = useMemo(() => draft ? validateProjectSchema(draft, { templateOnly: winccProject, requireAsset: !winccProject && projectRequiresSchematicAsset(draft) }) : [], [draft, winccProject])
 
   const updateSidebarWidth = useCallback((side, width, persist = false) => {
     setSidebarWidths(previous => {
@@ -177,9 +215,17 @@ export default function BuilderPlatform() {
   }, [session.user, loadProjects])
 
   const openProject = async project => {
-    setBusy(true)
+    projectOpenRef.current?.abort()
+    const controller = new AbortController()
+    projectOpenRef.current = controller
+    const { signal } = controller
+    setOpeningProject(project)
+    setNotice(null)
     try {
-      const data = await apiRequest(`/api/draft?projectId=${encodeURIComponent(project.id)}`)
+      const data = await apiRequest(`/api/draft?projectId=${encodeURIComponent(project.id)}`, { signal })
+      if (signal.aborted) return
+      const assets = data.designAssets || {}
+      const desktop = isDesktopApp()
       let schema = data.schema
       let recovered = false
       try {
@@ -188,34 +234,49 @@ export default function BuilderPlatform() {
           recovered = window.confirm(`Unsaved local recovery from ${new Date(local.timestamp).toLocaleString()} was found. Restore it?`)
           if (recovered) schema = local.schema
         }
-      } catch { localStorage.removeItem(recoveryKey(project.id)) }
+      } catch { /* Project recovery is optional when local storage is unavailable. */ }
 
       setCurrentProject(project)
       editor.replace(schema)
       setRevision(data.revision)
       setSvg(data.svg)
-      setDesignAssets(data.designAssets || {})
+      setDesignAssets(desktop ? Object.fromEntries(Object.entries(assets).map(([id, asset]) => [id, { ...asset, src: null, loading: true }])) : assets)
       setSelectedIds([])
+      setMarkupTool(null)
+      setDashboardBreakpoint('desktop')
       setValidationConsoleOpen(false)
       setValidationConsoleSource(null)
+      setVersions([])
+      setAuditEvents([])
       setDirty(recovered)
       setMockValues(Object.fromEntries((schema.tags || []).map(tag => [tag.id, initialMockValue(tag)])))
       setNotice(recovered ? { type: 'info', text: 'Local recovery restored. Autosave will persist it.' } : null)
-      loadGovernance(project.id).catch(() => { })
+      if (desktop) {
+        for (const [id, asset] of Object.entries(assets)) {
+          resolveDesignAsset(asset).catch(() => ({ ...asset, src: null })).then(resolved => {
+            if (!signal.aborted) setDesignAssets(previous => previous[id]?.loading ? { ...previous, [id]: resolved } : previous)
+          })
+        }
+      }
+      loadGovernance(project.id, signal).catch(() => { })
     } catch (error) {
-      setNotice({ type: 'error', text: error.message, details: validationNoticeDetails(error.issues) })
+      if (!signal.aborted) setNotice({ type: 'error', text: error.message, details: validationNoticeDetails(error.issues) })
     } finally {
-      setBusy(false)
+      if (projectOpenRef.current === controller) setOpeningProject(null)
     }
   }
 
-  const loadGovernance = async projectId => {
-    const versionData = await apiRequest(`/api/versions?projectId=${encodeURIComponent(projectId)}`)
+  const loadGovernance = async (projectId, signal = projectOpenRef.current?.signal) => {
+    const canReadAudit = session.user?.capabilities?.includes('audit.read')
+    const [versionData, auditData] = await Promise.all([
+      apiRequest(`/api/versions?projectId=${encodeURIComponent(projectId)}`, { signal }),
+      canReadAudit
+        ? apiRequest(`/api/audit?projectId=${encodeURIComponent(projectId)}&limit=12`, { signal })
+        : Promise.resolve({ events: [] }),
+    ])
+    if (signal?.aborted) return
     setVersions(versionData.versions || [])
-    if (session.user?.capabilities?.includes('audit.read')) {
-      const auditData = await apiRequest(`/api/audit?projectId=${encodeURIComponent(projectId)}&limit=12`)
-      setAuditEvents(auditData.events || [])
-    } else setAuditEvents([])
+    setAuditEvents(auditData.events || [])
   }
 
   const changeDraft = useCallback((updater, { transient = false } = {}) => {
@@ -224,6 +285,10 @@ export default function BuilderPlatform() {
     setDirty(true)
     setValidationConsoleSource(null)
   }, [editor.commit, editor.mutate])
+  const finishComponentTransform = useCallback(() => {
+    editor.endTransaction()
+    setDirty(true)
+  }, [editor.endTransaction])
 
   const reviewValidation = useCallback((nextIssues = null, origin = 'Live draft validation') => {
     setValidationConsoleSource({ issues: nextIssues, origin })
@@ -248,64 +313,102 @@ export default function BuilderPlatform() {
 
   const selectComponent = useCallback((componentId, { additive = false } = {}) => {
     if (!componentId) return setSelectedIds([])
+    if (markupActive && !draftRef.current?.components.some(component => component.id === componentId && isMarkupLayer(component))) return
     setSelectedIds(previous => {
       if (!additive) return [componentId]
       return previous.includes(componentId) ? previous.filter(id => id !== componentId) : [...previous, componentId]
     })
-  }, [])
+  }, [markupActive])
+
+  const addMarkup = useCallback(({ name, properties, position }, { breakpoint, canvas }) => {
+    const schema = draftRef.current
+    if (!schema || !session.user?.capabilities?.includes('builder.write')) return
+    const base = schema.project.canvas
+    const component = createComponentInstance(MARKUP_TYPE, { id: makeId('cmp'), canvas: base, index: schema.components.length })
+    component.name = `${name || MARKUP_TOOLS[properties.tool]} ${schema.components.length + 1}`
+    component.properties = properties.tool === 'symbol' ? properties : { color: component.properties.color, strokeWidth: component.properties.strokeWidth, ...properties }
+    placeMarkupLayer(component, position, { breakpoint, canvas }, schema)
+    changeDraft(previous => ({ ...previous, components: [...previous.components, component] }))
+    setSelectedIds([component.id])
+  }, [changeDraft, session.user])
 
   const addComponent = useCallback(type => {
     if (!draftRef.current) return
     const schema = draftRef.current
-    const candidates = compatibleTags(type, schema.tags)
+    if (!componentAvailableForProject(type, projectTypeOf(schema))) return
+    if (winccProject && !WINCC_TEMPLATE_COMPONENT_TYPES.includes(type)) return
+    const candidates = winccProject ? [] : compatibleTags(type, schema.tags)
     const tag = ['control-button', 'tuning-slider', 'operation-shifter'].includes(type)
       ? candidates.find(item => ['write', 'read-write'].includes(item.access))
       : candidates[0]
     const component = createComponentInstance(type, { id: makeId('cmp'), canvas: schema.project.canvas, tagId: tag?.id || null, index: schema.components.length })
     changeDraft(previous => ({ ...previous, components: [...previous.components, component] }))
     setSelectedIds([component.id])
-  }, [changeDraft])
+  }, [changeDraft, winccProject])
 
-  const addDesignElement = useCallback((asset, dropPoint = null) => {
+  const addGrindstoneSymbol = useCallback(symbol => {
+    const canvas = draftRef.current?.project.canvas
+    if (!canvas) return
+    addMarkup(symbolPlacement(symbol, { x: canvas.width / 2, y: canvas.height / 2 }, canvas), { breakpoint: 'desktop', canvas })
+  }, [addMarkup])
+
+  const addDesignElement = useCallback((asset, dropPoint = null, markupBreakpoint = null) => {
     if (!draftRef.current || !asset?.id) return
     const schema = draftRef.current
+    const markupLayout = markupBreakpoint ? resolveResponsiveDashboard(schema, markupBreakpoint) : null
+    const canvas = markupLayout?.canvas || schema.project.canvas
     const component = createComponentInstance('design-image', { id: makeId('cmp'), canvas: schema.project.canvas, index: schema.components.length })
     const ratio = Number(asset.width) > 0 && Number(asset.height) > 0 ? asset.width / asset.height : 4 / 3
-    let width = Math.min(360, schema.project.canvas.width * .4)
+    let width = Math.min(360, canvas.width * .4)
     let height = width / ratio
-    if (height > schema.project.canvas.height * .4) {
-      height = schema.project.canvas.height * .4
+    if (height > canvas.height * .4) {
+      height = canvas.height * .4
       width = height * ratio
     }
-    width = Math.max(48, Math.min(width, schema.project.canvas.width))
-    height = Math.max(48, Math.min(height, schema.project.canvas.height))
-    const centerX = dropPoint?.x ?? schema.project.canvas.width / 2
-    const centerY = dropPoint?.y ?? schema.project.canvas.height / 2
+    width = Math.max(48, Math.min(width, canvas.width))
+    height = Math.max(48, Math.min(height, canvas.height))
+    const centerX = dropPoint?.x ?? canvas.width / 2
+    const centerY = dropPoint?.y ?? canvas.height / 2
     component.name = asset.name || component.name
-    component.position = {
+    const position = {
       ...component.position,
       width,
       height,
-      x: Math.max(0, Math.min(schema.project.canvas.width - width, centerX - width / 2)),
-      y: Math.max(0, Math.min(schema.project.canvas.height - height, centerY - height / 2)),
+      x: Math.max(0, Math.min(canvas.width - width, centerX - width / 2)),
+      y: Math.max(0, Math.min(canvas.height - height, centerY - height / 2)),
     }
     component.properties = { ...component.properties, assetId: asset.id, fileName: asset.name || 'Custom element' }
+    if (markupLayout) {
+      component.properties.markup = true
+      placeMarkupLayer(component, position, markupLayout, schema)
+    } else component.position = position
     setDesignAssets(previous => ({ ...previous, [asset.id]: asset }))
     changeDraft(previous => ({ ...previous, components: [...previous.components, component] }))
     setSelectedIds([component.id])
     setNotice({ type: 'success', text: `${asset.name || 'Custom element'} added to the canvas.` })
   }, [changeDraft])
 
-  const dropDesignElement = useCallback(async (file, point) => {
+  const dropDesignElement = useCallback(async (file, point, markupBreakpoint = null) => {
     if (!currentProject) return
+    const openedProject = projectOpenRef.current
     setNotice({ type: 'info', text: `Uploading ${file.name}…` })
     try {
       const asset = await uploadDesignElementFile(currentProject.id, file)
-      addDesignElement(asset, point)
+      if (openedProject?.signal.aborted) return
+      addDesignElement(asset, point, markupBreakpoint)
+      if (markupBreakpoint) setMarkupTool({ id: 'select' })
     } catch (error) {
+      if (openedProject?.signal.aborted) return
       setNotice({ type: 'error', text: error.message })
     }
   }, [addDesignElement, currentProject])
+
+  const insertMarkupExternal = async file => {
+    if (busy || markupSavingRef.current || !session.user?.capabilities?.includes('builder.write')) return
+    setBusy(true)
+    try { await dropDesignElement(file, null, dashboardBreakpoint) }
+    finally { setBusy(false) }
+  }
 
   const deleteSelected = useCallback(() => {
     if (selectedIds.length === 0) return
@@ -336,17 +439,27 @@ export default function BuilderPlatform() {
     clipboardRef.current = schema.components.filter(component => selected.has(component.id)).map(component => structuredClone(component))
   }, [selectedIds])
 
+  const cutSelected = useCallback(() => {
+    const schema = draftRef.current
+    if (!schema || selectedIds.length === 0) return
+    const selected = new Set(selectedIds)
+    clipboardRef.current = schema.components.filter(component => selected.has(component.id)).map(component => structuredClone(component))
+    changeDraft(previous => ({ ...previous, components: removeComponentsAndCleanPopups(previous.components, selected) }))
+    setSelectedIds([])
+  }, [changeDraft, selectedIds])
+
   const pasteComponents = useCallback(() => {
     const schema = draftRef.current
-    if (!schema || clipboardRef.current.length === 0) return
-    const copies = clipboardRef.current.map((component, index) => ({
+    const clipboard = markupActive ? clipboardRef.current.filter(isMarkupLayer) : clipboardRef.current
+    if (!schema || clipboard.length === 0) return
+    const copies = clipboard.map((component, index) => ({
       ...structuredClone(copySafeComponent(component)), id: makeId('cmp'), name: `${component.name} copy`,
       position: { ...component.position, x: component.position.x + 30 + index * 5, y: component.position.y + 30 + index * 5 },
       zIndex: schema.components.length + index + 1,
     }))
     changeDraft(previous => ({ ...previous, components: [...previous.components, ...copies] }))
     setSelectedIds(copies.map(component => component.id))
-  }, [changeDraft])
+  }, [changeDraft, markupActive])
 
   const reorderComponent = useCallback((componentId, direction) => {
     const schema = draftRef.current
@@ -386,48 +499,42 @@ export default function BuilderPlatform() {
     if (selectedIds.length === 0) return
     changeDraft(previous => ({
       ...previous,
-      components: moveSelection(previous.components, selectedIds, dx, dy, previous.project.canvas),
+      components: isIotDashboardProject(previous) && dashboardBreakpoint !== 'desktop'
+        ? moveResponsiveSelection(previous, selectedIds, dx, dy, dashboardBreakpoint)
+        : moveSelection(previous.components, selectedIds, dx, dy, previous.project.canvas),
     }))
-  }, [changeDraft, selectedIds])
+  }, [changeDraft, dashboardBreakpoint, selectedIds])
   const arrangeSelected = useCallback(action => {
     if (selectedIds.length < 2) return
-    changeDraft(previous => ({ ...previous, components: arrangeSelection(previous.components, selectedIds, action) }))
-  }, [changeDraft, selectedIds])
-
-  useEffect(() => {
-    if (!draft || preview) return
-    const onKey = event => {
-      const target = event.target
-      if (target instanceof HTMLElement && (target.matches('input, textarea, select') || target.isContentEditable)) return
-      const modifier = event.ctrlKey || event.metaKey
-      if (modifier && event.key.toLowerCase() === 'z') { event.preventDefault(); event.shiftKey ? redo() : undo() }
-      else if (modifier && event.key.toLowerCase() === 'y') { event.preventDefault(); redo() }
-      else if (modifier && event.key.toLowerCase() === 'c') { event.preventDefault(); copySelected() }
-      else if (modifier && event.key.toLowerCase() === 'v') { event.preventDefault(); pasteComponents() }
-      else if (modifier && event.key.toLowerCase() === 'd') { event.preventDefault(); duplicateSelected() }
-      else if (modifier && (event.key === '=' || event.key === '+')) { event.preventDefault(); setZoom(value => Math.min(2, value + .1)) }
-      else if (modifier && event.key === '-') { event.preventDefault(); setZoom(value => Math.max(.5, value - .1)) }
-      else if (modifier && event.key === '0') { event.preventDefault(); setZoom(1) }
-      else if (!modifier && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) {
-        event.preventDefault()
-        const step = event.shiftKey ? gridSize : 1
-        nudgeSelected(event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0, event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0)
-      }
-      else if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); deleteSelected() }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [draft, preview, undo, redo, copySelected, pasteComponents, duplicateSelected, deleteSelected, nudgeSelected, gridSize])
+    changeDraft(previous => ({
+      ...previous,
+      components: isIotDashboardProject(previous) && dashboardBreakpoint !== 'desktop'
+        ? arrangeResponsiveSelection(previous, selectedIds, action, dashboardBreakpoint)
+        : arrangeSelection(previous.components, selectedIds, action),
+    }))
+  }, [changeDraft, dashboardBreakpoint, selectedIds])
 
   useEffect(() => {
     if (!dirty || !draft || !currentProject) return
-    localStorage.setItem(recoveryKey(currentProject.id), JSON.stringify({ schema: draft, revision, timestamp: Date.now() }))
+    try { localStorage.setItem(recoveryKey(currentProject.id), JSON.stringify({ schema: draft, revision, timestamp: Date.now() })) } catch { /* Local recovery may be unavailable. */ }
   }, [dirty, draft, revision, currentProject])
 
-  const saveDraft = useCallback(async ({ silent = false } = {}) => {
+  const saveDraft = useCallback(async ({ silent = false, waitForPending = false } = {}) => {
+    const openedProject = projectOpenRef.current
+    if (!currentProject) return null
+    let expectedRevision = revision
+    const pendingSave = savingRef.current
+    if (pendingSave) {
+      if (!waitForPending) return null
+      const savedRevision = await pendingSave.promise
+      if (pendingSave.projectId === currentProject.id) {
+        if (savedRevision == null) return null
+        expectedRevision = savedRevision
+      }
+    }
     const snapshot = draftRef.current
-    if (!snapshot || !currentProject || savingRef.current) return null
-    const localIssues = validateProjectSchema(snapshot)
+    if (!snapshot || openedProject?.signal.aborted) return null
+    const localIssues = validateProjectSchema(snapshot, { templateOnly: winccProject })
     if (hasBlockingIssues(localIssues)) {
       if (!silent) {
         setNotice({ type: 'error', text: 'Draft validation failed. Review the Validation Console.', details: validationNoticeDetails(localIssues) })
@@ -435,39 +542,108 @@ export default function BuilderPlatform() {
       }
       return null
     }
-    savingRef.current = true
     if (!silent) { setBusy(true); setNotice({ type: 'info', text: 'Saving draft…' }) }
-    try {
-      const data = await apiRequest(`/api/draft?projectId=${encodeURIComponent(currentProject.id)}`, {
-        method: 'PUT',
-        body: JSON.stringify({ projectId: currentProject.id, schema: snapshot, revision }),
-      })
-      setRevision(data.revision)
-      setLastSavedAt(new Date())
-      if (draftRef.current === snapshot) {
-        setDirty(false)
-        localStorage.removeItem(recoveryKey(currentProject.id))
+    const save = async () => {
+      try {
+        const data = await apiRequest(`/api/draft?projectId=${encodeURIComponent(currentProject.id)}`, {
+          method: 'PUT',
+          body: JSON.stringify({ projectId: currentProject.id, schema: snapshot, revision: expectedRevision }),
+        })
+        if (openedProject?.signal.aborted) return null
+        setRevision(data.revision)
+        setLastSavedAt(new Date())
+        if (draftRef.current === snapshot) {
+          setDirty(false)
+          try { localStorage.removeItem(recoveryKey(currentProject.id)) } catch { /* Local recovery may be unavailable. */ }
+        }
+        if (!silent) setNotice({ type: 'success', text: `Draft saved · revision ${data.revision}` })
+        return data.revision
+      } catch (error) {
+        if (openedProject?.signal.aborted) return null
+        setNotice({ type: 'error', text: error.message, details: validationNoticeDetails(error.issues) })
+        if (error.issues?.length && !silent) reviewValidation(error.issues, 'Draft save · server validation')
+        return null
       }
-      if (!silent) setNotice({ type: 'success', text: `Draft saved · revision ${data.revision}` })
-      return data.revision
-    } catch (error) {
-      setNotice({ type: 'error', text: error.message, details: validationNoticeDetails(error.issues) })
-      if (error.issues?.length && !silent) reviewValidation(error.issues, 'Draft save · server validation')
-      return null
+    }
+    const pending = save()
+    savingRef.current = { promise: pending, projectId: currentProject.id }
+    try {
+      return await pending
     } finally {
-      savingRef.current = false
+      if (savingRef.current?.promise === pending) savingRef.current = null
       if (!silent) setBusy(false)
     }
-  }, [currentProject, revision, reviewValidation])
+  }, [currentProject, revision, reviewValidation, winccProject])
 
   useEffect(() => {
-    if (!autoSave || !dirty || !draft || !currentProject || busy) return
+    if (!autoSave || !dirty || !draft || !currentProject || busy || markupActive) return
     const timer = window.setTimeout(() => saveDraft({ silent: true }), 1800)
     return () => window.clearTimeout(timer)
-  }, [autoSave, dirty, draft, currentProject, busy, saveDraft])
+  }, [autoSave, dirty, draft, currentProject, busy, markupActive, saveDraft])
+
+  const openMarkup = () => {
+    setSelectedIds([])
+    setMarkupZoom(1)
+    setMarkupTool({ id: 'select' })
+  }
+  const backToBuilder = useCallback(() => {
+    setMarkupSaveDialog(false)
+    setMarkupTool(null)
+  }, [])
+  const saveMarkup = useCallback(async ({ back = false } = {}) => {
+    if (busy || markupSavingRef.current || markupSaveDialog) return
+    markupSavingRef.current = true
+    setMarkupSaving(true)
+    try {
+      const savedRevision = await saveDraft({ waitForPending: true })
+      if (savedRevision != null) {
+        setNotice(null)
+        if (back) backToBuilder()
+        else setMarkupSaveDialog(true)
+      }
+    } finally {
+      markupSavingRef.current = false
+      setMarkupSaving(false)
+    }
+  }, [backToBuilder, busy, markupSaveDialog, saveDraft])
+
+  useEffect(() => {
+    if (!draft || preview) return
+    const zoomCanvas = markupActive ? setMarkupZoom : setZoom
+    const onKey = event => {
+      const modifier = event.ctrlKey || event.metaKey
+      const key = event.key.toLowerCase()
+      if (markupActive && modifier && key === 's') {
+        event.preventDefault()
+        if (!event.repeat) void saveMarkup()
+        return
+      }
+      if (markupActive && (markupSaveDialog || markupSavingRef.current)) return
+      const target = event.target
+      if (target instanceof HTMLElement && (target.matches('input, textarea, select') || target.isContentEditable)) return
+      if (key === 'escape' && markupActive) setMarkupTool({ id: 'select' })
+      else if (modifier && key === 'z') { event.preventDefault(); event.shiftKey ? redo() : undo() }
+      else if (modifier && key === 'y') { event.preventDefault(); redo() }
+      else if (modifier && key === 'x') { event.preventDefault(); cutSelected() }
+      else if (modifier && key === 'c') { event.preventDefault(); copySelected() }
+      else if (modifier && key === 'v') { event.preventDefault(); pasteComponents() }
+      else if (modifier && key === 'd') { event.preventDefault(); duplicateSelected() }
+      else if (modifier && (key === '=' || key === '+')) { event.preventDefault(); zoomCanvas(value => Math.min(2, value + .1)) }
+      else if (modifier && key === '-') { event.preventDefault(); zoomCanvas(value => Math.max(.5, value - .1)) }
+      else if (modifier && key === '0') { event.preventDefault(); zoomCanvas(1) }
+      else if (!modifier && ['arrowleft', 'arrowright', 'arrowup', 'arrowdown'].includes(key)) {
+        event.preventDefault()
+        const step = event.shiftKey ? gridSize : 1
+        nudgeSelected(key === 'arrowleft' ? -step : key === 'arrowright' ? step : 0, key === 'arrowup' ? -step : key === 'arrowdown' ? step : 0)
+      }
+      else if (key === 'delete' || key === 'backspace') { event.preventDefault(); deleteSelected() }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [draft, preview, markupActive, markupSaveDialog, saveMarkup, undo, redo, cutSelected, copySelected, pasteComponents, duplicateSelected, deleteSelected, nudgeSelected, gridSize])
 
   const publish = async () => {
-    const preflightIssues = validateProjectSchema(draftRef.current, { requireAsset: true })
+    const preflightIssues = validateProjectSchema(draftRef.current, { requireAsset: projectRequiresSchematicAsset(draftRef.current) })
     if (hasBlockingIssues(preflightIssues)) {
       setNotice({ type: 'error', text: 'Publish validation failed. Review the Validation Console.', details: validationNoticeDetails(preflightIssues) })
       reviewValidation(null, 'Publish preflight')
@@ -525,11 +701,53 @@ export default function BuilderPlatform() {
     }))
   }, [changeDraft])
 
+  const changeRuntimeEngine = useCallback(async nextEngine => {
+    if (!currentProject || !RUNTIME_ENGINES.includes(nextEngine) || nextEngine === runtimeEngine(currentProject)) return
+    setBusy(true)
+    setNotice({ type: 'info', text: `Saving ${runtimeEngineMetadata(nextEngine).label} preference…` })
+    try {
+      const data = await apiRequest(`/api/projects?id=${encodeURIComponent(currentProject.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ projectId: currentProject.id, action: 'set-runtime-engine', runtimeEnginePreference: nextEngine }),
+      })
+      setCurrentProject(data.project)
+      setProjects(previous => previous.map(project => project.id === data.project.id ? data.project : project))
+      setNotice({
+        type: 'success',
+        text: nextEngine === 'isaac'
+          ? 'Isaac preference saved. Standard remains active unless the service explicitly enables the experimental canary.'
+          : 'Standard runtime selected for new sessions.',
+      })
+    } catch (error) {
+      setNotice({ type: 'error', text: error.message })
+    } finally {
+      setBusy(false)
+    }
+  }, [currentProject])
+
   const handleLogout = async () => {
+    closeProject()
     await logout().catch(() => { })
-    setSession({ loading: false, user: null }); setCurrentProject(null); editor.replace(null)
+    setSession({ loading: false, user: null })
   }
-  const closeProject = () => { setCurrentProject(null); editor.replace(null); setSelectedIds([]); setDesignAssets({}); setValidationConsoleOpen(false); setValidationConsoleSource(null) }
+  const closeProject = () => { projectOpenRef.current?.abort(); setOpeningProject(null); setMarkupTool(null); setPreview(false); setCurrentProject(null); editor.replace(null); setSelectedIds([]); setDesignAssets({}); setFlowImportOpen(false); setValidationConsoleOpen(false); setValidationConsoleSource(null); setDashboardBreakpoint('desktop') }
+
+  const resetDashboardBreakpoint = useCallback(() => {
+    if (!['tablet', 'mobile'].includes(dashboardBreakpoint)) return
+    changeDraft(previous => ({
+      ...previous,
+      components: previous.components.map(component => {
+        if (markupActive && !isMarkupLayer(component)) return component
+        if (!component.responsivePositions?.[dashboardBreakpoint]) return component
+        const responsivePositions = { ...component.responsivePositions }
+        delete responsivePositions[dashboardBreakpoint]
+        const next = { ...component }
+        if (Object.keys(responsivePositions).length) next.responsivePositions = responsivePositions
+        else delete next.responsivePositions
+        return next
+      }),
+    }))
+  }, [changeDraft, dashboardBreakpoint, markupActive])
   const handleWorkspaceSwitch = async workspaceId => {
     if (!workspaceId || workspaceId === session.user?.workspaceId) return
     setBusy(true)
@@ -567,76 +785,162 @@ export default function BuilderPlatform() {
     }
   }
 
+  const exportHostedRuntime = async target => {
+    setBusy(true)
+    setNotice({ type: 'info', text: `Preparing published ${activeProjectTypeMetadata.label} runtime package…` })
+    try {
+      const result = await apiRequest('/api/runtime-export', { method: 'POST', body: JSON.stringify({ projectId: currentProject.id, target }) })
+      downloadExportArchive(result)
+      setNotice({ type: 'success', text: `Published v${result.sourceVersion} exported for ${target === 'node' ? 'Node / Railway' : 'Vercel'} · ${result.policy === 'simulation' ? 'internal simulation' : 'monitor-only trial'}. Configure the target using DEPLOY.md in the ZIP.` })
+    } catch (error) {
+      setNotice({ type: 'error', text: error.message, details: validationNoticeDetails(error.issues || []) })
+    } finally { setBusy(false) }
+  }
+
+  const exportWincc = async () => {
+    const signal = projectOpenRef.current?.signal
+    setBusy(true)
+    setNotice({ type: 'info', text: 'Preparing WinCC Unified V21 package…' })
+    try {
+      const savedRevision = dirty || savingRef.current ? await saveDraft({ silent: true, waitForPending: true }) : revision
+      if (signal?.aborted) return
+      if (savedRevision == null) throw new Error('Save a valid draft before exporting to WinCC.')
+      const result = await apiRequest('/api/runtime-export', {
+        method: 'POST',
+        body: JSON.stringify({ projectId: currentProject.id, target: WINCC_OUTPUT_TARGET, revision: savedRevision }),
+        signal,
+      })
+      if (signal?.aborted) return
+      downloadExportArchive(result)
+      const details = result.warnings.length ? ' Review the export notes in manifest.json.' : ''
+      setNotice({ type: 'success', text: `WinCC template exported · ${result.componentCount} items. Open README.md to generate the TIA Portal project.${details}` })
+    } catch (error) {
+      if (!signal?.aborted) setNotice({ type: 'error', text: error.message, details: validationNoticeDetails(error.issues || []) })
+    } finally { setBusy(false) }
+  }
+
   if (session.loading) return <CenteredState title="Loading session…" />
   if (!session.user) return <AuthScreen onAuthenticated={loadSession} />
-  if (!currentProject || !draft) return <ProjectHome user={session.user} projects={projects} busy={busy} onOpen={openProject} onCreated={async project => { await loadProjects(); await openProject(project) }} onProjectsChanged={loadProjects} onNotice={setNotice} onSwitchWorkspace={handleWorkspaceSwitch} onLogout={handleLogout} notice={notice} />
+  if (!currentProject || !draft) return <ProjectHome user={session.user} projects={projects} busy={busy || Boolean(openingProject)} openingProject={openingProject} onOpen={openProject} onCreated={project => { setProjects(previous => [project, ...previous.filter(item => item.id !== project.id)]); return openProject(project) }} onProjectsChanged={loadProjects} onProjectUpdated={updatedProject => setProjects(previous => previous.map(project => project.id === updatedProject.id ? updatedProject : project))} onNotice={setNotice} onSwitchWorkspace={handleWorkspaceSwitch} onLogout={handleLogout} notice={notice} />
 
   if (preview) {
     const previewProfile = runtimeProfileMetadata(draft)
-    return <div className="sb-preview-page"><div className="sb-runtime-toolbar"><div><strong>Draft Preview</strong><span>{previewProfile.label} · revision {revision}</span></div><div className="sb-runtime-toolbar-actions"><BoardToneToggle value={boardTone} onChange={setBoardTone} /><ThemeToneToggle /><button type="button" onClick={() => setPreview(false)}>Back to builder</button></div></div><RuntimeProfileBanner profile={previewProfile} preview /><RuntimeCanvas schema={draft} svg={svg} designAssets={designAssets} values={mockValues} boardTone={boardTone} actorRole={session.user.role} onCommand={previewProfile.commandEnabled ? runMockCommand : undefined} commandConnectionAvailable={previewProfile.commandEnabled} /><MockControls tags={draft.tags} values={mockValues} onChange={setMockValues} message={commandMessage} /></div>
+    return <div className={`sb-preview-page mode-${activeProjectType}`}><div className="sb-runtime-toolbar"><div><strong>{activeProjectTypeMetadata.builderLabel} Preview</strong><span>{winccProject ? 'WinCC template' : previewProfile.label} · revision {revision}</span></div><div className="sb-runtime-toolbar-actions"><BoardToneToggle value={boardTone} onChange={setBoardTone} /><button type="button" onClick={() => setPreview(false)}>Back to builder</button></div></div>{!winccProject && <RuntimeProfileBanner profile={previewProfile} preview />}<RuntimeCanvas schema={canvasSchema} templateOnly={winccProject} svg={svg} designAssets={designAssets} values={mockValues} boardTone={boardTone} actorRole={session.user.role} onCommand={!winccProject && previewProfile.commandEnabled ? runMockCommand : undefined} commandConnectionAvailable={!winccProject && previewProfile.commandEnabled} />{!winccProject && <MockControls tags={draft.tags} values={mockValues} onChange={setMockValues} message={commandMessage} />}</div>
   }
 
   const selected = selectedIds.length === 1 ? draft.components.find(component => component.id === selectedIds[0]) : null
+  const currentDashboardLayout = iotDashboard ? resolveResponsiveDashboard(draft, dashboardBreakpoint) : null
+  const inspectedSelected = selected && currentDashboardLayout && dashboardBreakpoint !== 'desktop'
+    ? { ...selected, position: currentDashboardLayout.positions.get(selected.id) || selected.position }
+    : selected
+  const updateInspectedSelected = patch => {
+    if (!selected) return
+    if (iotDashboard && dashboardBreakpoint !== 'desktop' && patch.position) {
+      const { position, ...rest } = patch
+      updateComponent(selected.id, { ...rest, ...responsivePositionPatch(selected, dashboardBreakpoint, position) })
+      return
+    }
+    updateComponent(selected.id, patch)
+  }
   const profile = runtimeProfileMetadata(draft)
+  const engine = runtimeEngineMetadata(currentProject)
+  const markupLayers = markupActive ? draft.components.filter(isMarkupLayer) : []
+  const selectionProperties = inspectedSelected
+    ? <ComponentInspector component={inspectedSelected} components={draft.components} tags={canvasSchema.tags} directThingsBoard={iotDashboard} templateOnly={winccProject} onChange={updateInspectedSelected} onDelete={deleteSelected} onDuplicate={duplicateSelected} onAddPopupChild={addExistingPopupControl} onCreatePopupChild={createPopupControl} onDetachPopupChild={detachPopupControl} onReorderPopupChild={movePopupControl} onSelectChild={childId => selectComponent(childId)} />
+    : selectedIds.length > 1
+      ? <MultiSelectionActions count={selectedIds.length} onArrange={arrangeSelected} onDuplicate={duplicateSelected} onDelete={deleteSelected} onLock={() => batchPatch(selectedIds, { locked: true }, changeDraft)} onHide={() => batchPatch(selectedIds, { visible: false }, changeDraft)} />
+      : <p className="sb-muted">{markupActive ? 'Select a markup layer to edit its properties.' : 'Select a component on the canvas or Layers panel.'}</p>
 
   return (
-    <div className="sb-app">
+    <div className={`sb-app ${markupActive ? 'is-markup-workspace' : `mode-${activeProjectType}`}`}>
       <header className="sb-topbar">
-        <button type="button" className="sb-brand" onClick={closeProject}>SCAMATIC<span>.BUILDER</span></button>
-        <nav className="sb-header-menus" aria-label="Builder menus">
+        <nav className="sb-header-menus" aria-label="Builder navigation and menus">
+          {!markupActive && <button type="button" className="sb-brand" onClick={closeProject} aria-label="Kembali ke daftar proyek" title="Kembali ke daftar proyek">
+            <img className="sb-brand-logo" src="/logo-sb.png" alt="" aria-hidden="true" />
+            <span className="sb-brand-name">SB</span>
+          </button>}
           <FileMenu
+            key={markupActive ? 'markup-file' : 'builder-file'}
+            markupWorkspace={markupActive}
             autoSave={autoSave}
             onAutoSaveChange={setAutoSave}
             dirty={dirty}
             revision={revision}
             lastSavedAt={lastSavedAt}
-            busy={busy}
-            onSave={() => saveDraft()}
+            busy={busy || markupSaving}
+            onSave={markupActive ? saveMarkup : () => saveDraft()}
+            onSaveBack={markupActive ? () => saveMarkup({ back: true }) : undefined}
             onPreview={() => setPreview(true)}
             canImportFlow={session.user.capabilities?.includes('source.configure')}
             onImportFlow={() => setFlowImportOpen(true)}
             exportFlowDisabled={!draft.tags.length && !draft.components.length}
             onExportFlow={exportNodeRedFlow}
-            canPublish={session.user.capabilities?.includes('project.publish')}
+            canPublish={!winccProject && session.user.capabilities?.includes('project.publish')}
             onPublish={publish}
-            runtimeHref={currentProject.activeVersionId ? `/runtime/${currentProject.slug}` : null}
+            runtimeHref={!winccProject && currentProject.activeVersionId ? `/runtime/${currentProject.slug}` : null}
+            nodeRedFlowEnabled={!iotDashboard && !winccProject}
+            canExportRuntime={!winccProject && session.user.capabilities?.includes('project.manage')}
+            exportRuntimeDisabled={!currentProject.activeVersionId}
+            onExportRuntime={exportHostedRuntime}
+            onExportWincc={winccProject && session.user.capabilities?.includes('project.manage') ? exportWincc : undefined}
           />
           <EditMenu
-            canUndo={editor.canUndo}
-            canRedo={editor.canRedo}
-            canDuplicate={selectedIds.length > 0}
+            canUndo={editor.canUndo && !markupSaving}
+            canRedo={editor.canRedo && !markupSaving}
+            canCut={selectedIds.length > 0 && !markupSaving}
+            canDuplicate={selectedIds.length > 0 && !markupSaving}
             onUndo={undo}
             onRedo={redo}
+            onCut={cutSelected}
             onDuplicate={duplicateSelected}
+            canMarkup={!busy && session.user.capabilities?.includes('builder.write')}
+            onOpenMarkup={!markupActive ? openMarkup : null}
           />
+          {markupActive && <InsertMenu disabled={busy || markupSaving} onInsert={insertMarkupExternal} />}
           <ViewMenu
-            canvas={draft.project.canvas}
-            themeTone={themeTone}
-            onThemeToneChange={setThemeTone}
+            key={markupActive ? 'markup-view' : 'builder-view'}
+            canvas={markupActive && currentDashboardLayout ? currentDashboardLayout.canvas : draft.project.canvas}
             boardTone={boardTone}
             onBoardToneChange={setBoardTone}
             gridSize={gridSize}
             onGridSizeChange={setGridSize}
-            showGrid={showGrid}
-            onShowGridChange={setShowGrid}
+            showGrid={markupActive ? markupShowGrid : showGrid}
+            onShowGridChange={markupActive ? setMarkupShowGrid : setShowGrid}
             snapToGrid={snapToGrid}
             onSnapToGridChange={setSnapToGrid}
             smartGuides={smartGuides}
             onSmartGuidesChange={setSmartGuides}
             showRulers={showRulers}
             onShowRulersChange={setShowRulers}
-            zoom={zoom}
-            onZoomChange={setZoom}
+            zoom={markupActive ? markupZoom : zoom}
+            onZoomChange={markupActive ? setMarkupZoom : setZoom}
+            preference={markupActive && iotDashboard ? { schema: draft, value: dashboardBreakpoint, onChange: setDashboardBreakpoint, onReset: resetDashboardBreakpoint, layers: markupLayers, disabled: busy || markupSaving } : null}
           />
         </nav>
-        <div className="sb-project-title"><strong>{currentProject.name}</strong><span>/{currentProject.slug}</span></div>
+        {markupActive
+          ? <h1 className="sb-markup-document-title"><MarkupIcon /><span>Markup</span><span className="sb-markup-document-name">{currentProject.name}</span></h1>
+          : <div className="sb-project-title"><strong>{currentProject.name}</strong><span>/{currentProject.slug}</span><i className="sb-project-mode-chip">{winccProject ? 'WinCC Unified' : activeProjectTypeMetadata.label}</i></div>}
       </header>
       {notice && <div className={`sb-builder-notice ${notice.type} ${notice.details?.length ? 'has-details' : ''}`} role="status" aria-live={notice.type === 'error' ? 'assertive' : 'polite'}>
         <span>{notice.text}</span>
         {notice.details?.length > 0 && <ul>{notice.details.map((detail, index) => <li className={detail.severity} key={`${detail.path}-${detail.message}-${index}`}><b>{detail.severity === 'warning' ? 'Warning' : 'Error'}</b><span>{detail.message}</span>{detail.path && <code>{detail.path}</code>}</li>)}</ul>}
       </div>}
 
-      <div
+      {markupActive ? <MarkupWorkspace
+        tool={markupTool}
+        onTool={setMarkupTool}
+        onBack={backToBuilder}
+        onContinue={() => setMarkupSaveDialog(false)}
+        zoom={markupZoom}
+        dirty={dirty}
+        saving={markupSaving}
+        saveDialog={markupSaveDialog}
+        dimensions={currentDashboardLayout?.canvas || draft.project.canvas}
+        canvas={<RuntimeCanvas schema={canvasSchema} templateOnly={winccProject} svg={svg} designAssets={designAssets} values={mockValues} selectedIds={selectedIds} editable markupWorkspace boardTone={boardTone} zoom={markupZoom} gridSize={gridSize} snapToGrid={snapToGrid} showGrid={markupShowGrid} showRulers={showRulers} smartGuides={smartGuides} responsiveBreakpoint={dashboardBreakpoint} onSelect={selectComponent} onChange={updateComponent} onTransformStart={editor.beginTransaction} onTransformEnd={finishComponentTransform} markupTool={markupTool.id !== 'select' ? markupTool : null} onMarkupCommit={addMarkup} />}
+        properties={selectionProperties}
+        layers={<LayersPanel components={markupLayers} selectedIds={selectedIds} onSelect={selectComponent} onPatch={updateComponent} onReorder={reorderComponent} />}
+        layerCount={markupLayers.length}
+      /> : <div
         className="sb-builder-grid"
         style={{
           '--sb-left-sidebar-width': `${sidebarWidths.left}px`,
@@ -644,17 +948,20 @@ export default function BuilderPlatform() {
         }}
       >
         <aside className="sb-sidebar left">
-          <Panel title="Components" description={`${componentTypeCount} component types · Controls and indicators`} collapsible expandable defaultOpen={false} storageKey={`scamatic.panel.components.${currentProject.id}`}><ComponentLibrary onAdd={addComponent} /></Panel>
-          <Panel title="Schematic Assets" description={`${Object.keys(designAssets).length} custom images · PNG, JPG, or SVG`}>
+          <Panel title="Components" description={winccProject ? 'WinCC widgets and industrial symbols' : `${componentTypeCount} component types · Controls and indicators`} collapsible expandable defaultOpen={false} storageKey={`scamatic.panel.components.${currentProject.id}`}>
+            <ComponentLibrary projectType={activeProjectType} componentTypes={winccProject ? WINCC_TEMPLATE_COMPONENT_TYPES : undefined} onAdd={addComponent} onAddSymbol={winccProject ? addGrindstoneSymbol : undefined} />
+          </Panel>
+          <Panel title={iotDashboard ? 'Dashboard Assets' : 'Schematic Assets'} description={`${Object.keys(designAssets).length} custom images · PNG, JPG, or SVG`}>
             <div className="sb-schematic-assets">
-              <span className="sb-asset-section-label">Base schematic</span>
-              <SvgUploader projectId={currentProject.id} beforeUpload={() => dirty ? saveDraft() : revision} onUploaded={({ svg: nextSvg, assetId, revision: nextRevision }) => { setSvg(nextSvg); setRevision(nextRevision); editor.mutate(previous => ({ ...previous, project: { ...previous.project, svgAssetId: assetId } })); setDirty(false); setNotice({ type: 'success', text: 'SVG sanitized and stored.' }) }} onError={text => setNotice({ type: 'error', text })} />
+              {!iotDashboard && <><span className="sb-asset-section-label">Base schematic</span>
+                <SvgUploader projectId={currentProject.id} beforeUpload={() => dirty ? saveDraft() : revision} onUploaded={({ svg: nextSvg, assetId, revision: nextRevision }) => { setSvg(nextSvg); setRevision(nextRevision); editor.mutate(previous => ({ ...previous, project: { ...previous.project, svgAssetId: assetId } })); setDirty(false); setNotice({ type: 'success', text: 'SVG sanitized and stored.' }) }} onError={text => setNotice({ type: 'error', text })} /></>}
               <span className="sb-asset-section-label">Design elements</span>
               <DesignElementUploader projectId={currentProject.id} onUploaded={addDesignElement} onError={text => setNotice({ type: 'error', text })} />
-              <small>Upload here or drop a file directly onto the board. Each image becomes a movable, resizable layer.</small>
+              <small>{iotDashboard ? 'Optional dashboard media can be uploaded or dropped directly onto the board. No base schematic is required.' : 'Upload here or drop a file directly onto the board. Each image becomes a movable, resizable layer.'}</small>
             </div>
           </Panel>
-          <Panel title="Data sources" description={`${draft.dataSources.length} sources · Connectors and configuration`} collapsible defaultOpen={false} storageKey={`scamatic.panel.sources.${currentProject.id}`}><ConnectorManager projectId={currentProject.id} schema={draft} onSchemaChange={changeDraft} canConfigure={session.user.capabilities?.includes('source.configure')} canRotateSecret={session.user.capabilities?.includes('secret.rotate')} draftDirty={dirty} onNotice={setNotice} /></Panel>
+          {!winccProject && <>
+          <Panel title={iotDashboard ? 'ThingsBoard data' : 'Data sources'} description={iotDashboard ? `${draft.dataSources.length} sources · Direct runtime connection` : `${draft.dataSources.length} sources · Connectors and configuration`} collapsible defaultOpen={false} storageKey={`scamatic.panel.sources.${currentProject.id}`}><ConnectorManager projectId={currentProject.id} schema={draft} onSchemaChange={changeDraft} canConfigure={session.user.capabilities?.includes('source.configure')} canRotateSecret={session.user.capabilities?.includes('secret.rotate')} draftDirty={dirty} directThingsBoard={iotDashboard} onNotice={setNotice} /></Panel>
           {session.user.capabilities?.includes('chart-storage.manage') && <Panel title="Chart storage" description="Isolated MongoDB · Encrypted workspace configuration" collapsible defaultOpen={false} storageKey={`scamatic.panel.chart-storage.${session.user.workspaceId}`}><ChartStorageManager onNotice={setNotice} /></Panel>}
           <Panel title="Tags & simulation" description={`${draft.tags.length} tags · ${profile.label} · Bindings and simulation`} collapsible defaultOpen={false} storageKey={`scamatic.panel.tags.${currentProject.id}`}>
             <div className="sb-tags-simulation-layout">
@@ -662,6 +969,7 @@ export default function BuilderPlatform() {
               <TagManager schema={draft} values={mockValues} onSchemaChange={changeDraft} onValuesChange={setMockValues} />
             </div>
           </Panel>
+          </>}
           <Panel title="Layers" description={`${draft.components.length} layers · Visibility, locking, and stacking order`} collapsible defaultOpen={false} storageKey={`scamatic.panel.layers.${currentProject.id}`}><LayersPanel components={draft.components} selectedIds={selectedIds} onSelect={selectComponent} onPatch={updateComponent} onReorder={reorderComponent} /></Panel>
           <Panel title={`Validation · ${issues.length}`}><ValidationPanel issues={issues} onReview={() => reviewValidation(null, 'Live draft validation')} /></Panel>
         </aside>
@@ -679,17 +987,21 @@ export default function BuilderPlatform() {
         />
 
         <main className="sb-workspace">
-          <RuntimeCanvas schema={draft} svg={svg} designAssets={designAssets} values={mockValues} selectedIds={selectedIds} editable boardTone={boardTone} zoom={zoom} gridSize={gridSize} snapToGrid={snapToGrid} showGrid={showGrid} showRulers={showRulers} smartGuides={smartGuides} onSelect={selectComponent} onChange={updateComponent} onTransformStart={editor.beginTransaction} onTransformEnd={() => { editor.endTransaction(); setDirty(true) }} onDesignFileDrop={dropDesignElement} />
+          {iotDashboard && <DashboardBreakpointToolbar value={dashboardBreakpoint} schema={draft} onChange={setDashboardBreakpoint} onReset={resetDashboardBreakpoint} />}
+          <RuntimeCanvas schema={canvasSchema} templateOnly={winccProject} svg={svg} designAssets={designAssets} values={mockValues} selectedIds={selectedIds} editable boardTone={boardTone} zoom={zoom} gridSize={gridSize} snapToGrid={snapToGrid} showGrid={showGrid} showRulers={showRulers} smartGuides={smartGuides} responsiveBreakpoint={iotDashboard ? dashboardBreakpoint : 'auto'} onSelect={selectComponent} onChange={updateComponent} onTransformStart={editor.beginTransaction} onTransformEnd={finishComponentTransform} onDesignFileDrop={!iotDashboard || dashboardBreakpoint === 'desktop' ? dropDesignElement : undefined} />
         </main>
 
         <aside className="sb-sidebar right">
           <Panel title={selectedIds.length > 1 ? `${selectedIds.length} components selected` : 'Properties'}>
-            {selected ? <ComponentInspector component={selected} components={draft.components} tags={draft.tags} onChange={patch => updateComponent(selected.id, patch)} onDelete={deleteSelected} onDuplicate={duplicateSelected} onAddPopupChild={addExistingPopupControl} onCreatePopupChild={createPopupControl} onDetachPopupChild={detachPopupControl} onReorderPopupChild={movePopupControl} onSelectChild={childId => selectComponent(childId)} /> : selectedIds.length > 1 ? <MultiSelectionActions count={selectedIds.length} onArrange={arrangeSelected} onDuplicate={duplicateSelected} onDelete={deleteSelected} onLock={() => batchPatch(selectedIds, { locked: true }, changeDraft)} onHide={() => batchPatch(selectedIds, { visible: false }, changeDraft)} /> : <p className="sb-muted">Select a component on the canvas or Layers panel.</p>}
+            {selectionProperties}
           </Panel>
-          <Panel title="Project schema"><dl className="sb-metadata"><div><dt>Version</dt><dd>{draft.schemaVersion}</dd></div><div><dt>Profile</dt><dd>{profile.label}</dd></div><div><dt>Components</dt><dd>{draft.components.length}</dd></div><div><dt>Tags</dt><dd>{draft.tags.length}</dd></div><div><dt>Asset</dt><dd>{draft.project.svgAssetId ? 'Sanitized' : 'Missing'}</dd></div><div><dt>History</dt><dd>{editor.canUndo ? 'Available' : 'Clean'}</dd></div></dl></Panel>
-          <Panel title="Published history" titleInfo="Published history is immutable. Restoring creates the next numbered snapshot and preserves its source." description={`${versions.length} snapshots · Publish and restore history`} collapsible defaultOpen={false} storageKey={`scamatic.panel.versions.${currentProject.id}`}><VersionList versions={versions} activeVersionId={currentProject.activeVersionId} canRestore={session.user.capabilities?.includes('project.publish')} busy={busy} onRestore={restoreVersion} /></Panel>
+          <Panel title="Project schema"><dl className="sb-metadata"><div><dt>Version</dt><dd>{draft.schemaVersion}</dd></div><div><dt>Builder</dt><dd>{activeProjectTypeMetadata.label}</dd></div>{winccProject ? <div><dt>Target</dt><dd>WinCC Unified V21</dd></div> : <><div><dt>Profile</dt><dd>{profile.label}</dd></div><div><dt>Engine</dt><dd>{engine.label}</dd></div></>}<div><dt>Components</dt><dd>{draft.components.length}</dd></div>{!winccProject && <div><dt>Tags</dt><dd>{draft.tags.length}</dd></div>}<div><dt>Asset</dt><dd>{draft.project.svgAssetId ? 'Sanitized' : iotDashboard || winccProject ? 'Optional' : 'Missing'}</dd></div><div><dt>History</dt><dd>{editor.canUndo ? 'Available' : 'Clean'}</dd></div></dl></Panel>
+          {!winccProject && <><Panel title="Runtime engine" description={`${engine.label} · Operational preference`} collapsible defaultOpen={false} storageKey={`scamatic.panel.runtime-engine.${currentProject.id}`}>
+            <RuntimeEngineSelector value={engine.id} onChange={changeRuntimeEngine} disabled={busy || !session.user.capabilities?.includes('project.manage')} />
+          </Panel>
+          <Panel title="Published history" titleInfo={<><InfoPopoverIntro>Published snapshots are immutable and remain available as a durable project history.</InfoPopoverIntro><InfoPopoverSection title="RESTORE">Restoring creates the next numbered snapshot and preserves the selected source version unchanged.</InfoPopoverSection><InfoPopoverSection title="ACTIVE VERSION">The active snapshot is the version used by published operational runtimes.</InfoPopoverSection></>} description={`${versions.length} snapshots · Publish and restore history`} collapsible defaultOpen={false} storageKey={`scamatic.panel.versions.${currentProject.id}`}><VersionList versions={versions} activeVersionId={currentProject.activeVersionId} canRestore={session.user.capabilities?.includes('project.publish')} busy={busy} onRestore={restoreVersion} /></Panel></>}
           {session.user.capabilities?.includes('audit.read') && <Panel title="Recent audit" description={`${auditEvents.length} events · Security and command activity`} collapsible defaultOpen={false} storageKey={`scamatic.panel.audit.${currentProject.id}`}><AuditList events={auditEvents} /></Panel>}
-          <Panel title="Shortcuts"><div className="sb-shortcuts"><span><kbd>Arrow</kbd> Nudge 1 px</span><span><kbd>Shift + Arrow</kbd> Nudge by grid</span><span><kbd>Shift + click</kbd> Multi-select</span><span><kbd>Ctrl Z/Y</kbd> Undo/redo</span><span><kbd>Ctrl C/V</kbd> Copy/paste</span><span><kbd>Ctrl D</kbd> Duplicate</span><span><kbd>Delete</kbd> Remove</span></div></Panel>
+          <Panel title="Shortcuts"><div className="sb-shortcuts"><span><kbd>Arrow</kbd> Nudge 1 px</span><span><kbd>Shift + Arrow</kbd> Nudge by grid</span><span><kbd>Shift + click</kbd> Multi-select</span><span><kbd>Ctrl Z/Y</kbd> Undo/redo</span><span><kbd>Ctrl X</kbd> Cut selection</span><span><kbd>Ctrl C/V</kbd> Copy/paste</span><span><kbd>Ctrl D</kbd> Duplicate</span><span><kbd>Delete</kbd> Remove</span></div></Panel>
         </aside>
         <div
           className="sb-sidebar-resizer right"
@@ -703,8 +1015,8 @@ export default function BuilderPlatform() {
           onPointerDown={event => startSidebarResize('right', event)}
           onKeyDown={event => resizeSidebarByKeyboard('right', event)}
         />
-      </div>
-      {flowImportOpen && <FlowImportModal schema={draft} onClose={() => setFlowImportOpen(false)} onApply={plan => {
+      </div>}
+      {!iotDashboard && flowImportOpen && <FlowImportModal schema={draft} onClose={() => setFlowImportOpen(false)} onApply={plan => {
         changeDraft(previous => applyNodeRedImportPlan(previous, plan))
         setMockValues(previous => ({ ...previous, ...Object.fromEntries(plan.tags.map(tag => [tag.id, initialMockValue(tag)])) }))
         setFlowImportOpen(false)
@@ -720,7 +1032,7 @@ export default function BuilderPlatform() {
         onClose={() => { setValidationConsoleOpen(false); setValidationConsoleSource(null) }}
         onLocate={diagnostic => {
           if (!diagnostic.sourceId) return
-          setSelectedIds([diagnostic.sourceId])
+          selectComponent(diagnostic.sourceId)
           setValidationConsoleMinimized(true)
         }}
       />
@@ -728,7 +1040,89 @@ export default function BuilderPlatform() {
   )
 }
 
-function FileMenu({ autoSave, onAutoSaveChange, dirty, revision, lastSavedAt, busy, onSave, onPreview, canImportFlow, onImportFlow, exportFlowDisabled, onExportFlow, canPublish, onPublish, runtimeHref }) {
+function DashboardBreakpointToolbar({ value, schema, onChange, onReset }) {
+  const [open, setOpen] = useState(false)
+  const menuRef = useRef(null)
+  const metadata = dashboardBreakpointMetadata(value)
+  const configuration = schema.project.dashboardLayout?.breakpoints?.[value] || metadata
+  const overrideCount = value === 'desktop' ? 0 : schema.components.filter(component => component.responsivePositions?.[value]).length
+
+  useEffect(() => {
+    if (!open) return
+    const close = event => {
+      if (event.type === 'keydown' && event.key !== 'Escape') return
+      if (event.type === 'pointerdown' && menuRef.current?.contains(event.target)) return
+      setOpen(false)
+    }
+    document.addEventListener('pointerdown', close)
+    document.addEventListener('keydown', close)
+    return () => {
+      document.removeEventListener('pointerdown', close)
+      document.removeEventListener('keydown', close)
+    }
+  }, [open])
+
+  return <div className="sb-dashboard-breakpoint-toolbar" aria-label="Dashboard responsive breakpoint">
+    <div className={`sb-view-menu sb-dashboard-preference-menu ${open ? 'is-open' : ''}`} ref={menuRef}>
+      <HeaderMenuTrigger label="Preference" open={open} onToggle={setOpen} />
+      {open && <div className="sb-view-menu-popover" role="menu" aria-label="Responsive dashboard preference">
+        <div className="sb-view-menu-summary"><span>Current layout</span><strong>{metadata.label}</strong></div>
+        <div className="sb-view-menu-divider" role="separator" />
+        <DashboardBreakpointChoices value={value} schema={schema} onChange={breakpoint => { onChange(breakpoint); setOpen(false) }} />
+      </div>}
+    </div>
+    <InfoPopover className="sb-dashboard-breakpoint-info" label="Responsive dashboard information" title="Responsive dashboard information" align="end" surfaceRole="dialog" dismissOnAction>
+      <InfoPopoverIntro>{metadata.label} preference controls the canvas used for responsive editing and preview.</InfoPopoverIntro>
+      <InfoPopoverSection title="LAYOUT"><dl><div><dt>Canvas</dt><dd>{configuration.width} × {configuration.height}</dd></div><div><dt>Columns</dt><dd>{configuration.columns}</dd></div><div><dt>Grid</dt><dd>{metadata.gridSize}px</dd></div></dl></InfoPopoverSection>
+      <InfoPopoverSection title="OVERRIDES"><span>{value === 'desktop' ? 'Desktop is the canonical base layout.' : `${overrideCount} component override${overrideCount === 1 ? '' : 's'} on ${metadata.label}.`}</span>{value !== 'desktop' && <button type="button" onClick={onReset} disabled={!overrideCount}>Reset {metadata.label} overrides</button>}</InfoPopoverSection>
+    </InfoPopover>
+  </div>
+}
+
+function DashboardBreakpointChoices({ value, schema, onChange, disabled }) {
+  return DASHBOARD_BREAKPOINTS.map(breakpoint => {
+    const item = dashboardBreakpointMetadata(breakpoint)
+    const width = schema.project.dashboardLayout?.breakpoints?.[breakpoint]?.width || item.width
+    const selected = value === breakpoint
+    return <button type="button" key={breakpoint} className={`sb-dashboard-breakpoint-option ${selected ? 'is-active' : ''}`} role="menuitemradio" aria-checked={selected} disabled={disabled} onClick={() => onChange(breakpoint)}><span><strong>{item.label}</strong><small>{width}px canvas</small></span>{selected && <img className="sb-check-icon" src="/check.svg" alt="" />}</button>
+  })
+}
+
+function moveResponsiveSelection(schema, selectedIds, dx, dy, breakpoint) {
+  const layout = resolveResponsiveDashboard(schema, breakpoint)
+  const rendered = schema.components.map(component => ({ ...component, position: layout.positions.get(component.id) || component.position }))
+  const moved = moveSelection(rendered, selectedIds, dx, dy, layout.canvas)
+  const movedById = new Map(moved.map(component => [component.id, component.position]))
+  const selected = new Set(selectedIds)
+  return schema.components.map(component => selected.has(component.id)
+    ? { ...component, ...responsivePositionPatch(component, breakpoint, movedById.get(component.id) || component.position) }
+    : component)
+}
+
+function arrangeResponsiveSelection(schema, selectedIds, action, breakpoint) {
+  const layout = resolveResponsiveDashboard(schema, breakpoint)
+  const rendered = schema.components.map(component => ({ ...component, position: layout.positions.get(component.id) || component.position }))
+  const arranged = arrangeSelection(rendered, selectedIds, action)
+  const arrangedById = new Map(arranged.map(component => [component.id, component.position]))
+  const selected = new Set(selectedIds)
+  return schema.components.map(component => selected.has(component.id)
+    ? { ...component, ...responsivePositionPatch(component, breakpoint, arrangedById.get(component.id) || component.position) }
+    : component)
+}
+
+function downloadExportArchive({ contentBase64, fileName }) {
+  const bytes = Uint8Array.from(atob(contentBase64), character => character.charCodeAt(0))
+  const url = URL.createObjectURL(new Blob([bytes], { type: 'application/zip' }))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = fileName
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+function FileMenu({ markupWorkspace, autoSave, onAutoSaveChange, dirty, revision, lastSavedAt, busy, onSave, onSaveBack, onPreview, canImportFlow, onImportFlow, exportFlowDisabled, onExportFlow, canPublish, onPublish, runtimeHref, nodeRedFlowEnabled = true, canExportRuntime = false, exportRuntimeDisabled = true, onExportRuntime, onExportWincc }) {
   const [open, setOpen] = useState(false)
   const [runtimePromptOpen, setRuntimePromptOpen] = useState(false)
   const rootRef = useRef(null)
@@ -764,7 +1158,7 @@ function FileMenu({ autoSave, onAutoSaveChange, dirty, revision, lastSavedAt, bu
   const openRuntime = metricsEnabled => {
     setRuntimePromptOpen(false)
     setOpen(false)
-    globalThis.open(runtimeHrefWithMetrics(runtimeHref, metricsEnabled), '_blank', 'noopener,noreferrer')
+    openApplicationRoute(runtimeHrefWithMetrics(runtimeHref, metricsEnabled))
   }
 
   const toggleFileMenu = next => {
@@ -784,20 +1178,34 @@ function FileMenu({ autoSave, onAutoSaveChange, dirty, revision, lastSavedAt, bu
             </span>
             {lastSavedAt && <small>Last saved {lastSavedAt.toLocaleTimeString()}</small>}
           </div>
+          {markupWorkspace ? <>
+            <ViewMenuItem label="Save" value="Ctrl+S" disabled={busy} onClick={() => act(onSave)} />
+            <ViewMenuItem label="Save & Back to Builder" disabled={busy} onClick={() => act(onSaveBack)} />
+          </> : <>
           <ViewMenuItem label="Autosave" value={autoSave ? 'On' : 'Off'} checked={autoSave} onClick={() => act(() => onAutoSaveChange(value => !value))} />
           <div className="sb-view-menu-divider" role="separator" />
-          {canImportFlow && <ViewMenuItem label="Import flow JSON" disabled={busy} onClick={() => act(onImportFlow)} />}
-          <ViewMenuItem label="Export flow JSON" disabled={busy || exportFlowDisabled} onClick={() => act(onExportFlow)} />
-          <div className="sb-view-menu-divider" role="separator" />
+          {nodeRedFlowEnabled && <>
+            {canImportFlow && <ViewMenuItem label="Import Node-RED JSON" disabled={busy} onClick={() => act(onImportFlow)} />}
+            <ViewMenuItem label="Export Node-RED JSON" disabled={busy || exportFlowDisabled} onClick={() => act(onExportFlow)} />
+            <div className="sb-view-menu-divider" role="separator" />
+          </>}
           <ViewMenuItem label="Save" disabled={busy || !dirty} onClick={() => act(onSave)} />
           <ViewMenuItem label="Preview" onClick={() => act(onPreview)} />
           {canPublish && <ViewMenuItem label="Publish" disabled={busy} onClick={() => act(onPublish)} />}
+          {onExportWincc && <ViewMenuItem label="Export WinCC package" value="Unified V21" disabled={busy} onClick={() => act(onExportWincc)} />}
+          {canExportRuntime && <>
+            <div className="sb-view-menu-divider" role="separator" />
+            <small className="sb-muted">Published version · runtime hosting</small>
+            <ViewMenuItem label="Export runtime · Node / Railway" disabled={busy || exportRuntimeDisabled} onClick={() => act(() => onExportRuntime('node'))} />
+            <ViewMenuItem label="Export runtime · Vercel" disabled={busy || exportRuntimeDisabled} onClick={() => act(() => onExportRuntime('vercel'))} />
+          </>}
           {runtimeHref && (
             <div className="sb-runtime-file-entry" role="none">
               <ViewMenuItem label="Runtime" value={runtimePromptOpen ? 'Choose' : 'Open'} hasPopup expanded={runtimePromptOpen} onClick={() => setRuntimePromptOpen(value => !value)} />
               {runtimePromptOpen && <RuntimeLaunchMenu onChoose={openRuntime} />}
             </div>
           )}
+          </>}
         </div>
       )}
     </div>
@@ -819,7 +1227,7 @@ function RuntimeLaunchMenu({ onChoose }) {
   )
 }
 
-function EditMenu({ canUndo, canRedo, canDuplicate, onUndo, onRedo, onDuplicate }) {
+function EditMenu({ canUndo, canRedo, canCut, canDuplicate, onUndo, onRedo, onCut, onDuplicate, canMarkup, onOpenMarkup }) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef(null)
 
@@ -852,17 +1260,48 @@ function EditMenu({ canUndo, canRedo, canDuplicate, onUndo, onRedo, onDuplicate 
           <ViewMenuItem label="Undo" value="Ctrl+Z" disabled={!canUndo} onClick={() => act(onUndo)} />
           <ViewMenuItem label="Redo" value="Ctrl+Y" disabled={!canRedo} onClick={() => act(onRedo)} />
           <div className="sb-view-menu-divider" role="separator" />
+          <ViewMenuItem label="Cut" value="Ctrl+X" disabled={!canCut} onClick={() => act(onCut)} />
           <ViewMenuItem label="Duplicate" value="Ctrl+D" disabled={!canDuplicate} onClick={() => act(onDuplicate)} />
+          {onOpenMarkup && <><div className="sb-view-menu-divider" role="separator" />
+          <ViewMenuItem label="Markup" icon={<MarkupIcon />} disabled={!canMarkup} onClick={() => act(onOpenMarkup)} /></>}
         </div>
       )}
     </div>
   )
 }
 
+function InsertMenu({ disabled, onInsert }) {
+  const [open, setOpen] = useState(false)
+  const menuRef = useRef(null)
+  const fileRef = useRef(null)
+  useEffect(() => {
+    if (!open) return
+    const dismiss = event => {
+      if (event.type === 'keydown' ? event.key === 'Escape' : !menuRef.current?.contains(event.target)) setOpen(false)
+    }
+    window.addEventListener('pointerdown', dismiss)
+    window.addEventListener('keydown', dismiss)
+    return () => {
+      window.removeEventListener('pointerdown', dismiss)
+      window.removeEventListener('keydown', dismiss)
+    }
+  }, [open])
+
+  return <div className={`sb-view-menu sb-markup-insert-menu ${open ? 'is-open' : ''}`} ref={menuRef}>
+    <HeaderMenuTrigger label="Insert" open={open} onToggle={setOpen} />
+    {open && <div className="sb-view-menu-popover" role="menu" aria-label="Insert actions">
+      <ViewMenuItem label="External Component…" value="SVG, PNG, JPG" disabled={disabled} onClick={() => { setOpen(false); fileRef.current?.click() }} />
+    </div>}
+    <input ref={fileRef} type="file" hidden aria-label="External component file" accept={designElementAccept} disabled={disabled} onChange={event => {
+      const file = event.currentTarget.files?.[0]
+      event.currentTarget.value = ''
+      if (file) void onInsert(file)
+    }} />
+  </div>
+}
+
 function ViewMenu({
   canvas,
-  themeTone,
-  onThemeToneChange,
   boardTone,
   onBoardToneChange,
   gridSize,
@@ -877,6 +1316,7 @@ function ViewMenu({
   onShowRulersChange,
   zoom,
   onZoomChange,
+  preference,
 }) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef(null)
@@ -913,11 +1353,10 @@ function ViewMenu({
             <span>Canvas</span>
             <strong>{canvas.width} × {canvas.height}</strong>
           </div>
-          <ViewMenuItem
-            label="Theme tone"
-            value={themeTone === 'cyan' ? 'Cyan' : 'Grey'}
-            onClick={() => act(() => onThemeToneChange(themeTone === 'cyan' ? 'grey' : 'cyan'))}
-          />
+          {preference && <>
+            <DashboardViewPreference {...preference} onClose={() => setOpen(false)} />
+            <div className="sb-view-menu-divider" role="separator" />
+          </>}
           <ViewMenuItem
             label="Board appearance"
             value={boardTone === 'dark' ? 'Dark' : 'Light'}
@@ -953,6 +1392,18 @@ function ViewMenu({
   )
 }
 
+function DashboardViewPreference({ schema, value, onChange, onReset, layers, disabled, onClose }) {
+  const [open, setOpen] = useState(false)
+  const hasOverrides = value !== 'desktop' && layers.some(component => component.responsivePositions?.[value])
+  return <>
+    <ViewMenuItem label="Preference" value={dashboardBreakpointMetadata(value).label} hasPopup expanded={open} disabled={disabled} onClick={() => setOpen(previous => !previous)} />
+    {open && <div className="sb-markup-preferences" role="menu" aria-label="Responsive dashboard preference">
+      <DashboardBreakpointChoices value={value} schema={schema} disabled={disabled} onChange={breakpoint => { onChange(breakpoint); onClose() }} />
+      {hasOverrides && <ViewMenuItem label="Reset markup overrides" disabled={disabled} onClick={() => { onReset(); onClose() }} />}
+    </div>}
+  </>
+}
+
 function HeaderMenuTrigger({ label, open, onToggle }) {
   return (
     <button
@@ -974,7 +1425,7 @@ function HeaderMenuTrigger({ label, open, onToggle }) {
   )
 }
 
-function ViewMenuItem({ label, value = '', checked, disabled = false, hasPopup = false, expanded, onClick }) {
+function ViewMenuItem({ label, icon, value = '', checked, disabled = false, hasPopup = false, expanded, onClick }) {
   const isToggle = typeof checked === 'boolean'
   const displayValue = value || (isToggle ? (checked ? 'On' : 'Off') : '')
   return (
@@ -988,16 +1439,17 @@ function ViewMenuItem({ label, value = '', checked, disabled = false, hasPopup =
       disabled={disabled}
       onClick={onClick}
     >
-      <span>{label}</span>
+      <span className={icon ? 'sb-menu-icon-label' : undefined}>{icon}{label}</span>
       <small>{displayValue}</small>
     </button>
   )
 }
 
-function ProjectHome({ user, projects, busy, onOpen, onCreated, onProjectsChanged, onNotice, onSwitchWorkspace, onLogout, notice }) {
+function ProjectHome({ user, projects, busy, openingProject, onOpen, onCreated, onProjectsChanged, onProjectUpdated, onNotice, onSwitchWorkspace, onLogout, notice }) {
   const [showCreate, setShowCreate] = useState(false)
   const [showMembers, setShowMembers] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
+  const [showRuntimeWorkerSetup, setShowRuntimeWorkerSetup] = useState(false)
   const [showHidden, setShowHidden] = useState(false)
   const [actionBusyId, setActionBusyId] = useState(null)
   const [pinRequest, setPinRequest] = useState(null)
@@ -1020,7 +1472,7 @@ function ProjectHome({ user, projects, busy, onOpen, onCreated, onProjectsChange
     ? <>No projects are assigned in <strong>{activeWorkspace?.name || 'this workspace'}</strong>. Choose the linked workspace above if needed; otherwise ask an administrator to confirm the project assignment.</>
     : user.workspaces?.length > 1
       ? <>No projects exist in <strong>{activeWorkspace?.name || 'the active workspace'}</strong>. Choose another workspace above to see its projects.</>
-      : 'No projects yet. Create the first builder project.'
+      : 'No projects yet. Create the first SCADA or IoT Dashboard project.'
 
   const runAction = async (project, action) => {
     let payload = { projectId: project.id, action }
@@ -1082,26 +1534,29 @@ function ProjectHome({ user, projects, busy, onOpen, onCreated, onProjectsChange
 
   return (
     <div className="sb-home">
-      <header className="sb-home-header"><div className="sb-home-brand"><img className="sb-home-brand-logo" src="/logo-sb.png" alt="" aria-hidden="true" /><div><span className="eyebrow">SCADA SCHEMATIC PLATFORM</span><h1>Scamatic<span>.Builder</span></h1></div></div><div className="sb-user-chip"><UserSettingsMenu user={user} onManageUsers={() => setShowMembers(true)} onChangePassword={() => setShowPassword(true)} onSwitchWorkspace={onSwitchWorkspace} onLogout={onLogout} /></div></header>
-      <main>
-        <div className="sb-home-lead">
-          <div><h2>{runtimeOnly ? 'Assigned runtimes' : 'Projects'}</h2><p>{runtimeOnly ? `Operator access in ${activeWorkspace?.name || 'the active workspace'}. Open a published project to start the runtime.` : 'Build schema-driven SCADA screens from sanitized SVG assets.'}</p></div>
-          <div className="sb-home-actions">
-            {user.workspaces?.length > 1 && <label className="sb-home-workspace-select"><span>Active workspace</span><select value={user.workspaceId} onChange={chooseWorkspace} disabled={busy || workspaceSwitching}>{user.workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.name} · {workspace.role}</option>)}</select></label>}
-            {canManage && hiddenCount > 0 && <button type="button" className={showHidden ? 'is-active' : ''} onClick={() => setShowHidden(value => !value)}>{showHidden ? 'Hide hidden projects' : `Show hidden (${hiddenCount})`}</button>}
-            {canCreate && <button type="button" className="primary" onClick={() => setShowCreate(true)}>+ New project</button>}
+      <header className="sb-home-header"><div className="sb-home-brand"><img className="sb-home-brand-logo" src="/logo-sb.png" alt="" aria-hidden="true" /><div><span className="eyebrow">SCADA + IOT VISUAL PLATFORM</span><h1>Scamatic<span>.Builder</span></h1></div></div><div className="sb-user-chip"><UserSettingsMenu user={user} onManageUsers={() => setShowMembers(true)} onRuntimeWorkerSetup={() => setShowRuntimeWorkerSetup(true)} onChangePassword={() => setShowPassword(true)} onSwitchWorkspace={onSwitchWorkspace} onLogout={onLogout} /></div></header>
+      <main className="sb-home-scroll">
+        <div className="sb-home-content">
+          <div className="sb-home-lead">
+            <div><h2>{runtimeOnly ? 'Assigned runtimes' : 'Projects'}</h2><p>{runtimeOnly ? `Operator access in ${activeWorkspace?.name || 'the active workspace'}. Open a published project to start the runtime.` : 'Build industrial SCADA screens or direct ThingsBoard IoT dashboards on one shared runtime.'}</p></div>
+            <div className="sb-home-actions">
+              {user.workspaces?.length > 1 && <label className="sb-home-workspace-select"><span>Active workspace</span><select value={user.workspaceId} onChange={chooseWorkspace} disabled={busy || workspaceSwitching}>{user.workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.name} · {workspace.role}</option>)}</select></label>}
+              {canManage && hiddenCount > 0 && <button type="button" className={showHidden ? 'is-active' : ''} onClick={() => setShowHidden(value => !value)}>{showHidden ? 'Hide hidden projects' : `Show hidden (${hiddenCount})`}</button>}
+              {canCreate && <button type="button" className="primary" onClick={() => setShowCreate(true)} disabled={busy}>+ New project</button>}
+            </div>
+          </div>
+          {notice && !notice.floating && <div className={`sb-notice ${notice.type}`}>{notice.text}</div>}
+          <div className="sb-project-grid" aria-busy={Boolean(openingProject)}>
+            {visibleProjects.map(project => <ProjectCard key={project.id} project={project} runtimeOnly={runtimeOnly} disabled={busy || actionBusyId === project.id} canManage={canManage} canDelete={canDelete} onOpen={requestOpen} onAction={runAction} onSecurity={requestSecurity} />)}
+            {visibleProjects.length === 0 && <div className="sb-empty-projects">{projects.length === 0 ? emptyProjectsMessage : 'No visible projects. Use “Show hidden” to restore one.'}</div>}
           </div>
         </div>
-        {notice && (notice.floating
-          ? <div className={`sb-builder-notice ${notice.type}`} role="status" aria-live="polite"><span>{notice.text}</span></div>
-          : <div className={`sb-notice ${notice.type}`}>{notice.text}</div>)}
-        <div className="sb-project-grid">
-          {visibleProjects.map(project => <ProjectCard key={project.id} project={project} runtimeOnly={runtimeOnly} disabled={busy || actionBusyId === project.id} canManage={canManage} canDelete={canDelete} onOpen={requestOpen} onAction={runAction} onSecurity={requestSecurity} />)}
-          {visibleProjects.length === 0 && <div className="sb-empty-projects">{projects.length === 0 ? emptyProjectsMessage : 'No visible projects. Use “Show hidden” to restore one.'}</div>}
-        </div>
       </main>
+      {notice?.floating && <div className={`sb-builder-notice ${notice.type}`} role="status" aria-live="polite"><span>{notice.text}</span></div>}
+      {openingProject && <div className="sb-opening-project"><div className="sb-opening-project-card" role="status"><span className="sb-spinner" aria-hidden="true" /><div><strong>Opening project…</strong><span>{openingProject.name}</span></div></div></div>}
       {showCreate && <CreateProjectModal onClose={() => setShowCreate(false)} onCreated={async project => { setShowCreate(false); await onCreated(project) }} />}
       {showMembers && <MemberAdminModal projects={projects} onClose={() => setShowMembers(false)} />}
+      {showRuntimeWorkerSetup && <RuntimeWorkerSetupModal projects={projects} onProjectUpdated={onProjectUpdated} onClose={() => setShowRuntimeWorkerSetup(false)} />}
       {showPassword && <ChangePasswordModal onClose={() => setShowPassword(false)} onChanged={() => { setShowPassword(false); onNotice({ type: 'success', text: 'Password changed successfully. Other signed-in devices have been logged out.' }) }} />}
       {pinRequest && <ProjectPinModal
         project={pinRequest.project}
@@ -1135,7 +1590,7 @@ function ProjectHome({ user, projects, busy, onOpen, onCreated, onProjectsChange
   )
 }
 
-function UserSettingsMenu({ user, onManageUsers, onChangePassword, onSwitchWorkspace, onLogout }) {
+function UserSettingsMenu({ user, onManageUsers, onRuntimeWorkerSetup, onChangePassword, onSwitchWorkspace, onLogout }) {
   const [open, setOpen] = useState(false)
   const [switching, setSwitching] = useState(false)
   const rootRef = useRef(null)
@@ -1174,10 +1629,91 @@ function UserSettingsMenu({ user, onManageUsers, onChangePassword, onSwitchWorks
         <div className="sb-settings-divider" role="separator" />
         <div className="sb-settings-actions">
           {user.capabilities?.includes('members.manage') && <button type="button" role="menuitem" onClick={() => act(onManageUsers)}>Manage users</button>}
+          {user.capabilities?.includes('workspace.manage') && <button type="button" role="menuitem" onClick={() => act(onRuntimeWorkerSetup)}>Runtime worker mode</button>}
           <button type="button" role="menuitem" onClick={() => act(onChangePassword)}>Change password</button>
           <button type="button" role="menuitem" className="danger" onClick={() => act(onLogout)}>Logout</button>
         </div>
       </div>}
+    </div>
+  )
+}
+
+function RuntimeWorkerSetupModal({ projects, onProjectUpdated, onClose }) {
+  const [busyProjectId, setBusyProjectId] = useState(null)
+  const [error, setError] = useState('')
+  const [savedProjectId, setSavedProjectId] = useState(null)
+  const [health, setHealth] = useState(null)
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => { document.body.style.overflow = previousOverflow }
+  }, [])
+  useEffect(() => {
+    let disposed = false
+    let retryTimer = null
+    const refreshHealth = async () => {
+      try {
+        const data = await apiRequest('/health/data-plane/ready')
+        if (!disposed) setHealth(data)
+      } catch {
+        if (!disposed) setHealth({ ok: false, status: 'unavailable' })
+      } finally {
+        if (!disposed) retryTimer = window.setTimeout(refreshHealth, 5000)
+      }
+    }
+    void refreshHealth()
+    return () => {
+      disposed = true
+      if (retryTimer != null) window.clearTimeout(retryTimer)
+    }
+  }, [])
+  const alwaysOnCount = projects.filter(project => runtimeWorkerMode(project) === 'always-on').length
+  const workerChecking = health == null
+  const workerReady = health?.ok === true
+  const updateProjectMode = async (project, nextMode) => {
+    if (!RUNTIME_WORKER_MODES.includes(nextMode) || nextMode === runtimeWorkerMode(project)) return
+    setBusyProjectId(project.id)
+    setError('')
+    setSavedProjectId(null)
+    try {
+      const data = await apiRequest(`/api/projects?id=${encodeURIComponent(project.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ projectId: project.id, action: 'set-runtime-worker-mode', runtimeWorkerMode: nextMode }),
+      })
+      onProjectUpdated(data.project)
+      setSavedProjectId(project.id)
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setBusyProjectId(null)
+    }
+  }
+  return (
+    <div className="sb-modal-backdrop" onMouseDown={() => { if (!busyProjectId) onClose() }}>
+      <section className="sb-create-modal sb-isaac-setup-modal" role="dialog" aria-modal="true" aria-labelledby="runtime-worker-setup-title" onMouseDown={event => event.stopPropagation()}>
+        <header className="sb-isaac-setup-header">
+          <div className="sb-isaac-setup-heading"><span className="eyebrow">BACKGROUND RUNTIME</span><div className="sb-isaac-title-row"><h2 id="runtime-worker-setup-title">Worker mode</h2><InfoPopover className="sb-isaac-info" label="About runtime worker modes"><InfoPopoverIntro>The Windows Service and supervisor remain available in every mode. This setting controls each project's datasource connection lifecycle.</InfoPopoverIntro>{RUNTIME_WORKER_MODES.map(modeId => { const modeInfo = runtimeWorkerModeMetadata(modeId); return <InfoPopoverSection key={modeId} title={modeInfo.label}>{modeInfo.description}</InfoPopoverSection> })}</InfoPopover></div></div>
+        </header>
+        <div className={`sb-isaac-gateway-state ${workerChecking ? 'is-checking' : workerReady ? 'is-ready' : 'is-fallback'}`}>
+          <strong>{workerChecking ? 'Checking runtime worker…' : workerReady ? 'Runtime worker ready' : 'Runtime worker unavailable'}</strong>
+          <b>{alwaysOnCount} always on</b>
+        </div>
+        <div className="sb-isaac-project-list" aria-label="Project runtime worker modes">
+          {projects.map(project => {
+            const mode = runtimeWorkerMode(project)
+            const locked = project.security?.pinEnabled && !project.security?.unlocked
+            const pending = busyProjectId === project.id
+            return <article key={project.id} className={`sb-isaac-project-row ${mode === 'always-on' ? 'is-selected' : ''} ${locked ? 'is-locked' : ''}`}>
+              <span className={`sb-runtime-worker-mode-mark mode-${mode}`} aria-hidden="true" />
+              <div className="sb-isaac-project-name"><strong>{project.name}</strong><code>/{project.slug}</code>{locked && <small>Unlock the project before changing its worker mode.</small>}</div>
+              <div className="sb-isaac-project-status"><select className="sb-runtime-worker-mode-select" aria-label={`Runtime worker mode for ${project.name}`} value={mode} disabled={Boolean(busyProjectId) || locked} onChange={event => void updateProjectMode(project, event.target.value)}>{RUNTIME_WORKER_MODES.map(modeId => <option key={modeId} value={modeId}>{runtimeWorkerModeMetadata(modeId).label}</option>)}</select><span>{pending ? 'Saving…' : savedProjectId === project.id ? 'Saved' : project.activeVersionId ? 'Published' : 'Draft'}</span>{project.hiddenAt && <small>Hidden</small>}</div>
+            </article>
+          })}
+          {projects.length === 0 && <div className="sb-isaac-empty">Create a project before configuring its runtime worker mode.</div>}
+        </div>
+        {error && <div className="sb-form-error" role="alert">{error}</div>}
+        <footer className="sb-isaac-setup-footer"><button type="button" onClick={onClose} disabled={Boolean(busyProjectId)}>Done</button></footer>
+      </section>
     </div>
   )
 }
@@ -1197,10 +1733,14 @@ function ProjectCard({ project, runtimeOnly = false, disabled, canManage, canDel
     return () => { document.removeEventListener('pointerdown', close); document.removeEventListener('keydown', close) }
   }, [menuOpen])
   const act = action => { setMenuOpen(false); void onAction(project, action) }
+  const type = projectTypeOf(project)
+  const typeMetadata = projectTypeMetadata(type)
+  const wincc = projectOutputTarget(project) === WINCC_OUTPUT_TARGET
   return (
-    <article className={`sb-project-card ${project.hiddenAt ? 'is-hidden' : ''}`} ref={rootRef}>
+    <article className={`sb-project-card mode-${type} ${project.hiddenAt ? 'is-hidden' : ''}`} ref={rootRef}>
       <button type="button" className="sb-project-card-open" onClick={() => onOpen(project)} disabled={disabled || (runtimeOnly && !project.activeVersionId)}>
         <span className="sb-project-icon" aria-hidden="true"><img src="/logo-sb.png" alt="" /></span>
+        <span className="sb-project-type-badge">{wincc ? 'WinCC Unified' : typeMetadata.label}</span>
         <strong>{project.name}</strong>
         <code>/{project.slug}</code>
         <span>{project.canvas.width} × {project.canvas.height}</span>
@@ -1280,7 +1820,7 @@ const MEMBER_ROLE_META = {
   ADMIN: { label: 'Administrator', icon: 'A', summary: 'Full workspace administration, publishing, audit, and user management.', scope: 'Workspace-wide access' },
   EDITOR: { label: 'Editor', icon: 'E', summary: 'Builds and validates projects, configures sources, and accesses runtime.', scope: 'All workspace projects' },
   OPERATOR: { label: 'Operator', icon: 'O', summary: 'Views assigned runtimes and can execute permitted control commands.', scope: 'Assigned projects only' },
-  VIEWER: { label: 'Viewer', icon: 'V', summary: 'Read-only access to the published runtimes explicitly assigned below.', scope: 'Assigned projects only' },
+  VIEWER: { label: 'Viewer', icon: 'V', summary: '', scope: 'Assigned projects only' },
   OWNER: { label: 'Owner', icon: 'O', summary: 'Full authority over workspace security and configuration.', scope: 'Workspace-wide access' },
 }
 
@@ -1393,7 +1933,7 @@ function MemberAdminModal({ projects, onClose }) {
     <div className="sb-modal-backdrop" onMouseDown={onClose}>
       <div className="sb-member-modal" role="dialog" aria-modal="true" aria-labelledby="member-dialog-title" onMouseDown={event => event.stopPropagation()}>
         <header className="sb-member-header">
-          <div className="sb-member-heading"><span className="sb-member-heading-icon" aria-hidden="true">RB</span><div><span className="eyebrow">ACCESS CONTROL</span><h2 id="member-dialog-title">Workspace members</h2><p>Provision identities and define their effective SCADA access.</p></div></div>
+          <div className="sb-member-heading"><div><span className="eyebrow">ACCESS CONTROL</span><h2 id="member-dialog-title">Workspace members</h2></div></div>
           <div className="sb-member-header-actions"><span className="sb-member-count"><strong>{members.length}</strong> {members.length === 1 ? 'member' : 'members'}</span><button type="button" className="sb-member-close" aria-label="Close member management" onClick={onClose}>×</button></div>
         </header>
 
@@ -1410,7 +1950,7 @@ function MemberAdminModal({ projects, onClose }) {
             <div className="sb-project-assignment-list">{projects.map(project => {
               const projectId = String(project.id)
               const selected = editingMember.projectIds.includes(projectId)
-              return <label className={`sb-project-assignment ${selected ? 'is-selected' : ''}`} key={project.id}><input type="checkbox" checked={selected} onChange={() => toggleEditedProject(projectId)} disabled={editBusy} /><span className="sb-project-assignment-icon" aria-hidden="true"><img src="/logo-sb.png" alt="" /></span><span><strong>{project.name}</strong><small>/{project.slug}</small></span><i>{selected ? '✓' : '+'}</i></label>
+              return <label className={`sb-project-assignment ${selected ? 'is-selected' : ''}`} key={project.id}><input type="checkbox" checked={selected} onChange={() => toggleEditedProject(projectId)} disabled={editBusy} /><span className="sb-project-assignment-icon" aria-hidden="true"><img src="/logo-sb.png" alt="" /></span><span><strong>{project.name}</strong><small>/{project.slug}</small></span><i>{selected ? <img className="sb-check-icon" src="/check.svg" alt="" /> : '+'}</i></label>
             })}{projects.length === 0 && <p className="sb-member-empty">Create a project before assigning runtime access.</p>}</div>
             {editError && <div className="sb-form-error" role="alert">{editError}</div>}
             <footer className="sb-member-access-editor-footer"><p>Saving replaces the current assignment and closes the member's active sessions, so removed access cannot remain open.</p><button type="submit" className="primary" disabled={editBusy}>{editBusy ? 'Saving…' : 'Save project access'}</button></footer>
@@ -1424,15 +1964,15 @@ function MemberAdminModal({ projects, onClose }) {
             <div className="sb-member-fields">
               <label>Email address<span className="sb-field-help">Checked before submission</span><input type="email" autoComplete="off" maxLength="120" placeholder="name@company.com" value={form.email} onChange={event => setEmail(event.target.value)} required /></label>
               <label>Display name<span className="sb-field-help">{existingAccount ? 'Existing account identity' : 'Operator-facing identity'}</span><input autoComplete="off" maxLength="100" placeholder={existingAccount ? '' : 'e.g. Shift Supervisor'} value={form.displayName} onChange={event => setForm(previous => ({ ...previous, displayName: event.target.value }))} readOnly={existingAccount} disabled={!newAccount && !existingAccount} required={newAccount} /></label>
-              <div className={`sb-account-check state-${accountCheck.state}`} role="status" aria-live="polite"><span aria-hidden="true">{accountCheck.state === 'checking' ? '…' : accountCheck.available ? '✓' : accountCheck.state === 'idle' ? '?' : '!'}</span><div><strong>{accountCheck.state === 'idle' ? 'Enter an email to verify the account' : accountCheck.state === 'checking' ? 'Checking account availability…' : accountCheck.message}</strong>{existingAccount && <small>Password and profile remain owned by the existing account.</small>}{newAccount && <small>A temporary password is required for the first sign-in.</small>}</div></div>
-              {newAccount ? <label>Temporary password<span className="sb-field-help">10–256 characters</span><input type="password" autoComplete="new-password" minLength="10" maxLength="256" placeholder="Enter a temporary password" value={form.password} onChange={event => setForm(previous => ({ ...previous, password: event.target.value }))} required /></label> : <div className="sb-existing-credentials"><span aria-hidden="true">◇</span><div><strong>{existingAccount ? 'Existing credentials preserved' : 'Credentials pending email check'}</strong><small>{existingAccount ? 'The user signs in with their current password or Google account.' : 'Verify the email to determine whether credentials are needed.'}</small></div></div>}
+              <div className={`sb-account-check state-${accountCheck.state}`} role="status" aria-live="polite"><span aria-hidden="true">{accountCheck.state === 'checking' ? '…' : accountCheck.available ? <img className="sb-check-icon" src="/check.svg" alt="" /> : accountCheck.state === 'idle' ? '?' : '!'}</span><div><strong>{accountCheck.state === 'idle' ? 'Enter an email to verify the account' : accountCheck.state === 'checking' ? 'Checking account availability…' : accountCheck.message}</strong>{existingAccount && <small>Password and profile remain owned by the existing account.</small>}{newAccount && <small>A temporary password is required for the first sign-in.</small>}</div></div>
+              {newAccount ? <label>Temporary password<span className="sb-field-help">10–256 characters</span><input type="password" autoComplete="new-password" minLength="10" maxLength="256" placeholder="Enter a temporary password" value={form.password} onChange={event => setForm(previous => ({ ...previous, password: event.target.value }))} required /></label> : <div className="sb-existing-credentials"><div><strong>{existingAccount ? 'Existing credentials preserved' : 'Credentials pending email check'}</strong>{existingAccount && <small>The user signs in with their current password or Google account.</small>}</div></div>}
               <label>Workspace role<span className="sb-field-help">Defines capabilities and project scope</span><select value={form.role} onChange={event => setForm(previous => ({ ...previous, role: event.target.value, projectIds: [] }))}><option>ADMIN</option><option>EDITOR</option><option>OPERATOR</option><option>VIEWER</option></select></label>
-              <div className="sb-role-summary"><span className={`sb-role-symbol role-${form.role.toLowerCase()}`}>{selectedRole.icon}</span><div><strong>{selectedRole.label}</strong><p>{selectedRole.summary}</p><small>{selectedRole.scope}</small></div></div>
+              <div className="sb-role-summary"><span className={`sb-role-symbol role-${form.role.toLowerCase()}`}>{selectedRole.icon}</span><div><strong>{selectedRole.label}</strong>{selectedRole.summary && <p>{selectedRole.summary}</p>}<small>{selectedRole.scope}</small></div></div>
             </div>
 
             <div className="sb-member-scope">
               <div className="sb-scope-head"><div><span className="eyebrow">PROJECT SCOPE</span><h4>{['OPERATOR', 'VIEWER'].includes(form.role) ? 'Assigned projects' : 'Workspace coverage'}</h4></div>{['OPERATOR', 'VIEWER'].includes(form.role) && <span>{form.projectIds.length}/{projects.length}</span>}</div>
-              {['OPERATOR', 'VIEWER'].includes(form.role) ? <div className="sb-project-assignment-list">{projects.map(project => <label className={`sb-project-assignment ${form.projectIds.includes(project.id) ? 'is-selected' : ''}`} key={project.id}><input type="checkbox" checked={form.projectIds.includes(project.id)} onChange={() => toggleProject(project.id)} /><span className="sb-project-assignment-icon" aria-hidden="true"><img src="/logo-sb.png" alt="" /></span><span><strong>{project.name}</strong><small>/{project.slug}</small></span><i>{form.projectIds.includes(project.id) ? '✓' : '+'}</i></label>)}{projects.length === 0 && <p className="sb-member-empty">Create a project before assigning runtime access.</p>}</div> : <div className="sb-global-scope"><span aria-hidden="true">◇</span><strong>No project selection required</strong><p>{selectedRole.label} receives access to every project in this workspace according to its capability set.</p></div>}
+              {['OPERATOR', 'VIEWER'].includes(form.role) ? <div className="sb-project-assignment-list">{projects.map(project => <label className={`sb-project-assignment ${form.projectIds.includes(project.id) ? 'is-selected' : ''}`} key={project.id}><input type="checkbox" checked={form.projectIds.includes(project.id)} onChange={() => toggleProject(project.id)} /><span className="sb-project-assignment-icon" aria-hidden="true"><img src="/logo-sb.png" alt="" /></span><span><strong>{project.name}</strong><small>/{project.slug}</small></span><i>{form.projectIds.includes(project.id) ? <img className="sb-check-icon" src="/check.svg" alt="" /> : '+'}</i></label>)}{projects.length === 0 && <p className="sb-member-empty">Create a project before assigning runtime access.</p>}</div> : <div className="sb-global-scope"><span aria-hidden="true">◇</span><strong>No project selection required</strong><p>{selectedRole.label} receives access to every project in this workspace according to its capability set.</p></div>}
             </div>
           </div>
           {success && <div className="sb-notice success" role="status">{success}</div>}
@@ -1445,10 +1985,85 @@ function MemberAdminModal({ projects, onClose }) {
 }
 
 function CreateProjectModal({ onClose, onCreated }) {
-  const [form, setForm] = useState({ name: 'WTP Mixer', slug: 'wtp-mixer', description: '', width: 1920, height: 1080 }); const [error, setError] = useState(''); const [busy, setBusy] = useState(false)
-  const submit = async event => { event.preventDefault(); setBusy(true); setError(''); try { const data = await apiRequest('/api/projects', { method: 'POST', body: JSON.stringify(form) }); await onCreated(data.project) } catch (requestError) { setError(requestError.message) } finally { setBusy(false) } }
+  const [form, setForm] = useState(() => starterProjectForm(SCADA_PROJECT_TYPE))
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const isScada = form.projectType === SCADA_PROJECT_TYPE
+  const typeMetadata = projectTypeMetadata(form.projectType)
+  const wincc = isScada && form.outputTarget === WINCC_OUTPUT_TARGET
   const set = (key, value) => setForm(previous => ({ ...previous, [key]: value }))
-  return <div className="sb-modal-backdrop" onMouseDown={onClose}><form className="sb-create-modal" onSubmit={submit} onMouseDown={event => event.stopPropagation()}><div><span className="eyebrow">NEW PROJECT</span><h2>Create SCADA project</h2></div><label>Name<input value={form.name} onChange={event => { set('name', event.target.value); set('slug', slugify(event.target.value)) }} /></label><label>Slug<input value={form.slug} onChange={event => set('slug', event.target.value)} /></label><label>Description<textarea value={form.description} onChange={event => set('description', event.target.value)} /></label><div className="sb-form-grid"><label>Canvas width<input type="number" value={form.width} onChange={event => set('width', Number(event.target.value))} /></label><label>Canvas height<input type="number" value={form.height} onChange={event => set('height', Number(event.target.value))} /></label></div>{error && <div className="sb-form-error">{error}</div>}<div className="sb-modal-actions"><button type="button" onClick={onClose}>Cancel</button><button type="submit" className="primary" disabled={busy}>{busy ? 'Creating…' : 'Create project'}</button></div></form></div>
+  const chooseType = projectType => setForm(previous => {
+    const next = starterProjectForm(projectType)
+    const untouchedStarter = ['WTP Mixer', 'Fleet Overview'].includes(previous.name)
+    return {
+      ...previous,
+      projectType,
+      width: next.width,
+      height: next.height,
+      name: untouchedStarter ? next.name : previous.name,
+      slug: untouchedStarter ? next.slug : previous.slug,
+    }
+  })
+  const submit = async event => {
+    event.preventDefault()
+    setBusy(true)
+    setError('')
+    try {
+      const body = { ...form, outputTarget: isScada ? form.outputTarget : DEFAULT_OUTPUT_TARGET }
+      const data = await apiRequest('/api/projects', { method: 'POST', body: JSON.stringify(body) })
+      await onCreated(data.project)
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+  return <div className="sb-modal-backdrop sb-project-create-backdrop" onMouseDown={onClose}>
+    <form className={'sb-create-modal sb-project-create-modal mode-' + form.projectType} onSubmit={submit} onMouseDown={event => event.stopPropagation()}>
+      <header><span className="eyebrow">NEW PROJECT</span><h2>Create {typeMetadata.label} project</h2></header>
+      <div className="sb-project-create-content" role="region" aria-label="Project details" tabIndex={0}>
+        <fieldset className="sb-project-type-picker">
+          <legend>Builder type</legend>
+          {PROJECT_TYPES.map(type => {
+            const selected = form.projectType === type
+            return <button key={type} type="button" className={selected ? 'is-selected' : ''} aria-pressed={selected} onClick={() => chooseType(type)}>
+              <span><strong>{projectTypeMetadata(type).builderLabel}</strong></span><i aria-hidden="true" />
+            </button>
+          })}
+        </fieldset>
+        {isScada && <label>
+          Target
+          <select value={form.outputTarget} onChange={event => set('outputTarget', event.target.value)}>
+            <option value={DEFAULT_OUTPUT_TARGET}>SCAMATIC Independent</option>
+            <option value={WINCC_OUTPUT_TARGET}>WinCC Unified PC · TIA Portal V21</option>
+          </select>
+        </label>}
+        {wincc && <p className="sb-iot-create-note">Design a WinCC Unified screen and export the template, graphics, and scripts for TIA Portal V21.</p>}
+        <label>Name<input value={form.name} onChange={event => setForm(previous => ({ ...previous, name: event.target.value, slug: slugify(event.target.value) }))} /></label>
+        <label>Slug<input value={form.slug} onChange={event => set('slug', event.target.value)} /></label>
+        <label>Description<textarea value={form.description} onChange={event => set('description', event.target.value)} /></label>
+        <div className="sb-form-grid">
+          <label>Canvas width<input type="number" value={form.width} onChange={event => set('width', Number(event.target.value))} /></label>
+          <label>Canvas height<input type="number" value={form.height} onChange={event => set('height', Number(event.target.value))} /></label>
+        </div>
+        {!isScada && <div className="sb-iot-create-note">Direct ThingsBoard mode · Node-RED tools stay disabled · base SVG is optional.</div>}
+      </div>
+      <footer className="sb-project-create-footer">
+        {error && <div className="sb-form-error" role="alert">{error}</div>}
+        <div className="sb-modal-actions">
+          <button type="button" onClick={onClose}>Cancel</button>
+          <button type="submit" className="primary" disabled={busy}>{busy ? 'Creating…' : 'Create ' + (wincc ? 'WinCC' : typeMetadata.label) + ' project'}</button>
+        </div>
+      </footer>
+    </form>
+  </div>
+}
+
+function starterProjectForm(projectType) {
+  const metadata = projectTypeMetadata(projectType)
+  const iot = projectType === IOT_DASHBOARD_PROJECT_TYPE
+  const name = iot ? 'Fleet Overview' : 'WTP Mixer'
+  return { name, slug: slugify(name), description: '', projectType, outputTarget: DEFAULT_OUTPUT_TARGET, width: metadata.canvas.width, height: metadata.canvas.height }
 }
 
 function ChangePasswordModal({ onClose, onChanged }) {
@@ -1535,14 +2150,14 @@ function DesignElementUploader({ projectId, onUploaded, onError }) {
       setBusy(false)
     }
   }
-  return <label className="sb-add-element-button">{busy ? 'Uploading element…' : '+ Add Element'}<input type="file" accept=".png,.jpg,.jpeg,.svg,image/png,image/jpeg,image/svg+xml" onChange={upload} disabled={busy} /></label>
+  return <label className="sb-add-element-button">{busy ? 'Uploading element…' : '+ Add Element'}<input type="file" accept={designElementAccept} onChange={upload} disabled={busy} /></label>
 }
 
 async function uploadDesignElementFile(projectId, file) {
   if (!/\.(png|jpe?g|svg)$/i.test(file.name) || file.size > 3 * 1024 * 1024) throw new Error('Choose a PNG, JPG, JPEG, or SVG file smaller than 3 MB.')
   const content = file.type === 'image/svg+xml' || /\.svg$/i.test(file.name) ? await file.text() : await fileAsBase64(file)
   const data = await apiRequest('/api/elements', { method: 'POST', body: JSON.stringify({ projectId, fileName: file.name, mimeType: file.type || mimeTypeFromName(file.name), content }) })
-  return data.asset
+  return resolveDesignAsset(data.asset)
 }
 
 function fileAsBase64(file) {
@@ -1570,20 +2185,10 @@ function MultiSelectionActions({ count, onArrange, onDuplicate, onDelete, onLock
   return <div className="sb-multi-actions"><p>{count} components selected. Drag one selected component to move the whole group.</p><div className="sb-arrange-grid">{controls.map(([action, icon, label]) => <button key={action} type="button" title={label} aria-label={label} disabled={action.startsWith('distribute') && count < 3} onClick={() => onArrange(action)}>{icon}</button>)}</div><button type="button" onClick={onDuplicate}>Duplicate selection</button><button type="button" onClick={onLock}>Lock selection</button><button type="button" onClick={onHide}>Hide selection</button><button type="button" className="danger" onClick={onDelete}>Delete selection</button></div>
 }
 function VersionList({ versions, activeVersionId, canRestore, busy = false, onRestore }) {
-  const [openVersionId, setOpenVersionId] = useState(null)
   const nextVersion = nextVersionNumber(versions)
-  useEffect(() => {
-    if (openVersionId && !versions.some(version => version.id === openVersionId)) setOpenVersionId(null)
-  }, [openVersionId, versions])
-  return <div className="sb-version-list" onKeyDown={event => {
-    if (event.key !== 'Escape' || !openVersionId) return
-    event.stopPropagation()
-    setOpenVersionId(null)
-  }}>{versions.map((version, index) => {
+  return <div className="sb-version-list">{versions.map(version => {
     const description = describeVersion(version, versions)
     const active = version.id === activeVersionId
-    const open = openVersionId === version.id
-    const detailsId = `sb-version-details-${index}`
     const createdAt = version.createdAt ? new Date(version.createdAt) : null
     const publishedAt = createdAt && Number.isFinite(createdAt.getTime()) ? createdAt : null
     return <div key={version.id} className={`sb-version-card ${active ? 'is-active' : ''} ${description.kind === 'restore' ? 'is-restore' : ''}`}>
@@ -1591,18 +2196,18 @@ function VersionList({ versions, activeVersionId, canRestore, busy = false, onRe
         <div className="sb-version-heading"><strong>v{version.version}</strong>{description.kind === 'restore' && <b>RESTORED</b>}</div>
         <div className="sb-version-card-actions">
           {active && <span className="sb-version-active-mark" role="img" aria-label="Active version" title="Active version" />}
-          <button type="button" className="sb-version-details-trigger" aria-label={`${open ? 'Hide' : 'Show'} information for version ${version.version}`} aria-expanded={open} aria-controls={detailsId} title={`${open ? 'Hide' : 'Show'} version information`} onClick={() => setOpenVersionId(current => current === version.id ? null : version.id)}><span aria-hidden="true">i</span></button>
+          <InfoPopover className="sb-version-info" label={`Information for version ${version.version}`} title="Version information" align="end" surfaceRole="dialog" dismissOnAction>
+            <InfoPopoverIntro>Published snapshot v{version.version} and its immutable history metadata.</InfoPopoverIntro>
+            <InfoPopoverSection title="SNAPSHOT">{description.label}</InfoPopoverSection>
+            <InfoPopoverSection title="PUBLISHED"><time dateTime={publishedAt?.toISOString()}>{publishedAt ? publishedAt.toLocaleString() : 'Legacy snapshot'}</time></InfoPopoverSection>
+            <InfoPopoverSection title="STATUS">
+              {active
+                ? <span className="sb-version-active-note">This snapshot is currently active.</span>
+                : canRestore && <button type="button" className="sb-version-restore" disabled={busy} title={`Create v${nextVersion} from v${version.version} and make it active`} onClick={() => onRestore(version)}>Restore → v{nextVersion}</button>}
+            </InfoPopoverSection>
+          </InfoPopover>
         </div>
       </div>
-      {open && <div className="sb-version-details" id={detailsId} role="region" aria-label={`Version ${version.version} information`}>
-        <dl>
-          <div><dt>Snapshot</dt><dd>{description.label}</dd></div>
-          <div><dt>Published</dt><dd><time dateTime={publishedAt?.toISOString()}>{publishedAt ? publishedAt.toLocaleString() : 'Legacy snapshot'}</time></dd></div>
-        </dl>
-        {active
-          ? <span className="sb-version-active-note">This snapshot is currently active.</span>
-          : canRestore && <button type="button" className="sb-version-restore" disabled={busy} title={`Create v${nextVersion} from v${version.version} and make it active`} onClick={() => { setOpenVersionId(null); onRestore(version) }}>Restore → v{nextVersion}</button>}
-      </div>}
     </div>
   })}{versions.length === 0 && <p className="sb-muted">No published versions.</p>}</div>
 }
@@ -1615,7 +2220,7 @@ function ValidationPanel({ issues, onReview }) {
   const preview = [...issues].sort((left, right) => (left.severity === 'error' ? 0 : 1) - (right.severity === 'error' ? 0 : 1)).slice(0, 3)
   return <div className="sb-validation-panel-summary">
     <div className={`sb-validation-panel-result ${summary.errors ? 'error' : summary.warnings ? 'warning' : 'ok'}`}>
-      <span className={!summary.errors && !summary.warnings ? 'sb-validation-ok-mark' : ''} aria-hidden="true">{summary.errors ? '!' : summary.warnings ? '△' : ''}</span>
+      <span className={!summary.errors && !summary.warnings ? 'sb-validation-ok-mark' : ''} aria-hidden="true">{summary.errors ? '!' : summary.warnings ? <i className="sb-validation-warning-icon" /> : ''}</span>
       <div><strong>{summary.errors ? 'Publish blocked' : summary.warnings ? 'Ready with warnings' : 'Ready to publish'}</strong><small>{summary.errors} errors · {summary.warnings} warnings</small></div>
     </div>
     {preview.length > 0 && <ul className="sb-issue-list">{preview.map((issue, index) => <li key={`${issue.code}-${issue.path}-${index}`} className={issue.severity}><span>{issue.message}</span>{issue.path && <code>{issue.path}</code>}</li>)}</ul>}
@@ -1635,7 +2240,6 @@ function Panel({ title, titleInfo = '', description, children, collapsible = fal
     }
   })
   const [expanded, setExpanded] = useState(false)
-  const [titleInfoOpen, setTitleInfoOpen] = useState(false)
 
   useEffect(() => {
     if (!collapsible || !storageKey) return
@@ -1645,20 +2249,18 @@ function Panel({ title, titleInfo = '', description, children, collapsible = fal
   if (!collapsible) return <section className="sb-panel"><h3>{title}</h3>{children}</section>
   const toggleOpen = () => {
     if (open) setExpanded(false)
-    setTitleInfoOpen(false)
     setOpen(value => !value)
   }
   return <section className={`sb-panel sb-collapsible-panel ${open ? 'is-open' : 'is-closed'} ${expandable ? 'is-expandable' : ''} ${expanded ? 'is-floating' : ''}`}>
     <div className={`sb-panel-heading ${titleInfo ? 'has-title-info' : ''}`} onClick={titleInfo ? event => {
-      if (event.target.closest?.('.sb-panel-title-info-trigger, .sb-panel-expand')) return
+      if (event.target.closest?.('.sb-info-popover, .sb-panel-expand')) return
       toggleOpen()
     } : undefined}>
       {titleInfo
-        ? <><div className="sb-panel-heading-copy"><div className="sb-panel-title-line"><button type="button" className="sb-panel-title-toggle" aria-expanded={open}><strong>{title}</strong></button><button type="button" className="sb-panel-title-info-trigger" aria-label={`${titleInfoOpen ? 'Hide' : 'Show'} information about ${title}`} aria-expanded={titleInfoOpen} title={`${titleInfoOpen ? 'Hide' : 'Show'} information`} onClick={() => setTitleInfoOpen(value => !value)}><span aria-hidden="true">i</span></button></div>{description && <small>{description}</small>}</div><i className="sb-panel-chevron" aria-hidden="true" /></>
+        ? <><div className="sb-panel-heading-copy"><button type="button" className="sb-panel-title-toggle" aria-expanded={open}><strong>{title}</strong></button>{description && <small>{description}</small>}</div><div className="sb-panel-heading-controls"><InfoPopover className="sb-panel-title-info" label={`Information about ${title}`} title={`${title} information`} align="end">{titleInfo}</InfoPopover><i className="sb-panel-chevron" aria-hidden="true" /></div></>
         : <button type="button" className="sb-panel-toggle" aria-expanded={open} onClick={toggleOpen}><span><strong>{title}</strong>{description && <small>{description}</small>}</span><i aria-hidden="true" /></button>}
       {expandable && open && <button type="button" className="sb-panel-expand" aria-label={expanded ? `Return ${title} to sidebar` : `Expand ${title} into floating window`} aria-pressed={expanded} title={expanded ? 'Return to sidebar' : 'Expand into floating window'} onClick={() => setExpanded(value => !value)}><span className="sb-panel-expand-icon" aria-hidden="true" /></button>}
     </div>
-    {titleInfo && titleInfoOpen && <div className="sb-panel-title-info" role="note">{titleInfo}</div>}
     <div className="sb-panel-body" hidden={!open}>{children}</div>
   </section>
 }

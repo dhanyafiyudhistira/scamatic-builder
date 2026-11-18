@@ -3005,7 +3005,7 @@ function TuningPopup({ tag, mode = 'deck-user', telemetry = {}, sendRpc = () => 
             }}
           >↺ sync LIVE</button>
           <span style={{ marginLeft: 'auto', fontSize: '.68rem', fontWeight: 700, textShadow: '0 1px 0 #ecedef' }}>
-            {status === 'ok' && <span style={{ color: '#0f172a' }}>✓ sent</span>}
+            {status === 'ok' && <span className="sb-inline-check-status" style={{ color: '#0f172a' }}><img className="sb-check-icon" src="/check.svg" alt="" /> sent</span>}
             {status === 'err' && <span style={{ color: '#7f1d1d' }}>✗ failed</span>}
             {!status && dirty && <span style={{ color: '#1f2937' }}>● draft ≠ LIVE</span>}
           </span>
@@ -3051,7 +3051,7 @@ export default function App() {
 
   const handleSaveSettings = async () => {
     const ok = await saveSettings({ serverUrl: tbInput.url, deviceId: tbInput.deviceId, token: tbInput.token })
-    setSaveMsg(ok ? '✓ Saved to MongoDB' : '✗ Save failed — check backend')
+    setSaveMsg(ok ? 'Saved to MongoDB' : '✗ Save failed — check backend')
     setTimeout(() => setSaveMsg(''), 3000)
   }
 
@@ -3365,9 +3365,9 @@ export default function App() {
                       <span style={{
                         fontSize: '.8rem',
                         fontWeight: 700,
-                        color: saveMsg.startsWith('✓') ? '#16a34a' : '#b91c1c',
+                        color: saveMsg.startsWith('Saved') ? '#16a34a' : '#b91c1c',
                         textShadow: '0 1px 0 #ecedef'
-                      }}>{saveMsg}</span>
+                      }} className="sb-inline-check-status">{saveMsg.startsWith('Saved') && <img className="sb-check-icon" src="/check.svg" alt="" />}{saveMsg}</span>
                     )}
                   </div>
                 </div>

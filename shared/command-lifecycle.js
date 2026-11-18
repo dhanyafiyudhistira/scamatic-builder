@@ -94,6 +94,7 @@ export function commandTimingProjection(event) {
 
 export function commandStatusPresentation(status) {
   const normalized = normalizeCommandStatus(status)
+  if (normalized === 'idle') return { state: 'idle', label: 'IDLE', tone: 'neutral' }
   if (normalized === 'acknowledged') return { state: 'acknowledged', label: 'ACKNOWLEDGED', tone: 'success' }
   if (normalized === 'rejected') return { state: 'rejected', label: 'REJECTED', tone: 'danger' }
   if (normalized === 'timeout') return { state: 'timeout', label: 'UNVERIFIED / TIMEOUT', tone: 'warning' }

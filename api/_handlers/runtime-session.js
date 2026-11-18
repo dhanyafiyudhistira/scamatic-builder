@@ -7,8 +7,9 @@ import { enforceRateLimit } from '../_lib/security.js'
 import { usesServerlessConnectorExecution } from '../_lib/connector-execution.js'
 import { runtimeProfileMetadata, runtimeUsesLiveTelemetry } from '../../shared/runtime-profile.js'
 import { validRuntimeResponderGeneration, validRuntimeResponderId } from '../../shared/runtime-responder.js'
+import { resolveRuntimeEngine } from '../../shared/runtime-engine.js'
 
-export default async function handler(req, res) {
+export default async function handler(req, res, { resolveIsaacCanary = () => null, onRuntimeSessionCreated = () => {}, simulationOnly = false } = {}) {
   const principal = await requirePrincipal(req, res)
   if (!principal) return
   if (req.method !== 'POST') {
@@ -33,31 +34,40 @@ export default async function handler(req, res) {
   const version = await ProjectVersion.findById(project.activeVersionId).lean()
   if (!version) return res.status(409).json({ error: 'Active published version is unavailable.' })
   const profile = runtimeProfileMetadata(version.schema)
+  if (simulationOnly && profile.id !== 'simulation') return res.status(409).json({ error: 'Hosted simulation requires the published SIMULATION profile.', code: 'HOSTED_SIMULATION_PROFILE_REQUIRED' })
   const liveTelemetry = runtimeUsesLiveTelemetry(version.schema)
-  const simulationBridge = profile.id === 'simulation'
+  const simulationBridge = simulationOnly
+    ? { mode: 'local', available: false, reason: 'Hosted simulation runs internally without a ThingsBoard bridge.' }
+    : profile.id === 'simulation'
     ? await simulationBridgeConfiguration(version.schema, project, principal, authorization.capabilities)
     : null
   const policy = runtimeSessionPolicy()
   const serverless = usesServerlessConnectorExecution()
   const streamEnabled = liveTelemetry && process.env.CONNECTOR_PLATFORM_ENABLED === 'true' && !serverless
-  const streamUrl = streamEnabled ? resolveRuntimeStreamUrl() : null
+  const isaacCanary = streamEnabled && req.body?.excludeEngine !== 'isaac' ? resolveIsaacCanary(project) : null
+  const engine = resolveRuntimeEngine(project, { isaacAvailable: Boolean(isaacCanary?.url) })
+  const streamUrl = streamEnabled
+    ? engine.selected === 'isaac' ? isaacCanary.url : resolveRuntimeStreamUrl()
+    : null
   const token = randomBytes(32).toString('base64url')
   const expiresAt = new Date(Math.min(Date.now() + policy.ttlMs, new Date(principal.sessionExpiresAt).getTime()))
-  const runtimeSession = await RuntimeSession.create({ _id: digest(token), authSessionId: principal.sessionId, userId: principal.id, workspaceId: principal.workspaceId, projectId, versionId: project.activeVersionId, responderId, responderGeneration, capabilities: authorization.capabilities, expiresAt })
+  const runtimeSession = await RuntimeSession.create({ _id: digest(token), authSessionId: principal.sessionId, userId: principal.id, workspaceId: principal.workspaceId, projectId, versionId: project.activeVersionId, engine: engine.selected, responderId, responderGeneration, capabilities: authorization.capabilities, expiresAt })
   await enforceRuntimeSessionCap(principal.sessionId, projectId, runtimeSession.id, policy.maxSessions)
   let stream = null
   if (streamEnabled) {
     const ticket = randomBytes(32).toString('base64url')
     const streamExpiresAt = new Date(Date.now() + policy.streamTicketTtlMs)
-    await RuntimeStreamSession.create({ _id: digest(ticket), runtimeSessionId: runtimeSession.id, userId: principal.id, workspaceId: principal.workspaceId, projectId, versionId: project.activeVersionId, expiresAt: streamExpiresAt })
+    await RuntimeStreamSession.create({ _id: digest(ticket), runtimeSessionId: runtimeSession.id, userId: principal.id, workspaceId: principal.workspaceId, projectId, versionId: project.activeVersionId, engine: engine.selected, expiresAt: streamExpiresAt })
     stream = { url: streamUrl, ticket, expiresAt: streamExpiresAt }
   }
+  try { onRuntimeSessionCreated({ projectId, workspaceId: principal.workspaceId, runtimeSessionId: runtimeSession.id }) } catch {}
   return res.status(201).json({
     token,
     expiresAt,
     responder: { id: responderId, generation: responderGeneration },
     capabilities: authorization.capabilities,
     profile,
+    engine,
     stream,
     telemetry: !liveTelemetry
       ? {
@@ -117,7 +127,8 @@ function embeddedRuntimeStreamUrl() {
   }
   let url
   try { url = new URL(configuredOrigin) } catch { throw Object.assign(new Error('APP_ORIGIN is invalid.'), { statusCode: 503 }) }
-  const validProtocol = process.env.NODE_ENV === 'production' ? url.protocol === 'https:' : ['http:', 'https:'].includes(url.protocol)
+  const loopbackHttp = url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)
+  const validProtocol = url.protocol === 'https:' || loopbackHttp || (process.env.NODE_ENV !== 'production' && url.protocol === 'http:')
   if (!validProtocol || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw Object.assign(new Error('APP_ORIGIN must be a clean HTTP origin.'), { statusCode: 503 })
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
   url.pathname = '/runtime-stream'

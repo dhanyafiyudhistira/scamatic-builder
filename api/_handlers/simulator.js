@@ -20,6 +20,7 @@ import {
 import { pollDeviceRpc, publishDeviceTelemetry, respondDeviceRpc, timestampedDeviceTelemetry } from '../_lib/thingsboard-device.js'
 import { runtimeProfile } from '../../shared/runtime-profile.js'
 import { simulationTelemetryPayload } from '../../shared/simulation-bridge.js'
+import { simulationSnapshotOperations } from '../../shared/simulation-snapshot.js'
 
 export default async function handler(req, res) {
   const principal = await requirePrincipal(req, res)
@@ -239,31 +240,7 @@ async function loadBridge({ version, project, principal }) {
 }
 
 async function persistSimulationSnapshots({ schema, telemetryValues, workspaceId, projectId, timestamp }) {
-  const sourceTimestamp = new Date(timestamp)
-  const receivedAt = new Date()
-  const operations = (schema?.tags || []).flatMap(tag => {
-    if (!tag?.sourceId || !tag.path || !['read', 'read-write'].includes(tag.access) || telemetryValues[tag.path] == null) return []
-    return [{
-      updateOne: {
-        filter: { _id: `${projectId}:${tag.id}` },
-        update: {
-          $set: {
-            workspaceId,
-            projectId,
-            sourceId: tag.sourceId,
-            tagId: tag.id,
-            value: telemetryValues[tag.path],
-            dataType: tag.dataType,
-            sourceTimestamp,
-            receivedAt,
-            quality: 'good',
-            sequence: timestamp,
-          },
-        },
-        upsert: true,
-      },
-    }]
-  })
+  const operations = simulationSnapshotOperations({ schema, telemetryValues, workspaceId, projectId, timestamp })
   if (operations.length) await TagValueSnapshot.bulkWrite(operations, { ordered: false })
 }
 

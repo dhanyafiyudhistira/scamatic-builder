@@ -133,7 +133,10 @@ export function executeMockCommand(component, tag, currentValue, requestedValue,
     return { ok: true, message: 'Mock tuning command acknowledged.', value: Number(value.toFixed(10)) }
   }
   const action = component.properties?.action || 'toggle-boolean'
-  if (action === 'toggle-boolean') return { ok: true, message: 'Mock command acknowledged.', value: !Boolean(currentValue) }
+  if (action === 'toggle-boolean') {
+    if (requestedValue !== undefined && typeof requestedValue !== 'boolean') return { ok: false, message: 'Toggle intent must be a boolean.', value: currentValue }
+    return { ok: true, message: 'Mock command acknowledged.', value: requestedValue ?? !Boolean(currentValue) }
+  }
   if (action === 'set-value') return { ok: true, message: 'Mock command acknowledged.', value: coerceForTag(component.properties?.payload, tag.dataType) }
   if (action === 'pulse') return { ok: true, message: 'Mock pulse acknowledged.', value: true, resetAfterMs: Number(component.properties?.pulseMs || 300) }
   return { ok: false, message: `Unsupported mock action: ${action}.`, value: currentValue }

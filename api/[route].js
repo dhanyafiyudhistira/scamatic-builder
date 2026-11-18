@@ -10,6 +10,7 @@ import members from './_handlers/members.js'
 import projects from './_handlers/projects.js'
 import publish from './_handlers/publish.js'
 import runtime from './_handlers/runtime.js'
+import runtimeExport from './_handlers/runtime-export.js'
 import runtimeSession from './_handlers/runtime-session.js'
 import runtimeTelemetry from './_handlers/runtime-telemetry.js'
 import settings from './_handlers/settings.js'
@@ -33,6 +34,7 @@ const handlers = Object.freeze({
   projects,
   publish,
   runtime,
+  'runtime-export': runtimeExport,
   'runtime-session': runtimeSession,
   'runtime-telemetry': runtimeTelemetry,
   settings,

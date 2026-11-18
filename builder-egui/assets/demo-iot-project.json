@@ -1,0 +1,495 @@
+{
+  "format": "scamatic-egui-draft/v1",
+  "schema": {
+    "schemaVersion": "1.8.0",
+    "project": {
+      "id": "egui-iot-demo",
+      "name": "IoT Dashboard / Design Study",
+      "slug": "iot-dashboard-design-study",
+      "projectType": "iot-dashboard",
+      "runtimeProfile": "simulation",
+      "canvas": {
+        "width": 1000,
+        "height": 740,
+        "background": "#151719"
+      },
+      "svgAssetId": null,
+      "dashboardLayout": {
+        "mode": "responsive-grid",
+        "gap": 16,
+        "breakpoints": {
+          "desktop": {
+            "width": 1000,
+            "height": 740,
+            "columns": 12
+          },
+          "tablet": {
+            "width": 834,
+            "height": 1112,
+            "columns": 8
+          },
+          "mobile": {
+            "width": 390,
+            "height": 844,
+            "columns": 4
+          }
+        }
+      }
+    },
+    "dataSources": [
+      {
+        "id": "source_mock",
+        "type": "mock",
+        "environmentRef": "development",
+        "connectorRef": null
+      }
+    ],
+    "tags": [
+      {
+        "id": "temperature",
+        "name": "Room temperature",
+        "sourceId": "source_mock",
+        "path": "Temperature",
+        "dataType": "number",
+        "access": "read",
+        "engineering": {
+          "min": 0,
+          "max": 60,
+          "unit": "°C",
+          "decimals": 1
+        }
+      },
+      {
+        "id": "humidity",
+        "name": "Relative humidity",
+        "sourceId": "source_mock",
+        "path": "Humidity",
+        "dataType": "number",
+        "access": "read",
+        "engineering": {
+          "min": 0,
+          "max": 100,
+          "unit": "%",
+          "decimals": 1
+        }
+      },
+      {
+        "id": "online",
+        "name": "Device online",
+        "sourceId": "source_mock",
+        "path": "Online",
+        "dataType": "boolean",
+        "access": "read"
+      },
+      {
+        "id": "alarm",
+        "name": "Device alarm",
+        "sourceId": "source_mock",
+        "path": "Alarm",
+        "dataType": "boolean",
+        "access": "read"
+      },
+      {
+        "id": "power",
+        "name": "Power command",
+        "sourceId": "source_mock",
+        "path": "Power",
+        "dataType": "boolean",
+        "access": "read-write"
+      },
+      {
+        "id": "target",
+        "name": "Temperature target",
+        "sourceId": "source_mock",
+        "path": "Target",
+        "dataType": "number",
+        "access": "read-write",
+        "engineering": {
+          "min": 16,
+          "max": 32,
+          "unit": "°C",
+          "decimals": 1
+        },
+        "writeConstraints": {
+          "min": 16,
+          "max": 32,
+          "step": 0.5
+        }
+      },
+      {
+        "id": "mode",
+        "name": "Operation mode",
+        "sourceId": "source_mock",
+        "path": "Mode",
+        "dataType": "enum",
+        "access": "read-write",
+        "enumValues": [
+          "MANUAL",
+          "AUTO",
+          "RESET"
+        ]
+      }
+    ],
+    "components": [
+      {
+        "id": "iot-heading",
+        "type": "text-label",
+        "name": "Text 1",
+        "position": {
+          "x": 32,
+          "y": 24,
+          "width": 936,
+          "height": 46,
+          "rotation": 0
+        },
+        "zIndex": 1,
+        "visible": true,
+        "locked": false,
+        "binding": {
+          "tagId": null
+        },
+        "properties": {
+          "text": "ENVIRONMENT / IOT DASHBOARD",
+          "textColor": "#dce8ef",
+          "fontSize": 28,
+          "fontWeight": 700,
+          "fontStyle": "normal",
+          "fontFamily": "sans-serif",
+          "textAlign": "left",
+          "verticalAlign": "middle",
+          "transparentBackground": true,
+          "backgroundColor": "#101418"
+        },
+        "metadata": {}
+      },
+      {
+        "id": "iot-note",
+        "type": "text-label",
+        "name": "Text 2",
+        "position": {
+          "x": 32,
+          "y": 76,
+          "width": 936,
+          "height": 30,
+          "rotation": 0
+        },
+        "zIndex": 2,
+        "visible": true,
+        "locked": false,
+        "binding": {
+          "tagId": null
+        },
+        "properties": {
+          "text": "Desktop design study · choose a widget from the palette to begin",
+          "textColor": "#989ba2",
+          "fontSize": 14,
+          "fontWeight": 700,
+          "fontStyle": "normal",
+          "fontFamily": "sans-serif",
+          "textAlign": "left",
+          "verticalAlign": "middle",
+          "transparentBackground": true,
+          "backgroundColor": "#101418"
+        },
+        "metadata": {}
+      },
+      {
+        "id": "iot-temperature",
+        "type": "value-span",
+        "name": "Value Span 3",
+        "position": {
+          "x": 32,
+          "y": 128,
+          "width": 280,
+          "height": 140,
+          "rotation": 0
+        },
+        "zIndex": 3,
+        "visible": true,
+        "locked": false,
+        "binding": {
+          "tagId": "temperature"
+        },
+        "properties": {
+          "label": "ROOM TEMPERATURE",
+          "prefix": "",
+          "suffix": "°C",
+          "decimals": 1,
+          "scale": 1,
+          "offset": 0,
+          "fallback": "--",
+          "textColor": "#d8f7fa",
+          "backgroundColor": "#0a1117",
+          "warningColor": "#f59e0b",
+          "criticalColor": "#ef4444",
+          "warningHigh": null,
+          "criticalHigh": null
+        },
+        "metadata": {}
+      },
+      {
+        "id": "iot-humidity",
+        "type": "gauge",
+        "name": "Gauge 4",
+        "position": {
+          "x": 354,
+          "y": 128,
+          "width": 280,
+          "height": 280,
+          "rotation": 0
+        },
+        "zIndex": 4,
+        "visible": true,
+        "locked": false,
+        "binding": {
+          "tagId": "humidity"
+        },
+        "properties": {
+          "label": "RELATIVE HUMIDITY",
+          "rangeMode": "inherit",
+          "min": 0,
+          "max": 100,
+          "lowZoneEnd": 30,
+          "highZoneStart": 70,
+          "tickCount": 10,
+          "decimals": 1,
+          "scale": 1,
+          "offset": 0,
+          "unitMode": "inherit",
+          "suffix": "%",
+          "fallback": "--",
+          "lowColor": "#38bdf8",
+          "normalColor": "#a9bec7",
+          "highColor": "#fb7185",
+          "needleColor": "#ff4b1f",
+          "faceColor": "#d8e4e8",
+          "textColor": "#263b45",
+          "showDigital": true
+        },
+        "metadata": {}
+      },
+      {
+        "id": "iot-online",
+        "type": "indicator-lamp",
+        "name": "Indicator Lamp 5",
+        "position": {
+          "x": 688,
+          "y": 128,
+          "width": 160,
+          "height": 160,
+          "rotation": 0
+        },
+        "zIndex": 5,
+        "visible": true,
+        "locked": false,
+        "binding": {
+          "tagId": "online"
+        },
+        "properties": {
+          "label": "DEVICE CONNECTION",
+          "shape": "circle",
+          "onColor": "#22c55e",
+          "offColor": "#64748b",
+          "alarmColor": "#ef4444",
+          "glow": true,
+          "rule": {
+            "operator": "truthy"
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "id": "iot-chart",
+        "type": "chart",
+        "name": "Chart 6",
+        "position": {
+          "x": 32,
+          "y": 304,
+          "width": 220,
+          "height": 72,
+          "rotation": 0
+        },
+        "zIndex": 6,
+        "visible": true,
+        "locked": false,
+        "binding": {
+          "tagId": null,
+          "tagIds": [
+            "temperature",
+            "humidity"
+          ]
+        },
+        "properties": {
+          "label": "ENVIRONMENT HISTORY",
+          "historyLimit": 300,
+          "windowMinutes": 60,
+          "showLegend": true
+        },
+        "metadata": {}
+      },
+      {
+        "id": "iot-alarm",
+        "type": "alarm",
+        "name": "Alarm 7",
+        "position": {
+          "x": 678,
+          "y": 312,
+          "width": 180,
+          "height": 170,
+          "rotation": 0
+        },
+        "zIndex": 7,
+        "visible": true,
+        "locked": false,
+        "binding": {
+          "tagId": "alarm"
+        },
+        "properties": {
+          "label": "DEVICE ALARM",
+          "presentation": "lamp",
+          "activeColor": "#ef4444",
+          "idleColor": "#46545d",
+          "flash": true,
+          "soundEnabled": false,
+          "frequencyHz": 880,
+          "volume": 0.18,
+          "pulseMs": 650,
+          "ruleMode": "inherit",
+          "rule": {
+            "operator": "truthy"
+          }
+        },
+        "metadata": {}
+      },
+      {
+        "id": "iot-power",
+        "type": "control-button",
+        "name": "Control Button 8",
+        "position": {
+          "x": 32,
+          "y": 420,
+          "width": 220,
+          "height": 72,
+          "rotation": 0
+        },
+        "zIndex": 8,
+        "visible": true,
+        "locked": false,
+        "binding": {
+          "tagId": "power"
+        },
+        "properties": {
+          "label": "POWER COMMAND",
+          "action": "toggle-boolean",
+          "payload": true,
+          "confirmation": "single",
+          "requiredRole": "OPERATOR",
+          "buttonColor": "#f6b73c",
+          "cooldownMs": 800,
+          "timeoutMs": 5000
+        },
+        "metadata": {}
+      },
+      {
+        "id": "iot-popup",
+        "type": "control-popup",
+        "name": "Control Pop-up 9",
+        "position": {
+          "x": 692,
+          "y": 552,
+          "width": 260,
+          "height": 72,
+          "rotation": 0
+        },
+        "zIndex": 9,
+        "visible": true,
+        "locked": false,
+        "binding": {
+          "tagId": null
+        },
+        "properties": {
+          "label": "DEVICE CONTROLS",
+          "triggerLabel": "OPEN CONTROLS",
+          "columns": 2,
+          "dialogWidth": 720,
+          "closeOnBackdrop": true
+        },
+        "metadata": {},
+        "children": []
+      },
+      {
+        "id": "iot-target",
+        "type": "tuning-slider",
+        "name": "Tuning Slider 10",
+        "position": {
+          "x": 32,
+          "y": 552,
+          "width": 360,
+          "height": 132,
+          "rotation": 0
+        },
+        "zIndex": 10,
+        "visible": true,
+        "locked": false,
+        "binding": {
+          "tagId": "target"
+        },
+        "properties": {
+          "label": "TEMPERATURE TARGET",
+          "rangeMode": "inherit",
+          "min": 16,
+          "max": 32,
+          "step": 0.5,
+          "decimals": 0,
+          "simulationRampPerSecond": 0.1,
+          "suffix": "°C",
+          "rpcMethod": "",
+          "feedbackTagId": null,
+          "confirmation": "single",
+          "requiredRole": "OPERATOR",
+          "ackTimeoutMs": 5000,
+          "accentColor": "#20c4d9"
+        },
+        "metadata": {}
+      },
+      {
+        "id": "iot-mode",
+        "type": "operation-shifter",
+        "name": "Operation Shifter 11",
+        "position": {
+          "x": 424,
+          "y": 552,
+          "width": 236,
+          "height": 72,
+          "rotation": 0
+        },
+        "zIndex": 11,
+        "visible": true,
+        "locked": false,
+        "binding": {
+          "tagId": "mode"
+        },
+        "properties": {
+          "label": "OPERATION MODE",
+          "rpcMethod": "setOperationMode",
+          "feedbackTagId": null,
+          "confirmation": "single",
+          "requiredRole": "OPERATOR",
+          "ackTimeoutMs": 8000,
+          "controlledComponentIds": [],
+          "autoSequence": [],
+          "manualColor": "#3b82f6",
+          "autoColor": "#22c55e",
+          "resetColor": "#ef4444",
+          "darkButtonBackground": "#151719",
+          "darkButtonText": "#f0f3f4",
+          "darkButtonBorder": "#3d4246",
+          "lightButtonBackground": "#e9ece9",
+          "lightButtonText": "#172229",
+          "lightButtonBorder": "#747f85"
+        },
+        "metadata": {}
+      }
+    ]
+  }
+}

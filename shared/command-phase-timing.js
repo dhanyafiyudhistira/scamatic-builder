@@ -6,6 +6,8 @@ const MEASURED_COMMAND_PHASES = new Set([
   'versionLoadMs',
   'simulationStateReadsMs',
   'commandCreateMs',
+  'authorizationTransactionMs',
+  'simulationTransactionMs',
   'authorizationPersistMs',
   'authorizationAuditMs',
   'dispatchPersistMs',

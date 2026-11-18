@@ -1,4 +1,5 @@
 import 'dotenv/config'
+import { randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { dirname, join } from 'node:path'
@@ -18,6 +19,7 @@ import svgHandler       from '../api/_handlers/svg.js'
 import elementsHandler  from '../api/_handlers/elements.js'
 import publishHandler   from '../api/_handlers/publish.js'
 import runtimeHandler   from '../api/_handlers/runtime.js'
+import runtimeExportHandler from '../api/_handlers/runtime-export.js'
 import runtimeSessionHandler from '../api/_handlers/runtime-session.js'
 import runtimeTelemetryHandler from '../api/_handlers/runtime-telemetry.js'
 import commandsHandler  from '../api/_handlers/commands.js'
@@ -29,12 +31,16 @@ import chartStorageHandler from '../api/_handlers/chart-storage.js'
 import simulatorHandler from '../api/_handlers/simulator.js'
 import simulationSequenceHandler from '../api/_handlers/simulation-sequence.js'
 import { isDatabaseUnavailableError, requestId } from '../api/_lib/security.js'
-import { connectMongo, disconnectMongo } from '../api/_lib/mongo.js'
+import { allowedOrigins } from '../api/_lib/auth.js'
+import { assertMongoTransactionsSupported, connectMongo, disconnectMongo, pingMongo } from '../api/_lib/mongo.js'
+import { createMasterKeyCompatibilityCache } from '../api/_lib/master-key-compatibility.js'
 import { warmApiMongo } from './api-mongo-warmup.js'
 import { RuntimeStreamHub } from './connectors/runtime-stream-hub.js'
 import { ManagedConnectorWorker } from './connectors/managed-connector-worker.js'
 import { RustShadowWorker } from './connectors/rust-shadow-worker.js'
 import { CommandRetentionJanitor } from './connectors/command-retention-janitor.js'
+import { createIsaacSessionAuthorizer } from './connectors/isaac-session-authorizer.js'
+import { canonicalLocalNavigationUrl, isLoopbackAddress, resolveServerBindHost } from './local-canonical-origin.js'
 
 const app = express()
 const safe = handler => (req, res, next) => Promise.resolve(handler(req, res)).catch(next)
@@ -43,13 +49,31 @@ const connectorPlatformEnabled = process.env.CONNECTOR_PLATFORM_ENABLED === 'tru
 const embeddedConnectorStream = connectorPlatformEnabled && process.env.CONNECTOR_STREAM_MODE === 'embedded'
 const rustShadowEnabled = embeddedConnectorStream && process.env.SCADA_RUST_SHADOW_ENABLED === 'true'
 const commandWakeEnabled = embeddedConnectorStream && process.env.CONNECTOR_COMMAND_WAKE_ENABLED !== 'false'
+const isaacCanaryEnabled = rustShadowEnabled && process.env.SCADA_ISAAC_CANARY_ENABLED === 'true'
+const isaacInternalToken = isaacCanaryEnabled ? randomBytes(32).toString('base64url') : ''
+const PORT = process.env.PORT || 3001
+const HOST = resolveServerBindHost(process.env.SCAMATIC_BIND_HOST)
 const distDirectory = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist')
 let managedConnectorWorker = null
 let runtimeStreamHub = null
 let rustShadowWorker = null
 let commandRetentionJanitor = null
+const auditMasterKeyCompatibilityForHealth = createMasterKeyCompatibilityCache()
 app.disable('x-powered-by')
 app.set('trust proxy', 1)
+
+app.use((req, res, next) => {
+  const redirect = canonicalLocalNavigationUrl({
+    method: req.method,
+    host: req.get('host'),
+    accept: req.get('accept'),
+    fetchMode: req.get('sec-fetch-mode'),
+    originalUrl: req.originalUrl,
+  })
+  if (!redirect) return next()
+  res.setHeader('Cache-Control', 'no-store')
+  return res.redirect(308, redirect)
+})
 
 // CORS only matters for local dev (vite:5173 → express:3001).
 // In production, frontend + /api live on one Vercel origin → no CORS needed.
@@ -75,6 +99,10 @@ app.use((req, res, next) => {
   next()
 })
 
+if (isaacCanaryEnabled) {
+  app.post('/internal/isaac/runtime-session', safe(createIsaacSessionAuthorizer({ internalToken: isaacInternalToken })))
+}
+
 // app.all() forwards every HTTP method to the same handler — the handler
 // already switches on req.method, so we don't need app.get/app.post pairs.
 app.all('/api/health',    safe(healthHandler))
@@ -84,16 +112,22 @@ app.all('/api/auth/google/start', safe(startGoogleAuth))
 app.all('/api/auth/callback/google', safe(callbackGoogleAuth))
 app.all('/api/auth',      safe(authHandler))
 app.all('/api/signup',    safe(signupHandler))
-app.all('/api/projects',  safe(projectsHandler))
+app.all('/api/projects',  safe((req, res) => projectsHandler(req, res, {
+  onRuntimeWorkerModeChanged: () => managedConnectorWorker?.requestReload(),
+})))
 app.all('/api/draft',     safe(draftHandler))
 app.all('/api/svg',       safe(svgHandler))
 app.all('/api/elements',  safe(elementsHandler))
 app.all('/api/publish',   safe(publishHandler))
 app.all('/api/runtime',   safe(runtimeHandler))
-app.all('/api/runtime-session', safe(runtimeSessionHandler))
+app.all('/api/runtime-export', safe(runtimeExportHandler))
+app.all('/api/runtime-session', safe((req, res) => runtimeSessionHandler(req, res, {
+  resolveIsaacCanary: project => rustShadowWorker?.canary(project),
+  onRuntimeSessionCreated: () => managedConnectorWorker?.requestReload(),
+})))
 app.all('/api/runtime-telemetry', safe(runtimeTelemetryHandler))
 app.all('/api/commands',  safe((req, res) => commandsHandler(req, res, {
-  onWorkerCommandAuthorized: commandWakeEnabled ? () => managedConnectorWorker?.requestCommandPoll() : null,
+  onWorkerCommandAuthorized: commandWakeEnabled ? event => managedConnectorWorker?.requestCommandPoll(String(event?._id || '')) : null,
 })))
 app.all('/api/versions',  safe(versionsHandler))
 app.all('/api/audit',     safe(auditHandler))
@@ -103,15 +137,47 @@ app.all('/api/chart-storage', safe(chartStorageHandler))
 app.all('/api/simulator', safe(simulatorHandler))
 app.all('/api/simulation-sequence', safe(simulationSequenceHandler))
 
-app.get(['/health/data-plane/live', '/health/data-plane/ready'], (req, res) => {
+app.get(['/health/data-plane/live', '/health/data-plane/ready'], safe(async (req, res) => {
   const kind = req.path.endsWith('/ready') ? 'readiness' : 'liveness'
   const health = managedConnectorWorker?.health(kind) || {
     ok: false,
     status: embeddedConnectorStream ? 'starting' : 'disabled',
     mode: embeddedConnectorStream ? 'node-ipc' : 'standalone',
   }
-  return res.status(kind === 'liveness' || health.ok ? 200 : 503).json({ ...health, check: kind, ts: Date.now() })
-})
+  if (kind === 'liveness') return res.status(200).json({ ...health, check: kind, ts: Date.now() })
+  try {
+    const mongo = await pingMongo({ requireTransactions: production })
+    return res.status(health.ok ? 200 : 503).json({
+      ...health,
+      check: kind,
+      checks: { mongo: mongo.state, transactions: mongo.transactions },
+      ts: Date.now(),
+    })
+  } catch (error) {
+    const transactionsRequired = error?.code === 'MONGO_TRANSACTIONS_REQUIRED'
+    return res.status(503).json({
+      ...health,
+      ok: false,
+      status: 'not-ready',
+      check: kind,
+      checks: { mongo: transactionsRequired ? 'connected' : 'unavailable', transactions: transactionsRequired ? 'unsupported' : 'unknown' },
+      code: transactionsRequired ? error.code : 'DATABASE_UNAVAILABLE',
+      ...(transactionsRequired ? { error: error.message } : {}),
+      ts: Date.now(),
+    })
+  }
+}))
+app.get('/health/data-plane/key-compatibility', safe(async (req, res) => {
+  if (!isLoopbackAddress(req.socket?.remoteAddress)) return res.status(404).json({ error: 'Not found.' })
+  try {
+    await connectMongo()
+    const result = await auditMasterKeyCompatibilityForHealth()
+    return res.status(result.ok ? 200 : 503).json({ ...result, check: 'master-key-compatibility', ts: Date.now() })
+  } catch (error) {
+    const code = ['CONNECTOR_KEY_MISSING', 'CONNECTOR_KEY_INVALID'].includes(error?.code) ? error.code : 'KEY_COMPATIBILITY_UNAVAILABLE'
+    return res.status(503).json({ ok: false, status: 'unavailable', code, check: 'master-key-compatibility', ts: Date.now() })
+  }
+}))
 app.get('/health/data-plane/shadow', (req, res) => {
   const health = rustShadowWorker?.health() || {
     ok: false,
@@ -122,6 +188,7 @@ app.get('/health/data-plane/shadow', (req, res) => {
   return res.status(!rustShadowEnabled || health.ok ? 200 : 503).json({ ...health, enabled: rustShadowEnabled, ts: Date.now() })
 })
 app.get('/runtime-stream', (req, res) => res.status(426).json({ error: 'WebSocket upgrade required.' }))
+app.get('/isaac-stream', (req, res) => res.status(426).json({ error: 'Isaac WebSocket upgrade required.' }))
 
 if (shouldServeFrontend()) {
   const assetsDirectory = join(distDirectory, 'assets')
@@ -152,22 +219,32 @@ app.use((error, req, res, next) => {
   return res.status(500).json({ error: 'Internal server error.', correlationId })
 })
 
-const PORT = process.env.PORT || 3001
 const httpServer = createServer(app)
 if (embeddedConnectorStream) {
   runtimeStreamHub = new RuntimeStreamHub({ httpServer })
-  rustShadowWorker = rustShadowEnabled ? new RustShadowWorker() : null
+  rustShadowWorker = rustShadowEnabled ? new RustShadowWorker({
+    environment: {
+      ...process.env,
+      SCADA_ISAAC_GATEWAY_ENABLED: isaacCanaryEnabled ? 'true' : 'false',
+      SCADA_ISAAC_INTERNAL_HOST: '127.0.0.1',
+      SCADA_ISAAC_INTERNAL_PORT: String(PORT),
+      SCADA_ISAAC_INTERNAL_TOKEN: isaacInternalToken,
+      SCADA_ISAAC_ALLOWED_ORIGINS: allowedOrigins().join(','),
+    },
+  }) : null
   managedConnectorWorker = new ManagedConnectorWorker({ hub: runtimeStreamHub, observer: rustShadowWorker })
 }
 commandRetentionJanitor = new CommandRetentionJanitor()
 
-httpServer.listen(PORT, '0.0.0.0', () => {
-  console.log(`[Server] Express listening on http://localhost:${PORT}${shouldServeFrontend() ? ' with frontend assets' : ''}`)
+httpServer.listen(PORT, HOST, () => {
+  const displayHost = HOST.includes(':') ? `[${HOST}]` : HOST
+  console.log(`[Server] Express listening on http://${displayHost}:${PORT}${shouldServeFrontend() ? ' with frontend assets' : ''}`)
   if (rustShadowWorker) rustShadowWorker.start()
   if (managedConnectorWorker) managedConnectorWorker.start()
   commandRetentionJanitor.start()
   void warmApiMongo({
     connect: connectMongo,
+    validate: production ? assertMongoTransactionsSupported : null,
     shouldRetry: isDatabaseUnavailableError,
     onState: state => {
       if (state.phase === 'retrying-mongodb') {
@@ -225,12 +302,13 @@ function shouldServeFrontend() {
 }
 
 function isServicePath(path) {
-  return path === '/api' || path.startsWith('/api/') || path === '/health' || path.startsWith('/health/') || path === '/runtime-stream'
+  return path === '/api' || path.startsWith('/api/') || path === '/health' || path.startsWith('/health/') || path === '/runtime-stream' || path === '/isaac-stream' || path.startsWith('/internal/isaac/')
 }
 
 function contentSecurityPolicy() {
   const streamOrigin = safeWebSocketOrigin(process.env.CONNECTOR_STREAM_PUBLIC_URL)
-  const connectSources = ["'self'", ...(production ? [] : ['ws://localhost:3002', 'ws://127.0.0.1:3002']), ...(streamOrigin ? [streamOrigin] : [])]
+  const isaacOrigin = safeWebSocketOrigin(process.env.SCADA_ISAAC_STREAM_PUBLIC_URL)
+  const connectSources = [...new Set(["'self'", ...(production ? [] : ['ws://localhost:3002', 'ws://127.0.0.1:3002', 'ws://localhost:3003', 'ws://127.0.0.1:3003']), ...(streamOrigin ? [streamOrigin] : []), ...(isaacOrigin ? [isaacOrigin] : [])])]
   return [
     "default-src 'self'",
     "script-src 'self'",

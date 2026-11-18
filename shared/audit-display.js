@@ -1,6 +1,7 @@
 const TECHNICAL_WORDS = new Map([
   ['api', 'API'],
   ['id', 'ID'],
+  ['isaac', 'Isaac'],
   ['jwt', 'JWT'],
   ['rpc', 'RPC'],
   ['svg', 'SVG'],

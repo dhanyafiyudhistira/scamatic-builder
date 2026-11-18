@@ -1,8 +1,74 @@
-# Scamatic Builder — Builder + Secure Runtime MVP
+# SCAMATIC Builder
 
-Schema-driven SCADA schematic builder built from the original WTP Mixer HMI.
+Design industrial SCADA screens and IoT dashboards in a visual editor. SCAMATIC runs published projects through its private runtime and exports design templates for WinCC Unified PC.
 
-## Implemented flow
+[Visual walkthrough](#visual-walkthrough) · [Project modes](#project-modes) · [Local setup](#local-setup) · [Runtime deployment](#runtime-deployment) · [Verification](#verification) · [Architecture](#architecture)
+
+## Visual walkthrough
+
+### SCADA Independent
+
+The Mixing-Unit example shows a base schematic with gauges, status indicators, and a control pop-up. The side panels expose assets, data sources, tags, and published history.
+
+![Mixing-Unit SCADA canvas with tanks, pipes, value displays, gauges, and the component palette docked at the left](docs/screenshots/scada-mixing-unit.png)
+
+<details>
+<summary>Floating component palette and focused canvas</summary>
+
+![Expanded SCADA component palette floating above the Mixing-Unit schematic](docs/screenshots/scada-floating-components.png)
+
+The floating palette keeps the component choices over the drawing area during placement.
+
+![Mixing-Unit with the Components panel collapsed and the full schematic unobstructed](docs/screenshots/scada-focused-canvas.png)
+
+</details>
+
+### WinCC Unified PC V21
+
+Open **New Project → SCADA Builder → Target → WinCC Unified PC**. Add static text, indicators, numeric displays, gauges, buttons, and the 12 industrial symbols under **Components → Industrial · Grindstone**.
+
+![WinCC Unified design canvas with the industrial Grindstone palette expanded, showing Pump, Valve, Motor, and Tank](docs/screenshots/wincc-grindstone-palette.png)
+
+<details>
+<summary>Template workspace and File menu</summary>
+
+![WinCC template workspace with a compact component palette, schematic asset tools, and project properties](docs/screenshots/wincc-template-canvas.png)
+
+Choose **File → Export WinCC package** to download the layout, JavaScript event examples, graphic assets, and Windows generator.
+
+![WinCC File menu showing Preview and Export WinCC package for Unified V21](docs/screenshots/wincc-export-menu.png)
+
+</details>
+
+## Project modes
+
+| Mode | Design workflow | Output |
+| --- | --- | --- |
+| SCADA Independent | Lay out a process schematic, bind tags, and validate controls | Published private SCAMATIC runtime or a runtime export for hosting |
+| IoT Dashboard | Build a responsive dashboard from ThingsBoard telemetry or simulated values | Published private dashboard or a runtime export for hosting |
+| WinCC Unified PC V21 | Lay out static HMI widgets and industrial graphics | TIA Portal template package with layout, scripts, SVGs, and a Windows generator |
+
+The Builder also provides a separate **Edit → Markup** workspace for annotations and industrial symbols, with its own tools, properties, and layers. Save the markup into the project draft before continuing in Builder.
+
+### Generate a WinCC project
+
+1. Design the screen and choose **File → Export WinCC package**.
+2. Extract the ZIP. On a Windows engineering workstation, prepare a TIA Portal V21 `.zap21` template containing one WinCC Unified PC station.
+3. Run `Generate-WinCCProject.ps1` with the template archive and a new output directory. The generator uses TIA Portal Openness to create the screen objects in a copy of the template.
+4. Open `SCAMATIC_Overview` in TIA Portal. The package uses static component defaults. Configure live tags and connections in TIA Portal when the project needs them.
+
+The package includes the source SVGs and a mapping in `manifest.json`. The generator places the Graphic Views and associates graphics already available under the expected names in the template. Import and assign the supplied SVGs in **Project graphics** when those entries are absent. Native generation and runtime behavior still require verification in a TIA Portal V21 environment. [WinCC generator guide](api/_lib/wincc/README.md)
+
+## Runtime deployment
+
+For a SCADA Independent or IoT Dashboard project, publish a version and export it from **File → Export runtime · Node / Railway** or **File → Export runtime · Vercel**. The generated ZIP includes the published dashboard, its runtime API, and target-specific deployment instructions. Provision a dedicated transaction-capable MongoDB database and target credentials for the hosted environment. [Hosted runtime runbook](hosted-runtime/DEPLOY.md)
+
+| Published profile | Hosted package behavior |
+| --- | --- |
+| Simulation | Runs supported simulated controls and values with an authorized operator account |
+| Monitor Only or Real PLC | Uses the monitor-only policy and reads eligible ThingsBoard telemetry |
+
+## SCADA Independent workflow
 
 1. Sign in to a private workspace using a revocable database session.
 2. Create a SCADA project with a logical canvas.
@@ -10,8 +76,9 @@ Schema-driven SCADA schematic builder built from the original WTP Mixer HMI.
    event handlers, external resources, `foreignObject`, JavaScript URLs, and
    XML entities.
 4. Create a mock boolean tag.
-5. Add Indicator Lamp, Value Span, Control Button, Tuning Slider, Text Label,
-   Chart, and Control Pop-up components through the shared registry.
+5. Add Indicator Lamp, Valve, Motor, Pump, Fan, active-flow Pipe, Value Span,
+   Control Button, Tuning Slider, Text Label, Chart, and Control Pop-up
+   components through the shared registry. Process equipment stays SCADA-only.
 6. Import Node-RED flow JSON into reviewed tags and suggested components, or
    create tags manually.
 7. Bind typed mock tags and configure rules, formatting, thresholds, and
@@ -43,7 +110,7 @@ The original mixer HMI remains available at `/legacy`.
 
 ### Node-RED flow import and export
 
-Builder → File → **Import flow JSON** parses an exported Node-RED flow
+Builder → File → **Import Node-RED JSON** parses an exported Node-RED flow
 locally in the browser. The importer recognizes S7 endpoint variables,
 ThingsBoard telemetry paths, S7 outputs, statically declared RPC methods, and
 common Node-RED Dashboard nodes. It previews inferred data types, access modes,
@@ -55,7 +122,7 @@ uses source metadata and existing bindings to reuse tags and components instead
 of duplicating them. Numeric control limits and any unresolved RPC mappings must
 still be reviewed by the user before publishing.
 
-Builder → File → **Export flow JSON** performs the reverse conversion and
+Builder → File → **Export Node-RED JSON** performs the reverse conversion and
 downloads a deterministic Node-RED flow from the current draft. The generated
 flow includes native MQTT telemetry/RPC nodes, S7 nodes when a tag contains a
 verified `metadata.plcAddress`, common Node-RED Dashboard nodes, and a comment
@@ -69,7 +136,11 @@ endpoint in Node-RED before deploying the flow.
 
 ## Local setup
 
-Copy `.env.example` to `.env` and configure `MONGO_URI`. Local development has
+Copy `.env.example` to `.env` and configure `MONGO_URI`. Production deployments,
+including the packaged Windows runtime, require MongoDB Atlas or a
+transaction-capable replica set. Readiness fails with
+`MONGO_TRANSACTIONS_REQUIRED` when the configured deployment cannot atomically
+commit project changes and their audit events. Local development has
 an intentional fallback account when auth variables are omitted:
 
 ```text
@@ -79,6 +150,11 @@ password: admin
 
 Production does not enable a default password. The configured owner is
 bootstrapped into MongoDB with a salted scrypt password hash on first login.
+Treat `SCADA_ADMIN_PASSWORD` as a one-time bootstrap credential: after the
+owner can sign in and has changed the password through the application, clear
+this variable from machine configuration and restart the service. The database
+hash remains authoritative; retaining the plaintext bootstrap value only
+extends its exposure window.
 Set these variables:
 
 ```text
@@ -112,13 +188,206 @@ http://localhost:5173/api/auth/callback/google
 Then run:
 
 ```bash
-npm install
+npm ci
 npm run dev
 ```
 
 Frontend: `http://localhost:5173`
 
 Local API: `http://localhost:3001`
+
+### Tauri Desktop Connected
+
+The Builder and published Runtime can also run as one Tauri desktop
+application. The bundled React/Vite frontend remains compatible with the web
+deployment, while Tauri owns two narrow native transports:
+
+- authenticated API requests travel through a Rust HTTP client with an
+  in-memory cookie jar and CSRF forwarding;
+- Standard and Isaac stream tickets travel through a Rust WebSocket client,
+  then reach React over a Tauri channel.
+
+The desktop bridge accepts only `/api/*` and the shadow health endpoint. Stream
+connections must use the same host as the configured control plane and exactly
+`/runtime-stream` or `/isaac-stream`. HTTPS control planes require WSS. The
+server remains authoritative for authentication, roles, project assignment,
+engine selection, ticket validation, and Standard fallback.
+
+For local development, start the Express control plane separately, then launch
+the desktop shell:
+
+```powershell
+$env:SCAMATIC_DESKTOP_SERVER_ORIGIN = 'http://127.0.0.1:3001'
+npm run dev:server
+```
+
+```powershell
+$env:SCAMATIC_DESKTOP_SERVER_ORIGIN = 'http://127.0.0.1:3001'
+npm run desktop:dev
+```
+
+Build a release installer against a clean HTTPS origin:
+
+```powershell
+$env:SCAMATIC_DESKTOP_SERVER_ORIGIN = 'https://scada-dhany-wtp.vercel.app'
+npm run desktop:build
+```
+
+Desktop sessions intentionally stay in memory and therefore require a fresh
+sign-in after the app exits; tokens are not written to local storage. Password
+sign-in is supported in the first connected release. Google OAuth remains in
+the web edition until a verified desktop callback/deep-link flow is added.
+Caddy is unnecessary for the internal Tauri IPC path. A self-hosted live
+Runtime still needs its existing HTTPS/WSS edge because the desktop connects to
+the authoritative server.
+
+#### One-installer local desktop
+
+The Windows local flavor bundles the Tauri desktop, a production-only Node
+runtime, the Express server and connector worker, and the Isaac binary. Its
+per-machine NSIS installer registers **SCAMATIC Local Runtime** as a delayed
+automatic Windows Service. Express continues to supervise the connector worker
+and Isaac child process, while the service owns their complete process tree.
+Users therefore open only **SCAMATIC Builder Local**; no terminal or manual
+server start is required after installation or reboot.
+
+Build the local NSIS installer with:
+
+```powershell
+npm run desktop:build:local
+```
+
+The local build is compiled against `http://127.0.0.1:3001`. It does not need
+Caddy because the desktop-to-server path stays on loopback. The installer does
+not embed `.env`, MongoDB credentials, connector secrets, or the connector
+master key. Machine configuration is read from:
+
+```text
+C:\ProgramData\SCAMATIC\runtime.env
+```
+
+On the first interactive installation, a commissioning page first asks whether
+this is a **new deployment** or an **existing database**. A new deployment
+generates a 32-byte connector master key with the Windows cryptographic RNG. An
+existing database requires the original master key (64-character hex or
+32-byte base64); creating a replacement key would make its encrypted Data
+Source and Chart credentials unreadable. The page also asks for the MongoDB
+Atlas or transaction-capable replica-set URI, initial administrator email, a
+password of at least ten characters, and
+connector/archive hostname allowlists. It writes
+`C:\ProgramData\SCAMATIC\runtime.env`, and restricts the file to Local System,
+machine administrators, and read-only access for the dedicated
+`NT SERVICE\SCAMATICRuntime` virtual service account. The service does not run
+as Local System. Existing configuration is never replaced, so the page is
+skipped during upgrades and repairs.
+
+The packaged service accepts both `http://127.0.0.1:3001` and
+`http://localhost:3001` as local application origins. Plain HTTP remains
+restricted to these loopback aliases; non-local production origins must use
+HTTPS. Browser navigation through `localhost` is redirected to the canonical
+`127.0.0.1` origin so authentication cookies, local draft recovery, and UI
+preferences do not split into two browser stores.
+
+The installer also places a non-secret reference file at
+`C:\ProgramData\SCAMATIC\runtime.env.example`. A fresh silent or passive install
+must pre-provision the protected `runtime.env`; otherwise installation fails
+with a non-zero exit code rather than reporting success with an unusable service.
+After starting the service, the interactive
+installer waits up to 60 seconds for `GET /health/data-plane/ready`, then checks
+`GET /health/data-plane/key-compatibility`. That second probe unwraps only the
+encrypted data keys and returns counts/status; it never returns a MongoDB URI,
+ThingsBoard token, password, or plaintext secret. A failed
+readiness check reports the MongoDB/log recovery path but leaves the automatic
+service installed so it can recover when the dependency becomes available.
+An incompatible-key warning means the service itself is installed, but legacy
+Data Source/Chart credentials must not be used until the original key is
+restored or a controlled rotation is completed.
+Service output is appended to
+`C:\ProgramData\SCAMATIC\logs\runtime.log`. Upgrade and uninstall stop the
+entire runtime process tree first; uninstall deliberately preserves machine
+configuration and logs for recovery. Code-sign the application binaries and
+NSIS installer with the production publisher certificate before distribution.
+
+### Verify a Windows installation
+
+Run the read-only post-install verifier from an elevated PowerShell session:
+
+```powershell
+npm run desktop:verify-install
+```
+
+The verifier checks the Windows Service state, virtual service account,
+automatic delayed start and recovery policy, per-service SID, quoted executable
+command, runtime bundle, protected `runtime.env` ACL, runtime/log access, port
+ownership, loopback-only binding, data-plane readiness, master-key
+compatibility, and signatures for the Desktop, service, uninstaller, Isaac,
+packaged Node runtime, and an explicitly supplied NSIS installer. It does not
+start, stop, register, reconfigure, or delete the service, and it never prints
+values from `runtime.env`.
+
+An unsigned development build produces warnings. Make signature validation a
+release-blocking check for the installer, Desktop, service, uninstaller, Isaac,
+and packaged Node runtime. Pin project-owned artifacts to the production
+publisher certificate:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify-windows-install.ps1 `
+  -RequireSignature `
+  -InstallerPath '<PATH_TO_SIGNED_NSIS_INSTALLER>' `
+  -ExpectedPublisherThumbprint '<PRODUCTION_CERTIFICATE_THUMBPRINT>'
+```
+
+The supported release orchestrator signs the service and Isaac before staging,
+passes an ephemeral publisher configuration to Tauri for the Desktop and NSIS,
+then runs the artifact gate automatically:
+
+```powershell
+npm run desktop:release:windows -- `
+  -ExpectedPublisherThumbprint '<PRODUCTION_CERTIFICATE_THUMBPRINT>' `
+  -TimestampUrl '<CERTIFICATE_AUTHORITY_TIMESTAMP_URL>'
+```
+
+This gate requires a valid, timestamped production-publisher signature on the
+Desktop executable, runtime service, Isaac data-plane, and NSIS installer. It
+also requires a valid vendor signature on the packaged Node runtime. The
+post-install verifier above remains mandatory because it additionally verifies
+the generated uninstaller and the live Windows Service installation.
+
+Certificate storage rules, the protected GitHub Actions workflow, required
+secrets, checksum handling, and clean-VM acceptance steps are documented in
+[`docs/runbooks/windows-code-signing-release.md`](docs/runbooks/windows-code-signing-release.md).
+
+Use `-Json` for machine-readable output. The process exits with code `1` when
+any required check fails and `0` when required checks pass; warnings do not
+change the exit code. After the initial run succeeds, reboot Windows and run the
+same command again to validate real boot recovery.
+
+### Connector master-key rotation
+
+Do not replace `SCADA_CONNECTOR_MASTER_KEY` directly on a database that already
+contains encrypted secrets. Use the bundled rotation utility as an
+administrator. The complete operator procedure, recovery rules, troubleshooting,
+and audit checklist are maintained in
+[`docs/runbooks/windows-master-key-rotation.md`](docs/runbooks/windows-master-key-rotation.md).
+
+The abbreviated flow is:
+
+1. Back up the database and `C:\ProgramData\SCAMATIC\runtime.env`.
+2. Generate a new key with `scamatic-runtime-service.exe generate-master-key`.
+3. Set the new value as `SCADA_CONNECTOR_MASTER_KEY` and place the old value in
+   `SCADA_CONNECTOR_PREVIOUS_MASTER_KEYS`.
+4. Run a dry run while the service is available:
+   `resources\runtime\node.exe resources\runtime\scripts\rotate-connector-master-key.js`.
+5. Put every SCAMATIC deployment that writes to the same database in maintenance
+   mode, stop `SCAMATICRuntime`, then repeat the command with `--apply`. The
+   utility aborts before writing if any record cannot be unwrapped and rewraps
+   only data keys inside one conflict-guarded MongoDB transaction.
+6. Remove `SCADA_CONNECTOR_PREVIOUS_MASTER_KEYS`, start the service, and verify
+   `/health/data-plane/ready` plus `/health/data-plane/key-compatibility`.
+
+The `--apply` path refuses to run while the Windows Service is active. Keep the
+old key until post-rotation verification reports zero incompatible records and
+zero records requiring rotation.
 
 ### Self-hosted single-origin runtime
 
@@ -130,6 +399,7 @@ worker nor the Rust shadow data-plane needs a browser-facing port.
 ```powershell
 npm run build
 $env:APP_ORIGIN = 'http://127.0.0.1:3001'
+$env:SCAMATIC_BIND_HOST = '127.0.0.1'
 $env:CONNECTOR_PLATFORM_ENABLED = 'true'
 $env:CONNECTOR_EXECUTION_MODE = 'worker'
 $env:CONNECTOR_STREAM_MODE = 'embedded'
@@ -143,10 +413,15 @@ mode because Express already owns and supervises that child process. Existing
 deployments can retain `CONNECTOR_STREAM_MODE=standalone`, port `3002`, and an
 explicit `CONNECTOR_STREAM_PUBLIC_URL` while migrating.
 
-The Node worker remains the sole active connector telemetry and RPC executor.
+The Node server binds to `127.0.0.1` by default. Network exposure requires an
+explicit `SCAMATIC_BIND_HOST=0.0.0.0` or `::` and should be paired with a host
+firewall, TLS reverse proxy, and a reviewed `APP_ORIGIN` allowlist.
+
+The Node worker remains the sole connector telemetry source and RPC executor.
 The private IPC boundary can additionally mirror sanitized events into the
-Rust/Tokio/Axum shadow worker without changing command ownership or
-acknowledgment semantics.
+Rust/Tokio/Axum worker without changing command ownership or acknowledgment
+semantics. When the Isaac canary is enabled, Axum may fan those events out to
+authorized project sessions, but still owns no connector or command state.
 
 ### Rust shadow data-plane (Phase 2)
 
@@ -156,6 +431,58 @@ and Prometheus metrics on a dynamic `127.0.0.1` port. It never receives MongoDB
 or connector credentials, never contacts ThingsBoard, and never performs an
 actuation.
 
+The Axum telemetry hot path deserializes batches into bounded typed events,
+shares each immutable batch between WebSocket subscribers through `Arc`, and
+serializes only the events allowed for each runtime scope. This avoids cloning
+the complete JSON object graph per subscriber while preserving the existing
+NDJSON ingress and `tag-batch` WebSocket contracts. Run the repeatable local
+comparison with `npm run bench:isaac`; benchmark ratios are machine- and
+workload-specific and must not be treated as universal throughput claims.
+
+The private `/metrics` endpoint additionally reports telemetry ingress bytes,
+decode time, subscriber count, encoded bytes, encode time, lagged clients, and
+delivered events. These counters make production tuning evidence-based without
+including tag values or secret material.
+
+### Local RPC performance
+
+Desktop commands continue to enter through `127.0.0.1:3001`, remain durable and
+idempotent in MongoDB, and execute only in the managed Node connector worker.
+Authentication joins the live session, user, and workspace membership in one
+server-side MongoDB command instead of two network waves. For Operator requests,
+the project assignment lookup overlaps the project, runtime-session, and
+idempotency reads while preserving the same live authorization decision.
+Independent project/session reads used by status polling run concurrently. The
+worker also keeps a bounded, expiring LRU of immutable published versions so a
+repeated command does not reload the same schema on every dispatch batch.
+Worker authorization inserts the already-authorized command and its audit event
+in one MongoDB transaction, avoiding a separate requested-state write while
+preserving the fail-closed audit boundary.
+Simulation completion likewise stores its two audit records and one final
+command through two operations in one transaction instead of six sequential
+writes. Explicit boolean toggle intents also skip the legacy state-history read,
+which remains available for older clients that omit the target value. Runtime
+metrics now begin at the operator intent, so confirmation and
+bounded queue delay are visible separately from API and database time.
+Runtime command rate limits reserve small, bounded permit leases, so normal
+operator bursts do not require a control-database write for every press while
+the shared per-user/project ceiling remains enforced. Each lease is replenished
+asynchronously at a bounded low-water mark so a later press does not absorb the
+periodic reservation delay. Control Buttons retain at
+most one pending intent: toggle commands coalesce to the latest desired state,
+pulses retain one trailing edge, and device commands remain strictly serialized.
+Periodic worker reconciliation batch-loads environments, projects, versions,
+and drafts. Published `Smart` and `Always On` projects skip the active-session
+query because a session cannot change their lifecycle decision.
+
+Worker readiness at `/health/data-plane/ready` includes safe aggregate RPC
+diagnostics: queue pressure, version-cache hits/misses, terminal status counts,
+and bounded `p50`/`p95`/`p99` phase timings. Payload values, request IDs, JWTs,
+connector secrets, and tag identities are never included. Run the controlled
+round-trip comparison with `npm run bench:rpc`; it measures overlapped reads,
+cached reads, and the avoided authorization write using controlled MongoDB
+delays—not Internet or ThingsBoard latency.
+
 ```powershell
 npm run rust:test
 npm run rust:build
@@ -163,19 +490,82 @@ $env:SCADA_RUST_SHADOW_ENABLED = 'true'
 npm run start
 ```
 
-Development automatically discovers `data-plane-rs/target/release` and then
-`target/debug`. A packaged deployment can set `SCADA_RUST_SHADOW_BINARY` to an
+Development automatically discovers the Cargo workspace `target/release` and
+then `target/debug`. A packaged deployment can set `SCADA_RUST_SHADOW_BINARY` to an
 absolute prebuilt binary path, so the eventual installer will not require a
 Rust toolchain. Shadow readiness is available through Express at
 `GET /health/data-plane/shadow`; the response also reports the private Axum
 health URL and observation counters. Set `SCADA_RUST_SHADOW_ENABLED=false` to
 roll back instantly to the Phase 1 Node-only behavior.
 
+### Runtime worker modes
+
+Workspace administrators configure each project from
+**Settings → Runtime worker mode**. The Windows Service and its supervisor stay
+available in every mode; the setting controls only the project's configured
+datasource connections:
+
+- `smart` is the default. Published projects remain connected, active runtime
+  sessions remain connected, and an unpublished draft stays warm for 30 minutes
+  after its latest save;
+- `always-on` keeps every enabled and valid datasource connection for the
+  project alive in the background;
+- `on-demand` connects only while an unexpired operational runtime session
+  exists. Session creation wakes the worker immediately, while the periodic
+  reconciliation remains the durable fallback.
+
+Missing or invalid legacy values resolve to `smart`. Every change requires
+`workspace.manage`, is recorded as `project.runtime-worker-mode.updated`, and
+is committed in the same MongoDB transaction as its audit event. Production
+therefore requires MongoDB Atlas or a transaction-capable replica set; startup
+and readiness report `MONGO_TRANSACTIONS_REQUIRED` before an administrator can
+encounter a generic save failure. The change does not alter immutable published
+versions. Isaac enablement is independent
+and remains disabled by the packaged service configuration.
+
+### Runtime engine preference
+
+Projects can independently choose an operational runtime engine preference:
+`standard` or `isaac`. This is deliberately separate from the published
+`simulation`, `real`, and `monitor` safety profiles. Engine preference is
+project metadata, so changing it does not alter an immutable published screen
+or its checksum.
+
+Isaac now has an opt-in Axum WebSocket canary. It is selected only when all of
+these checks pass:
+
+- `SCADA_RUST_SHADOW_ENABLED=true` and `SCADA_ISAAC_CANARY_ENABLED=true`;
+- the project already carries explicitly provisioned canary eligibility;
+- the Rust worker reports that its gateway is ready;
+- `SCADA_ISAAC_STREAM_PUBLIC_URL` is a valid WebSocket URL (`wss:` is required
+  in production).
+
+For a local canary behind Vite, use `/isaac-stream` on the frontend origin and
+set `SCADA_ISAAC_STREAM_PUBLIC_URL=ws://localhost:5173/isaac-stream`. For the
+included Caddy edge on port `8088`, use
+`ws://localhost:8088/isaac-stream` locally or the corresponding public `wss:`
+URL in production. Axum itself remains bound to `127.0.0.1:3003`.
+
+Each Isaac ticket is single-use and engine-bound. Axum delegates ticket
+consumption and session authorization to a private loopback Node endpoint,
+then revalidates the revocable auth and runtime scope every five seconds by
+default. If eligibility or Axum connectivity fails, Runtime requests a fresh
+Standard session. This fallback changes only the stream transport: telemetry
+ingestion and every RPC continue to use the existing Node path.
+
+To stop the canary immediately, set `SCADA_ISAAC_CANARY_ENABLED=false` and
+restart Express. Project preferences can remain set to Isaac; the server will
+select Standard and return `ISAAC_UNAVAILABLE` until the canary is available.
+The canceled Builder rollout control is no longer exposed. Existing project
+eligibility metadata remains fail-safe behind the global flag and bounded
+session revalidation.
+
 ### Optional Caddy edge
 
-Caddy is no longer required for local or LAN use. It remains useful for public
-TLS and certificate management; the included `Caddyfile` simply forwards the
-single Express origin, including WebSocket upgrades:
+Caddy is not required for the Standard runtime. It remains useful for public
+TLS and for the Isaac canary: the included `Caddyfile` forwards only
+`/isaac-stream` to loopback Axum and sends every other route, including the
+Standard WebSocket, to Express:
 
 ```powershell
 caddy validate --config .\Caddyfile
@@ -265,16 +655,20 @@ npm run smoke:phase3 # requires the local API and configured MongoDB
 - `src/platform/RuntimeCanvas.jsx` — renderer shared by builder preview and runtime.
 - `src/runtime/RuntimeApp.jsx` — lightweight private runtime entry, scoped session, and command lifecycle.
 - `src/platform/useEditorHistory.js` — transaction-aware undo/redo state.
-- `api/projects.js` — project creation and listing.
-- `api/draft.js` — draft load/save with revision conflict detection.
-- `api/svg.js` — server-side SVG validation and asset persistence.
-- `api/publish.js` — transactional/idempotent validation and immutable snapshots.
-- `api/versions.js` — version history and restore-as-new-version.
-- `api/runtime.js` — private active-version runtime endpoint.
-- `api/runtime-session.js` — short-lived project/version-scoped runtime sessions.
-- `api/commands.js` — server-side allowlisted mock command gateway with replay protection.
-- `api/audit.js` — project audit query endpoint.
-- `api/members.js` — workspace users, roles, and project assignments.
+- `api/[route].js` — consolidated Vercel dispatcher for the API handlers.
+- `api/_handlers/projects.js` — project creation and listing.
+- `api/_handlers/draft.js` — draft load/save with revision conflict detection.
+- `api/_handlers/svg.js` — server-side SVG validation and asset persistence.
+- `api/_handlers/publish.js` — transactional/idempotent validation and immutable snapshots.
+- `api/_handlers/versions.js` — version history and restore-as-new-version.
+- `api/_handlers/runtime.js` — private active-version runtime endpoint.
+- `api/_handlers/runtime-session.js` — short-lived project/version-scoped runtime sessions.
+- `api/_handlers/commands.js` — server-side allowlisted command gateway with replay protection.
+- `api/_handlers/audit.js` — project audit query endpoint.
+- `api/_handlers/members.js` — workspace users, roles, and project assignments.
+- `api/_handlers/runtime-export.js` — package exports from a published runtime snapshot or a saved WinCC draft.
+- `api/_lib/wincc-export.js` — WinCC template manifest, script examples, and bundled graphics.
+- `hosted-runtime/` — exported runtime contract, provisioning, and Node/Vercel targets.
 - `api/_lib/auth.js` — opaque revocable HttpOnly sessions and CSRF protection.
 - `api/_lib/authorization.js` — centralized capability and project-scope resolver.
 - `api/_lib/chart-telemetry-store.js` — isolated MongoDB time-series history store.

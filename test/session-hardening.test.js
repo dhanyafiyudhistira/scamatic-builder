@@ -19,6 +19,11 @@ test('production origins fail closed while development retains local origins', (
     assert.equal(requireAllowedOrigin({ headers: {} }, res), false)
     assert.equal(status, 403)
 
+    process.env.APP_ORIGIN = 'http://127.0.0.1:3001,http://localhost:3001'
+    assert.deepEqual(allowedOrigins(), ['http://127.0.0.1:3001', 'http://localhost:3001'])
+    assert.equal(requireAllowedOrigin({ headers: { origin: 'http://localhost:3001' } }, res), true)
+    assert.equal(requireAllowedOrigin({ headers: { origin: 'http://localhost.attacker.example:3001' } }, res), false)
+
     delete process.env.NODE_ENV
     delete process.env.APP_ORIGIN
     assert.equal(allowedOrigins().includes('http://localhost:5173'), true)
@@ -66,6 +71,8 @@ test('runtime stream URLs cannot rely on Host headers or insecure production pro
     process.env.CONNECTOR_STREAM_MODE = 'embedded'
     process.env.APP_ORIGIN = 'https://scada.example'
     assert.equal(resolveRuntimeStreamUrl(), 'wss://scada.example/runtime-stream')
+    process.env.APP_ORIGIN = 'http://127.0.0.1:3001,http://localhost:3001'
+    assert.equal(resolveRuntimeStreamUrl(), 'ws://127.0.0.1:3001/runtime-stream')
     process.env.APP_ORIGIN = 'http://scada.example'
     assert.throws(() => resolveRuntimeStreamUrl(), /clean HTTP origin/)
 

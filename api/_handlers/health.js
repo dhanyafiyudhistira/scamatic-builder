@@ -11,10 +11,19 @@ export default async function handler(req, res) {
   if (!readiness) return res.status(200).json({ ok: true, status: 'alive', ts })
   const correlationId = requestId(req)
   try {
-    const mongo = await pingMongo()
-    return res.status(200).json({ ok: true, status: 'ready', ts, checks: { mongo: mongo.state }, correlationId })
-  } catch {
+    const mongo = await pingMongo({ requireTransactions: process.env.NODE_ENV === 'production' })
+    return res.status(200).json({ ok: true, status: 'ready', ts, checks: { mongo: mongo.state, transactions: mongo.transactions }, correlationId })
+  } catch (error) {
     const mongo = mongoConnectionStatus()
-    return res.status(503).json({ ok: false, status: 'not-ready', ts, checks: { mongo: mongo.state }, code: 'DATABASE_UNAVAILABLE', correlationId })
+    const transactionsRequired = error?.code === 'MONGO_TRANSACTIONS_REQUIRED'
+    return res.status(503).json({
+      ok: false,
+      status: 'not-ready',
+      ts,
+      checks: { mongo: mongo.state, transactions: transactionsRequired ? 'unsupported' : 'unknown' },
+      code: transactionsRequired ? error.code : 'DATABASE_UNAVAILABLE',
+      ...(transactionsRequired ? { error: error.message } : {}),
+      correlationId,
+    })
   }
 }

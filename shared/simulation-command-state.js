@@ -40,6 +40,27 @@ export function simulationCommandState(schema, commands = []) {
   return state
 }
 
+export function newestSimulationSample(snapshot, restored) {
+  if (!snapshot) return restored || null
+  if (!restored) return snapshot
+  return sampleTimestamp(restored) > sampleTimestamp(snapshot) ? restored : snapshot
+}
+
+export function reconcileSimulationControlState(schema, values = {}) {
+  const reconciled = { ...values }
+  for (const component of schema?.components || []) {
+    if (component?.type !== 'control-button' || (component.properties?.action || 'toggle-boolean') !== 'toggle-boolean') continue
+    const commandTagId = component.binding?.tagId
+    const feedbackTagId = component.properties?.feedbackTagId
+    if (!commandTagId || !feedbackTagId || !reconciled[feedbackTagId]) continue
+    // A write-only command tag is an intent channel, not an observed state.
+    // Mirror the readable feedback at bootstrap so the first toggle after a
+    // reload cannot repeat the already-visible device state.
+    reconciled[commandTagId] = { ...reconciled[feedbackTagId] }
+  }
+  return reconciled
+}
+
 export function previousSimulationCommandValue(schema, commands, component, tag) {
   return simulationCommandState(schema, commands).get(tag?.id)?.value ?? initialMockValue(tag)
 }
@@ -52,4 +73,14 @@ export function simulationCommandReadScope(schema, component, tag) {
     .map(item => item.id)
     .filter(Boolean)
   return { componentId: component.id, tagId: tag.id, resetComponentIds }
+}
+
+export function simulationCommandHistoryRequired(component, requestedValue) {
+  const action = component?.properties?.action || 'toggle-boolean'
+  return component?.type === 'control-button' && action === 'toggle-boolean' && requestedValue === undefined
+}
+
+function sampleTimestamp(sample) {
+  const parsed = new Date(sample?.timestamp ?? sample?.sourceTimestamp ?? 0).getTime()
+  return Number.isFinite(parsed) ? parsed : 0
 }

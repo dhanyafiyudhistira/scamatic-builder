@@ -149,16 +149,13 @@ export async function getPrincipal(req) {
   if (!token) return null
   await connectMongo()
   const now = new Date()
-  const session = await AuthSession.findOne({ _id: digest(token), revokedAt: null, expiresAt: { $gt: now } }).lean()
-  if (!session) return null
+  const context = await loadPrincipalContext({ sessionId: digest(token), now })
+  if (!context) return null
+  const { user, membership, ...session } = context
   if (!isAuthSessionRecordActive(session, now)) {
     await revokeSessionHierarchy([session._id], now)
     return null
   }
-  const [user, membership] = await Promise.all([
-    User.findOne({ _id: session.userId, status: 'active' }).lean(),
-    WorkspaceMember.findOne({ workspaceId: session.workspaceId, userId: session.userId, status: 'active' }).lean(),
-  ])
   if (!user || !membership || user.authVersion !== session.authVersion) {
     await revokeSessionHierarchy([session._id], now)
     return null
@@ -177,6 +174,62 @@ export async function getPrincipal(req) {
     csrfHash: session.csrfHash,
     capabilities: [],
   }
+}
+
+export async function loadPrincipalContext({
+  sessionId,
+  now = new Date(),
+  authSessions = AuthSession,
+  users = User,
+  workspaceMembers = WorkspaceMember,
+} = {}) {
+  if (!sessionId) return null
+  const records = await authSessions.aggregate([
+    { $match: { _id: String(sessionId), revokedAt: null, expiresAt: { $gt: now } } },
+    { $limit: 1 },
+    {
+      $lookup: {
+        from: users.collection.name,
+        let: { sessionUserId: '$userId' },
+        pipeline: [
+          { $match: { $expr: { $and: [{ $eq: ['$_id', '$$sessionUserId'] }, { $eq: ['$status', 'active'] }] } } },
+          { $limit: 1 },
+          { $project: { _id: 1, email: 1, displayName: 1, authVersion: 1 } },
+        ],
+        as: 'principalUsers',
+      },
+    },
+    {
+      $lookup: {
+        from: workspaceMembers.collection.name,
+        let: { sessionUserId: '$userId', sessionWorkspaceId: '$workspaceId' },
+        pipeline: [
+          {
+            $match: {
+              $expr: {
+                $and: [
+                  { $eq: ['$userId', '$$sessionUserId'] },
+                  { $eq: ['$workspaceId', '$$sessionWorkspaceId'] },
+                  { $eq: ['$status', 'active'] },
+                ],
+              },
+            },
+          },
+          { $limit: 1 },
+          { $project: { _id: 1, workspaceId: 1, userId: 1, role: 1, status: 1 } },
+        ],
+        as: 'principalMemberships',
+      },
+    },
+    {
+      $set: {
+        user: { $arrayElemAt: ['$principalUsers', 0] },
+        membership: { $arrayElemAt: ['$principalMemberships', 0] },
+      },
+    },
+    { $project: { principalUsers: 0, principalMemberships: 0 } },
+  ])
+  return records[0] || null
 }
 
 export async function requirePrincipal(req, res) {

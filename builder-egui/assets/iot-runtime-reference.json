@@ -1,0 +1,221 @@
+{
+  "sources": [
+    "src/platform/RuntimeCanvas.jsx",
+    "src/builder.css",
+    "shared/component-registry.js",
+    "shared/gauge.js"
+  ],
+  "matte": {
+    "matte": "#111a1d",
+    "matte-raised": "#182326",
+    "matte-line": "#405158",
+    "matte-muted": "#8da2aa"
+  },
+  "gauge": {
+    "startAngle": 150,
+    "sweepAngle": 240
+  },
+  "gaugeFixtures": [
+    {
+      "properties": {
+        "min": 0,
+        "max": 100,
+        "tickCount": 10
+      },
+      "ticks": [
+        {
+          "value": 0,
+          "ratio": 0,
+          "angle": 150,
+          "label": "0"
+        },
+        {
+          "value": 10,
+          "ratio": 0.1,
+          "angle": 174,
+          "label": "10"
+        },
+        {
+          "value": 20,
+          "ratio": 0.2,
+          "angle": 198,
+          "label": "20"
+        },
+        {
+          "value": 30,
+          "ratio": 0.3,
+          "angle": 222,
+          "label": "30"
+        },
+        {
+          "value": 40,
+          "ratio": 0.4,
+          "angle": 246,
+          "label": "40"
+        },
+        {
+          "value": 50,
+          "ratio": 0.5,
+          "angle": 270,
+          "label": "50"
+        },
+        {
+          "value": 60,
+          "ratio": 0.6,
+          "angle": 294,
+          "label": "60"
+        },
+        {
+          "value": 70,
+          "ratio": 0.7,
+          "angle": 318,
+          "label": "70"
+        },
+        {
+          "value": 80,
+          "ratio": 0.8,
+          "angle": 342,
+          "label": "80"
+        },
+        {
+          "value": 90,
+          "ratio": 0.9,
+          "angle": 366,
+          "label": "90"
+        },
+        {
+          "value": 100,
+          "ratio": 1,
+          "angle": 390,
+          "label": "100"
+        }
+      ]
+    },
+    {
+      "properties": {
+        "min": -10,
+        "max": 10,
+        "tickCount": 4
+      },
+      "ticks": [
+        {
+          "value": -10,
+          "ratio": 0,
+          "angle": 150,
+          "label": "-10"
+        },
+        {
+          "value": -5,
+          "ratio": 0.25,
+          "angle": 210,
+          "label": "-5"
+        },
+        {
+          "value": 0,
+          "ratio": 0.5,
+          "angle": 270,
+          "label": "0"
+        },
+        {
+          "value": 5,
+          "ratio": 0.75,
+          "angle": 330,
+          "label": "5"
+        },
+        {
+          "value": 10,
+          "ratio": 1,
+          "angle": 390,
+          "label": "10"
+        }
+      ]
+    },
+    {
+      "properties": {
+        "min": 0,
+        "max": 1,
+        "tickCount": 12
+      },
+      "ticks": [
+        {
+          "value": 0,
+          "ratio": 0,
+          "angle": 150,
+          "label": "0"
+        },
+        {
+          "value": 0.08333333333333333,
+          "ratio": 0.08333333333333333,
+          "angle": 170,
+          "label": "0.08"
+        },
+        {
+          "value": 0.16666666666666666,
+          "ratio": 0.16666666666666666,
+          "angle": 190,
+          "label": "0.17"
+        },
+        {
+          "value": 0.25,
+          "ratio": 0.25,
+          "angle": 210,
+          "label": "0.25"
+        },
+        {
+          "value": 0.3333333333333333,
+          "ratio": 0.3333333333333333,
+          "angle": 230,
+          "label": "0.33"
+        },
+        {
+          "value": 0.4166666666666667,
+          "ratio": 0.4166666666666667,
+          "angle": 250,
+          "label": "0.42"
+        },
+        {
+          "value": 0.5,
+          "ratio": 0.5,
+          "angle": 270,
+          "label": "0.5"
+        },
+        {
+          "value": 0.5833333333333334,
+          "ratio": 0.5833333333333334,
+          "angle": 290,
+          "label": "0.58"
+        },
+        {
+          "value": 0.6666666666666666,
+          "ratio": 0.6666666666666666,
+          "angle": 310,
+          "label": "0.67"
+        },
+        {
+          "value": 0.75,
+          "ratio": 0.75,
+          "angle": 330,
+          "label": "0.75"
+        },
+        {
+          "value": 0.8333333333333334,
+          "ratio": 0.8333333333333334,
+          "angle": 350,
+          "label": "0.83"
+        },
+        {
+          "value": 0.9166666666666666,
+          "ratio": 0.9166666666666666,
+          "angle": 370,
+          "label": "0.92"
+        },
+        {
+          "value": 1,
+          "ratio": 1,
+          "angle": 390,
+          "label": "1"
+        }
+      ]
+    }
+  ]
+}

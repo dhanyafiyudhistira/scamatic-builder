@@ -2,6 +2,7 @@ import { retryStartup } from './connectors/startup-retry.js'
 
 export async function warmApiMongo({
   connect,
+  validate = null,
   shouldRetry,
   env = process.env,
   sleep,
@@ -15,7 +16,9 @@ export async function warmApiMongo({
     const connection = await retryStartup(async attempt => {
       attempts = attempt
       onState({ phase: 'connecting-mongodb', attempt })
-      return connect()
+      const connection = await connect()
+      if (validate) await validate(connection)
+      return connection
     }, {
       ...config,
       shouldRetry,
